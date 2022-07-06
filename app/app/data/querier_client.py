@@ -14,12 +14,10 @@ log = logger.getLogger(__name__)
 CONTROLLER_STATE_EXCEPTION = 4
 NODE_TYPE_REGION_MASTER = 1
 
-class Query(object):
 
-    def __init__(
-        self, query_uuid, region, host, database, sql, datasource, query_id,
-        debug
-    ):
+class Query(object):
+    def __init__(self, query_uuid, region, host, database, sql, datasource,
+                 query_id, debug):
         self.query_uuid = query_uuid
         self.query_id = query_id
         self.region = region
@@ -49,9 +47,10 @@ class Query(object):
         if self.datasource:
             data['datasource'] = self.datasource
         async with aiohttp.ClientSession() as session:
-            async with getattr(session, 'post')(
-                url, data=data, timeout=config.querier_timeout
-            ) as r:
+            async with getattr(session,
+                               'post')(url,
+                                       data=data,
+                                       timeout=config.querier_timeout) as r:
                 response = await r.read()
                 response = json.loads(response)
                 status_code = r.status
@@ -64,8 +63,7 @@ class Query(object):
             result_dict = response.get('result')
             result_df = None
             if result_dict and result_dict.get('values') and result_dict.get(
-                'columns'
-            ):
+                    'columns'):
                 result_df = self.to_dataframe(result_dict)
                 if self.region is not None:
                     result_df['_tsdb_region_name'] = self.region
@@ -88,11 +86,12 @@ class Query(object):
 
 
 class Querier(object):
-
-    def __init__(
-        self, callback=lambda x: x, headers=None, query_id=None,
-        to_dataframe=False, debug=False
-    ):
+    def __init__(self,
+                 callback=lambda x: x,
+                 headers=None,
+                 query_id=None,
+                 to_dataframe=False,
+                 debug=False):
         self.status = 200
         self.query_uuids = dict()
         self.query_id = query_id
@@ -112,9 +111,8 @@ class Querier(object):
             for callback in self.callback:
                 result = callback(result)
             if not self.to_dataframe:
-                json_result = result.to_json(
-                    orient='records', default_handler=str
-                )
+                json_result = result.to_json(orient='records',
+                                             default_handler=str)
                 results = json.loads(json_result)
             else:
                 results = result
@@ -129,9 +127,11 @@ class Querier(object):
             "description": self.description
         }
 
-    async def exec_all_clusters(
-        self, database, sql, region_name=None, datasource=None
-    ):
+    async def exec_all_clusters(self,
+                                database,
+                                sql,
+                                region_name=None,
+                                datasource=None):
         self.sql = sql
         total_start_time = time.time()
 
@@ -154,11 +154,8 @@ class Querier(object):
                 continue
             query_uuid = str(uuid.uuid4())
             querys.append(
-                Query(
-                    query_uuid, name, host, database, sql, datasource,
-                    self.query_id, self.debug
-                )
-            )
+                Query(query_uuid, name, host, database, sql, datasource,
+                      self.query_id, self.debug))
         tasks = []
         for query in querys:
             if query.host:
@@ -184,6 +181,7 @@ class Querier(object):
 
 QUERIERS = {}
 
+
 async def get_queriers():
     global QUERIERS
     if not QUERIERS:
@@ -192,12 +190,12 @@ async def get_queriers():
     if QUERIERS["queriers"] and (time.time() - QUERIERS.get("time", 0) < 120):
         return QUERIERS["queriers"]
     res, code = await utils.curl_perform(
-        'get', f"http://{config.controller_server}:{config.controller_port}" + f'/v1/controllers/'
-    )
+        'get', f"http://{config.controller_server}:{config.controller_port}" +
+        f'/v1/controllers/')
     if code == 200 and res['DATA']:
         queriers = dict()
         for item in res['DATA']:
-            if not item.get('REGION_NAME'):
+            if item.get('REGION_NAME', None) is None:
                 log.warning(f"Get REGION_NAME Exception: {item}")
                 continue
             if item['STATE'] == CONTROLLER_STATE_EXCEPTION:
