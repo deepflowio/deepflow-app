@@ -682,11 +682,13 @@ class Service:
                     "span_id"]:
                 if direct_flow["tap_side"] == TAP_SIDE_CLIENT_PROCESS:
                     _set_parent(direct_flow, flow)
-                    direct_flow["parent_span_id"] = flow["parent_span_id"]
+                    if flow.get("parent_span_id"):
+                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
                 else:
                     _set_parent(flow, direct_flow)
-                    direct_flow["parent_span_id"] = flow["parent_span_id"]
+                    if flow.get("parent_span_id"):
+                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
@@ -1094,7 +1096,7 @@ def parent_fill(services, app_flows):
             server_process_parent_span_id = services[i].direct_flows[0].get(
                 "parent_span_id", None)
             # s-p没有c-app的parent
-            if server_process_parent_span_id is None:
+            if server_process_parent_span_id is None or server_process_parent_span_id == '':
                 continue
             # s-p有网络span && 网络span第一条没有parent
             if services[i].traces_of_direct_flows[0] and services[
@@ -1228,11 +1230,11 @@ def format(services: list, unattached_flows: list,
                 "duration": 0,
             }
         else:
-            for key in ['service_uname']:
-                if metrics_map[service_uid].get(key):
-                    continue
-                elif getattr(service, key):
-                    metrics_map[service_uid][key] = getattr(service, key)
+            if metrics_map[service_uid].get('service_uname'):
+                continue
+            elif getattr(service, 'resource_gl2'):
+                metrics_map[service_uid]['service_uname'] = getattr(
+                    service, 'resource_gl2')
         for index, flow in enumerate(service.direct_flows):
             metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
