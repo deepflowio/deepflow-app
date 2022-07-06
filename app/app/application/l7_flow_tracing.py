@@ -682,11 +682,13 @@ class Service:
                     "span_id"]:
                 if direct_flow["tap_side"] == TAP_SIDE_CLIENT_PROCESS:
                     _set_parent(direct_flow, flow)
-                    direct_flow["parent_span_id"] = flow["parent_span_id"]
+                    if flow.get("parent_span_id"):
+                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
                 else:
                     _set_parent(flow, direct_flow)
-                    direct_flow["parent_span_id"] = flow["parent_span_id"]
+                    if flow.get("parent_span_id"):
+                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
