@@ -198,7 +198,7 @@ class L7FlowTracing(Base):
             # 新的系统调用追踪信息
             new_syscall_metas = set()
             for index in range(len(dataframe_flowmetas.index)):
-                if dataframe_flowmetas['syscall_trace_id_request'][index] > 0 and \
+                if dataframe_flowmetas['syscall_trace_id_request'][index] > 0 or \
                     dataframe_flowmetas['syscall_trace_id_response'][index] > 0:
                     new_syscall_metas.add((
                         dataframe_flowmetas['vtap_id'][index],
