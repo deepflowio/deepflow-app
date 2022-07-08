@@ -20,6 +20,7 @@ TAP_SIDE_CLIENT_PROCESS = 'c-p'
 TAP_SIDE_SERVER_PROCESS = 's-p'
 TAP_SIDE_CLIENT_APP = 'c-app'
 TAP_SIDE_SERVER_APP = 's-app'
+TAP_SIDE_APP = 'app'
 RELATED_TYPE_BASE = 'base'
 RELATED_TYPE_NETWORK = 'network'
 RELATED_TYPE_APP = 'app'
@@ -69,6 +70,7 @@ RETURN_FIELDS = list(
         "subnet_1",
         "ip_1",
         "service_name",
+        "service_instance_id",
         "resource_gl0_type_1",
         "resource_gl0_id_1",
         "resource_gl0_1",
@@ -214,7 +216,7 @@ class L7FlowTracing(Base):
             for index in range(len(dataframe_flowmetas.index)):
                 if dataframe_flowmetas['tap_side'][index] not in [
                         TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
-                        TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP
+                        TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
                 ] or not dataframe_flowmetas['span_id'][index]:
                     continue
                 if type(dataframe_flowmetas['span_id'][index]) == str and \
@@ -675,7 +677,9 @@ class Service:
         self.traces_of_direct_flows.append([])
 
     def attach_app_flow(self, flow: dict):
-        if flow["tap_side"] not in [TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP]:
+        if flow["tap_side"] not in [
+                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+        ]:
             return
         for direct_flow in self.direct_flows:
             if direct_flow["span_id"] and direct_flow["span_id"] == flow[
@@ -695,7 +699,7 @@ class Service:
         """将一个flow附加到direct_flow上，附加的前提是这两个flow拥有相同的网络流量追踪信息"""
         if flow["tap_side"] in [
                 TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
-                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP
+                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
         ]:
             return
         for index in range(len(self.direct_flows)):
@@ -1006,7 +1010,9 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 将应用span挂到Service上
     app_flows = []
     for flow in flows:
-        if flow['tap_side'] in [TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP]:
+        if flow['tap_side'] in [
+                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+        ]:
             app_flows.append(flow)
             continue
         for service_key, service in service_map.items():
@@ -1350,6 +1356,10 @@ def _get_flow_dict(flow: DataFrame):
         flow.get("service_uid", None),
         "service_uname":
         flow.get("service_uname", None),
+        "service_name":
+        flow.get("service_name", None),
+        "service_instance_id":
+        flow.get("service_instance_id", None),
         "tap_port":
         flow["tap_port"],
         "tap_port_name":
