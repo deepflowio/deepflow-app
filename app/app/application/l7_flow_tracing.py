@@ -8,6 +8,7 @@ from data.querier_client import Querier
 from config import config
 from .base import Base
 from common import const
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 NET_SPAN_TAP_SIDE_PRIORITY = {
     item: i
@@ -27,6 +28,12 @@ RELATED_TYPE_APP = 'app'
 RELATED_TYPE_SYSCALL = 'syscall'
 RELATED_TYPE_TRACE_ID = 'traceid'
 RELATED_TYPE_X_REQUEST_ID = 'x-request-id'
+TAP_SIDE_SPAN_ID_RANKS = {
+    TAP_SIDE_CLIENT_APP: 1,
+    TAP_SIDE_SERVER_APP: 2,
+    TAP_SIDE_CLIENT_PROCESS: 3,
+    TAP_SIDE_SERVER_PROCESS: 4,
+}
 RETURN_FIELDS = list(
     set([
         # 追踪Meta信息
@@ -572,8 +579,12 @@ class Service:
                 _set_parent(self.direct_flows[0],
                             self.traces_of_direct_flows[0][-1])
                 if self.traces_of_direct_flows[0][0].get('parent_id', -1) < 0:
-                    # s-p的第一个trace的parent设置为-1
-                    self.traces_of_direct_flows[0][0]['parent_id'] = -1
+                    if self.direct_flows[0].get('parent_app_flow', None):
+                        _set_parent(self.traces_of_direct_flows[0][0],
+                                    self.direct_flows[0]['parent_app_flow'])
+                    else:
+                        # s-p的第一个trace的parent设置为-1
+                        self.traces_of_direct_flows[0][0]['parent_id'] = -1
                 for i, trace in enumerate(self.traces_of_direct_flows[0][1:]):
                     # 除了第一个外的每个trace的parent都是前一个trace
                     _set_parent(trace,
@@ -581,13 +592,21 @@ class Service:
             else:
                 # s-p没有trace则parent设为-1
                 if self.direct_flows[0].get('parent_id', -1) < 0:
-                    self.direct_flows[0]['parent_id'] = -1
+                    if self.direct_flows[0].get('parent_app_flow', None):
+                        _set_parent(self.direct_flows[0],
+                                    self.direct_flows[0]['parent_app_flow'])
+                    else:
+                        self.direct_flows[0]['parent_id'] = -1
         else:
             # 只有c-p
             for i, direct_flow in enumerate(self.direct_flows):
                 # 所有c-p的parent设为-1
                 if not direct_flow.get('parent_id'):
-                    self.direct_flows[i]['parent_id'] = -1
+                    if direct_flow.get('parent_app_flow', None):
+                        _set_parent(self.direct_flows[i],
+                                    self.direct_flows[i]['parent_app_flow'])
+                    else:
+                        self.direct_flows[i]['parent_id'] = -1
                 for j, trace in enumerate(self.traces_of_direct_flows[i]):
                     if j == 0:
                         # 第一条trace的parent为c-p
@@ -682,17 +701,18 @@ class Service:
         ]:
             return
         for direct_flow in self.direct_flows:
-            if direct_flow["span_id"] and direct_flow["span_id"] == flow[
-                    "span_id"]:
-                if direct_flow["tap_side"] == TAP_SIDE_CLIENT_PROCESS:
-                    _set_parent(direct_flow, flow)
-                    if flow.get("parent_span_id"):
-                        direct_flow["parent_span_id"] = flow["parent_span_id"]
-                    flow["service"] = self
-                else:
+            # span_id相同 x-p的parent一定是x-app
+            if direct_flow["span_id"]:
+                if direct_flow["span_id"] == flow["span_id"]:
+                    direct_flow["parent_app_flow"] = flow
+                    # 只有c-p和x-app的span_id相同时，属于同一个service
+                    if direct_flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
+                        flow["service"] = self
+                # x-app的parent是x-p时，一定属于同一个service
+                elif flow['parent_span_id'] == direct_flow[
+                        'span_id'] and direct_flow[
+                            'tap_side'] == TAP_SIDE_SERVER_PROCESS:
                     _set_parent(flow, direct_flow)
-                    if flow.get("parent_span_id"):
-                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
@@ -1077,12 +1097,18 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 def app_flow_sort(array: list):
     array.reverse()
     for flow_0 in array:
+        if flow_0.get('parent_id', -1) >= 0:
+            continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
                 _set_parent(flow_0, flow_1)
-                if flow_0.get("service",
-                              None) and not flow_1.get("service", None):
-                    flow_1["service"] = flow_0["service"]
+                if flow_0["service_name"] == flow_1["service_name"]:
+                    if flow_0.get("service",
+                                  None) and not flow_1.get("service", None):
+                        flow_1["service"] = flow_0["service"]
+                    elif not flow_0.get("service", None) and flow_1.get(
+                            "service", None):
+                        flow_0["service"] = flow_1["service"]
                 break
     for flow in array:
         if flow.get("parent_id", -1) < 0 and flow.get("service"):
@@ -1227,6 +1253,7 @@ def format(services: list, unattached_flows: list,
     }
     metrics_map = {}
     tracing = set()
+    id_map = {-1: ""}
     for service in services:
         service_uid = f"{service.resource_gl2_id}-"
         if service_uid not in metrics_map:
@@ -1245,12 +1272,17 @@ def format(services: list, unattached_flows: list,
             metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
             flow['service_uname'] = service.resource_gl2
+            direct_flow_span_id = generate_span_id(
+            ) if not flow.get('span_id') else flow['span_id']
+            id_map[flow['_uid']] = f"{direct_flow_span_id}({flow['tap_side']})"
             if flow['_uid'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
             for indirect_flow in service.traces_of_direct_flows[index]:
                 if set(indirect_flow["_id"]) == set(flow["_id"]):
                     continue
+                id_map[indirect_flow[
+                    '_uid']] = f"{direct_flow_span_id}(net-{indirect_flow['tap_side']})"
                 if indirect_flow["start_time_us"] < flow["start_time_us"]:
                     flow["start_time_us"] = indirect_flow["start_time_us"]
                 if indirect_flow["end_time_us"] > flow["end_time_us"]:
@@ -1277,7 +1309,11 @@ def format(services: list, unattached_flows: list,
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
+        id_map[flow["_uid"]] = flow["span_id"]
         response["tracing"].append(_get_flow_dict(flow))
+    for trace in response["tracing"]:
+        trace["metaflow_span_id"] = id_map[trace["id"]]
+        trace["metaflow_parent_span_id"] = id_map[trace["parent_id"]]
     response["services"] = _call_metrics(metrics_map)
     return response
 
@@ -1308,6 +1344,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["end_time_us"],
         "duration":
         flow["end_time_us"] - flow["start_time_us"],
+        "selftime":
+        flow["duration"],
         "tap_side":
         flow["tap_side"],
         "l7_protocol":
@@ -1388,3 +1426,7 @@ def _set_parent(flow, flow_parent):
                                     flow['start_time_us'])
     else:
         flow_parent['duration'] = 0
+
+
+def generate_span_id():
+    return hex(RandomIdGenerator().generate_span_id())
