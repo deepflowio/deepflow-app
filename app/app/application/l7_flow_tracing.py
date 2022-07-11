@@ -27,6 +27,12 @@ RELATED_TYPE_APP = 'app'
 RELATED_TYPE_SYSCALL = 'syscall'
 RELATED_TYPE_TRACE_ID = 'traceid'
 RELATED_TYPE_X_REQUEST_ID = 'x-request-id'
+TAP_SIDE_SPAN_ID_RANKS = {
+    TAP_SIDE_CLIENT_APP: 1,
+    TAP_SIDE_SERVER_APP: 2,
+    TAP_SIDE_CLIENT_PROCESS: 3,
+    TAP_SIDE_SERVER_PROCESS: 4,
+}
 RETURN_FIELDS = list(
     set([
         # 追踪Meta信息
@@ -572,8 +578,12 @@ class Service:
                 _set_parent(self.direct_flows[0],
                             self.traces_of_direct_flows[0][-1])
                 if self.traces_of_direct_flows[0][0].get('parent_id', -1) < 0:
-                    # s-p的第一个trace的parent设置为-1
-                    self.traces_of_direct_flows[0][0]['parent_id'] = -1
+                    if self.direct_flows[0].get('parent_app_flow', None):
+                        _set_parent(self.traces_of_direct_flows[0][0],
+                                    self.direct_flows[0]['parent_app_flow'])
+                    else:
+                        # s-p的第一个trace的parent设置为-1
+                        self.traces_of_direct_flows[0][0]['parent_id'] = -1
                 for i, trace in enumerate(self.traces_of_direct_flows[0][1:]):
                     # 除了第一个外的每个trace的parent都是前一个trace
                     _set_parent(trace,
@@ -581,13 +591,21 @@ class Service:
             else:
                 # s-p没有trace则parent设为-1
                 if self.direct_flows[0].get('parent_id', -1) < 0:
-                    self.direct_flows[0]['parent_id'] = -1
+                    if self.direct_flows[0].get('parent_app_flow', None):
+                        _set_parent(self.direct_flows[0],
+                                    self.direct_flows[0]['parent_app_flow'])
+                    else:
+                        self.direct_flows[0]['parent_id'] = -1
         else:
             # 只有c-p
             for i, direct_flow in enumerate(self.direct_flows):
                 # 所有c-p的parent设为-1
                 if not direct_flow.get('parent_id'):
-                    self.direct_flows[i]['parent_id'] = -1
+                    if direct_flow.get('parent_app_flow', None):
+                        _set_parent(self.direct_flows[i],
+                                    self.direct_flows[i]['parent_app_flow'])
+                    else:
+                        self.direct_flows[i]['parent_id'] = -1
                 for j, trace in enumerate(self.traces_of_direct_flows[i]):
                     if j == 0:
                         # 第一条trace的parent为c-p
@@ -682,17 +700,18 @@ class Service:
         ]:
             return
         for direct_flow in self.direct_flows:
-            if direct_flow["span_id"] and direct_flow["span_id"] == flow[
-                    "span_id"]:
-                if direct_flow["tap_side"] == TAP_SIDE_CLIENT_PROCESS:
-                    _set_parent(direct_flow, flow)
-                    if flow.get("parent_span_id"):
-                        direct_flow["parent_span_id"] = flow["parent_span_id"]
-                    flow["service"] = self
-                else:
+            # span_id相同 x-p的parent一定是x-app
+            if direct_flow["span_id"]:
+                if direct_flow["span_id"] == flow["span_id"]:
+                    direct_flow["parent_app_flow"] = flow
+                    # 只有c-p和x-app的span_id相同时，属于同一个service
+                    if direct_flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
+                        flow["service"] = self
+                # x-app的parent是x-p时，一定属于同一个service
+                elif flow['parent_span_id'] == direct_flow[
+                        'span_id'] and direct_flow[
+                            'tap_side'] == TAP_SIDE_SERVER_PROCESS:
                     _set_parent(flow, direct_flow)
-                    if flow.get("parent_span_id"):
-                        direct_flow["parent_span_id"] = flow["parent_span_id"]
                     flow["service"] = self
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
@@ -1077,12 +1096,18 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 def app_flow_sort(array: list):
     array.reverse()
     for flow_0 in array:
+        if flow_0.get('parent_id', -1) >= 0:
+            continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
                 _set_parent(flow_0, flow_1)
-                if flow_0.get("service",
-                              None) and not flow_1.get("service", None):
-                    flow_1["service"] = flow_0["service"]
+                if flow_0["service_name"] == flow_1["service_name"]:
+                    if flow_0.get("service",
+                                  None) and not flow_1.get("service", None):
+                        flow_1["service"] = flow_0["service"]
+                    elif not flow_0.get("service", None) and flow_1.get(
+                            "service", None):
+                        flow_0["service"] = flow_1["service"]
                 break
     for flow in array:
         if flow.get("parent_id", -1) < 0 and flow.get("service"):
@@ -1308,6 +1333,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["end_time_us"],
         "duration":
         flow["end_time_us"] - flow["start_time_us"],
+        "selftime":
+        flow["duration"],
         "tap_side":
         flow["tap_side"],
         "l7_protocol":
