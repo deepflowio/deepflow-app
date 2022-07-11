@@ -1125,13 +1125,13 @@ def parent_sort(array: list):
                             j].incoming_flow_uids:
                         # 去重，去掉s-p中重复的，因为service内部已经进行过parent关联，因此当网络span有交叠时无需关联service
                         dedup_indexs = []
-                        for i, flow in enumerate(
+                        for index, flow in enumerate(
                                 array[j].traces_of_direct_flows[0]):
                             if flow['_uid'] == _uid:
-                                dedup_indexs.append(i)
+                                dedup_indexs.append(index)
                         dedup_indexs.reverse()
-                        for i in dedup_indexs:
-                            array[j].traces_of_direct_flows[0].pop(i)
+                        for index in dedup_indexs:
+                            array[j].traces_of_direct_flows[0].pop(index)
                 elif len(array[i].outgoing_flow_process_resp_tcp_seqs
                          & array[j].incoming_flow_process_resp_tcp_seqs) > 0:
                     for resp_tcp_seq in array[
@@ -1237,7 +1237,7 @@ def format(services: list, unattached_flows: list,
             }
         else:
             if metrics_map[service_uid].get('service_uname'):
-                continue
+                pass
             elif getattr(service, 'resource_gl2'):
                 metrics_map[service_uid]['service_uname'] = getattr(
                     service, 'resource_gl2')
