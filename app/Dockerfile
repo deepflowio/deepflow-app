@@ -29,7 +29,8 @@ RUN pip install --user  --disable-pip-version-check \
          pandas==1.3.3 pycparser==2.21 PyPika==0.47.7 python-dateutil==2.8.1 \
          pytz==2021.1 PyYAML==3.13 requests==2.22.0 sanic==18.12.0 schematics==2.1.0 setuptools==56.0.0 simplejson==3.5.3 \
          six==1.15.0 typing-extensions==3.10.0.2 tzlocal==2.1 \
-         ujson==1.35 urllib3==1.25.11 uvloop==0.14.0 websockets==6.0 Werkzeug==1.0.1 yarl==1.3.0
+         ujson==1.35 urllib3==1.25.11 uvloop==0.14.0 websockets==6.0 Werkzeug==1.0.1 yarl==1.3.0 \
+         opentelemetry-sdk==1.11.1
 
 FROM python:3.8-slim-buster AS runner
 COPY --from=builder-custom /root/.local /usr/local

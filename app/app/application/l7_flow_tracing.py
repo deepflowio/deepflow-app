@@ -8,6 +8,7 @@ from data.querier_client import Querier
 from config import config
 from .base import Base
 from common import const
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 NET_SPAN_TAP_SIDE_PRIORITY = {
     item: i
@@ -1252,6 +1253,7 @@ def format(services: list, unattached_flows: list,
     }
     metrics_map = {}
     tracing = set()
+    id_map = {}
     for service in services:
         service_uid = f"{service.resource_gl2_id}-"
         if service_uid not in metrics_map:
@@ -1270,12 +1272,17 @@ def format(services: list, unattached_flows: list,
             metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
             flow['service_uname'] = service.resource_gl2
+            direct_flow_span_id = generate_span_id(
+            ) if not flow.get('span_id') else flow['span_id']
+            id_map[flow['_uid']] = f"{direct_flow_span_id}({flow['tap_side']})"
             if flow['_uid'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
             for indirect_flow in service.traces_of_direct_flows[index]:
                 if set(indirect_flow["_id"]) == set(flow["_id"]):
                     continue
+                id_map[indirect_flow[
+                    '_uid']] = f"{direct_flow_span_id}(net-{indirect_flow['tap_side']})"
                 if indirect_flow["start_time_us"] < flow["start_time_us"]:
                     flow["start_time_us"] = indirect_flow["start_time_us"]
                 if indirect_flow["end_time_us"] > flow["end_time_us"]:
@@ -1302,7 +1309,11 @@ def format(services: list, unattached_flows: list,
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
+        id_map[flow["_uid"]] = flow["span_id"]
         response["tracing"].append(_get_flow_dict(flow))
+    for trace in response["tracing"]:
+        trace["metaflow_span_id"] = id_map[trace["id"]]
+        trace["metaflow_parnet_span_id"] = id_map[trace["parent_id"]]
     response["services"] = _call_metrics(metrics_map)
     return response
 
@@ -1415,3 +1426,7 @@ def _set_parent(flow, flow_parent):
                                     flow['start_time_us'])
     else:
         flow_parent['duration'] = 0
+
+
+def generate_span_id():
+    return hex(RandomIdGenerator().generate_span_id())
