@@ -579,12 +579,8 @@ class Service:
                 _set_parent(self.direct_flows[0],
                             self.traces_of_direct_flows[0][-1])
                 if self.traces_of_direct_flows[0][0].get('parent_id', -1) < 0:
-                    if self.direct_flows[0].get('parent_app_flow', None):
-                        _set_parent(self.traces_of_direct_flows[0][0],
-                                    self.direct_flows[0]['parent_app_flow'])
-                    else:
-                        # s-p的第一个trace的parent设置为-1
-                        self.traces_of_direct_flows[0][0]['parent_id'] = -1
+                    # s-p的第一个trace的parent设置为-1
+                    self.traces_of_direct_flows[0][0]['parent_id'] = -1
                 for i, trace in enumerate(self.traces_of_direct_flows[0][1:]):
                     # 除了第一个外的每个trace的parent都是前一个trace
                     _set_parent(trace,
@@ -592,11 +588,7 @@ class Service:
             else:
                 # s-p没有trace则parent设为-1
                 if self.direct_flows[0].get('parent_id', -1) < 0:
-                    if self.direct_flows[0].get('parent_app_flow', None):
-                        _set_parent(self.direct_flows[0],
-                                    self.direct_flows[0]['parent_app_flow'])
-                    else:
-                        self.direct_flows[0]['parent_id'] = -1
+                    self.direct_flows[0]['parent_id'] = -1
         else:
             # 只有c-p
             for i, direct_flow in enumerate(self.direct_flows):
@@ -635,26 +627,29 @@ class Service:
             sorted_traces = sorted(
                 sorted_traces,
                 key=lambda x: const.TAP_SIDE_RANKS.get(x['tap_side']))
-            for trace in local_rest_traces:
-                vtap_index = -1
-                for i, sorted_trace in enumerate(sorted_traces):
-                    if vtap_index > 0 and sorted_trace['vtap_id'] != trace[
-                            'vtap_id']:
-                        break
-                    if sorted_trace['vtap_id'] == trace['vtap_id']:
-                        if sorted_trace['start_time_us'] < trace[
-                                'start_time_us']:
-                            vtap_index = i + 1
-                        elif vtap_index == -1:
-                            vtap_index = i
-                if vtap_index >= 0:
-                    sorted_traces.insert(vtap_index, trace)
-                else:
+            if not sorted_traces:
+                sorted_traces += local_rest_traces
+            else:
+                for trace in local_rest_traces:
+                    vtap_index = -1
                     for i, sorted_trace in enumerate(sorted_traces):
-                        if trace['start_time_us'] < sorted_trace[
-                                'start_time_us']:
-                            sorted_traces.insert(i, trace)
+                        if vtap_index > 0 and sorted_trace['vtap_id'] != trace[
+                                'vtap_id']:
                             break
+                        if sorted_trace['vtap_id'] == trace['vtap_id']:
+                            if sorted_trace['start_time_us'] < trace[
+                                    'start_time_us']:
+                                vtap_index = i + 1
+                            elif vtap_index == -1:
+                                vtap_index = i
+                    if vtap_index >= 0:
+                        sorted_traces.insert(vtap_index, trace)
+                    else:
+                        for i, sorted_trace in enumerate(sorted_traces):
+                            if trace['start_time_us'] < sorted_trace[
+                                    'start_time_us']:
+                                sorted_traces.insert(i, trace)
+                                break
             self.traces_of_direct_flows[index] = sorted_traces
 
     def check_client_process_flow(self, flow: dict):
@@ -1147,6 +1142,7 @@ def parent_sort(array: list):
                     j].min_start_time_us + 10000:
                 if len(array[i].outgoing_flow_uids
                        & array[j].incoming_flow_uids) > 0:
+                    array[j].direct_flows[0].pop("parent_app_flow", None)
                     for _uid in array[i].outgoing_flow_uids & array[
                             j].incoming_flow_uids:
                         # 去重，去掉s-p中重复的，因为service内部已经进行过parent关联，因此当网络span有交叠时无需关联service
@@ -1155,6 +1151,12 @@ def parent_sort(array: list):
                                 array[j].traces_of_direct_flows[0]):
                             if flow['_uid'] == _uid:
                                 dedup_indexs.append(index)
+                                ''' if _uid in array[j].incoming_flow_uids:
+                                    array[j].incoming_flow_uids.remove(_uid)
+                                if flow['resp_tcp_seq'] in array[j].incoming_flow_process_resp_tcp_seqs:
+                                    array[j].incoming_flow_process_resp_tcp_seqs.remove(flow['resp_tcp_seq'])
+                                if flow['req_tcp_seq'] in array[j].incoming_flow_process_req_tcp_seqs:
+                                    array[j].incoming_flow_process_req_tcp_seqs.remove(flow['req_tcp_seq']) '''
                         dedup_indexs.reverse()
                         for index in dedup_indexs:
                             array[j].traces_of_direct_flows[0].pop(index)
@@ -1168,6 +1170,8 @@ def parent_sort(array: list):
                                     'resp_tcp_seq'] == resp_tcp_seq:
                                 parent_flow = array[i].get_direct_flow_head(
                                     index)
+                                array[j].direct_flows[0].pop(
+                                    "parent_app_flow", None)
                                 # s-p通过resp_tcp_seq关联c-p
                                 array[j].connect(0, parent_flow)
                 elif len(array[i].outgoing_flow_process_req_tcp_seqs
@@ -1180,8 +1184,23 @@ def parent_sort(array: list):
                                     'req_tcp_seq'] == resp_tcp_seq:
                                 parent_flow = array[i].get_direct_flow_head(
                                     index)
+                                array[j].direct_flows[0].pop(
+                                    "parent_app_flow", None)
                                 # s-p通过req_tcp_seq关联c-p
                                 array[j].connect(0, parent_flow)
+    # s-p 有parent_app_flow但是没有parent_id时，将parent_app_flow设为parent
+    for i in range(len(array)):
+        if array[i].direct_flows[0]["tap_side"] == TAP_SIDE_SERVER_PROCESS \
+            and array[i].direct_flows[0].get("parent_app_flow"):
+            if array[i].traces_of_direct_flows[0]:
+                if array[i].traces_of_direct_flows[0][0].get("parent_id",
+                                                             -1) < 0:
+                    array[i].connect(
+                        0, array[i].direct_flows[0]["parent_app_flow"])
+            else:
+                if array[i].direct_flows[0].get("parent_id", -1) < 0:
+                    array[i].connect(
+                        0, array[i].direct_flows[0]["parent_app_flow"])
 
 
 def bfs_sort(array: list, less_then_func, level_set_func):
