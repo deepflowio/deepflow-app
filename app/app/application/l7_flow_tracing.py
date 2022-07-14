@@ -564,7 +564,10 @@ class Service:
             for i, direct_flow in enumerate(self.direct_flows[1:]):
                 if not direct_flow.get('parent_id'):
                     # c-p的parent设置为s-p
-                    _set_parent(direct_flow, self.direct_flows[0])
+                    if not direct_flow.get('parent_app_flow', None):
+                        _set_parent(direct_flow, self.direct_flows[0])
+                    else:
+                        _set_parent(direct_flow, direct_flow['parent_app_flow'])
                 for j, trace in enumerate(self.traces_of_direct_flows[i + 1]):
                     if j == 0:
                         # 第一个trace的parent为c-p
@@ -1090,7 +1093,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 
 
 def app_flow_sort(array: list):
-    array.reverse()
     for flow_0 in array:
         if flow_0.get('parent_id', -1) >= 0:
             continue
@@ -1111,8 +1113,6 @@ def app_flow_sort(array: list):
                     "tap_side"] == TAP_SIDE_SERVER_PROCESS:
                 _set_parent(flow, flow["service"].direct_flows[0])
                 continue
-
-    array.reverse()
 
 
 def parent_fill(services, app_flows):
