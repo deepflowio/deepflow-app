@@ -567,7 +567,8 @@ class Service:
                     if not direct_flow.get('parent_app_flow', None):
                         _set_parent(direct_flow, self.direct_flows[0])
                     else:
-                        _set_parent(direct_flow, direct_flow['parent_app_flow'])
+                        _set_parent(direct_flow,
+                                    direct_flow['parent_app_flow'])
                 for j, trace in enumerate(self.traces_of_direct_flows[i + 1]):
                     if j == 0:
                         # 第一个trace的parent为c-p
@@ -1275,33 +1276,34 @@ def format(services: list, unattached_flows: list,
     id_map = {-1: ""}
     for service in services:
         service_uid = f"{service.resource_gl2_id}-"
+        service_uname = service.resource_gl2 if service.resource_gl2 else service.ip
         if service_uid not in metrics_map:
             metrics_map[service_uid] = {
                 "service_uid": service_uid,
-                "service_uname": service.resource_gl2,
+                "service_uname": service_uname,
                 "duration": 0,
             }
         else:
             if metrics_map[service_uid].get('service_uname'):
                 pass
-            elif getattr(service, 'resource_gl2'):
-                metrics_map[service_uid]['service_uname'] = getattr(
-                    service, 'resource_gl2')
+            elif service_uname:
+                metrics_map[service_uid]['service_uname'] = service_uname
         for index, flow in enumerate(service.direct_flows):
             metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
-            flow['service_uname'] = service.resource_gl2
+            flow['service_uname'] = service_uname
             direct_flow_span_id = generate_span_id(
             ) if not flow.get('span_id') else flow['span_id']
-            id_map[flow['_uid']] = f"{direct_flow_span_id}({flow['tap_side']})"
+            id_map[flow[
+                '_uid']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_uid']}"
             if flow['_uid'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
-            for i, indirect_flow in enumerate(service.traces_of_direct_flows[index]):
+            for indirect_flow in service.traces_of_direct_flows[index]:
                 if set(indirect_flow["_id"]) == set(flow["_id"]):
                     continue
                 id_map[indirect_flow[
-                    '_uid']] = f"{direct_flow_span_id}(net-{indirect_flow['tap_side']}-{i})"
+                    '_uid']] = f"{direct_flow_span_id}.{indirect_flow['tap_side']}.{indirect_flow['_uid']}"
                 if indirect_flow["start_time_us"] < flow["start_time_us"]:
                     flow["start_time_us"] = indirect_flow["start_time_us"]
                 if indirect_flow["end_time_us"] > flow["end_time_us"]:
