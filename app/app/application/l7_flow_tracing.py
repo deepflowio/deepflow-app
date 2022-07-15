@@ -1297,11 +1297,11 @@ def format(services: list, unattached_flows: list,
             if flow['_uid'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
-            for indirect_flow in service.traces_of_direct_flows[index]:
+            for i, indirect_flow in enumerate(service.traces_of_direct_flows[index]):
                 if set(indirect_flow["_id"]) == set(flow["_id"]):
                     continue
                 id_map[indirect_flow[
-                    '_uid']] = f"{direct_flow_span_id}(net-{indirect_flow['tap_side']})"
+                    '_uid']] = f"{direct_flow_span_id}(net-{indirect_flow['tap_side']}-{i})"
                 if indirect_flow["start_time_us"] < flow["start_time_us"]:
                     flow["start_time_us"] = indirect_flow["start_time_us"]
                 if indirect_flow["end_time_us"] > flow["end_time_us"]:
