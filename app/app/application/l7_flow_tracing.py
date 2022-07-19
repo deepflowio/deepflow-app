@@ -214,7 +214,8 @@ class L7FlowTracing(Base):
                         dataframe_flowmetas['syscall_trace_id_request'][index],
                         dataframe_flowmetas['syscall_trace_id_response']
                         [index], dataframe_flowmetas['span_id'][index],
-                        dataframe_flowmetas['x_request_id'][index]))
+                        dataframe_flowmetas['x_request_id'][index],
+                        dataframe_flowmetas['l7_protocol'][index]))
             new_syscall_metas -= syscall_metas
             syscall_metas |= new_syscall_metas
 
@@ -364,7 +365,7 @@ class L7FlowTracing(Base):
         sql = """
         SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
-        vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, 
+        vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
         trace_id, x_request_id, _id, tap_side, resource_gl0_0, resource_gl0_1  
         FROM `l7_flow_log` 
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
@@ -489,13 +490,15 @@ class L7SyscallMeta:
         self.syscall_trace_id_response = flowmetas[2]
         self.span_id = flowmetas[3]
         self.x_request_id = flowmetas[4]
+        self.l7_protocol = flowmetas[5]
 
     def __eq__(self, rhs):
         return (
             self.vtap_id == rhs.vtap_id
             and self.syscall_trace_id_request == rhs.syscall_trace_id_request
             and self.syscall_trace_id_response == rhs.syscall_trace_id_response
-            and self.x_request_id == rhs.x_request_id)
+            and self.x_request_id == rhs.x_request_id
+            and self.l7_protocol == rhs.l7_protocol)
 
     def to_sql_filter(self) -> str:
         # 返回空时需要忽略此条件
@@ -513,10 +516,14 @@ class L7SyscallMeta:
         if not sql_filters:
             return '1!=1'
         sql = f"vtap_id={self.vtap_id} AND ({' OR '.join(sql_filters)})"
+        tailor_sql = ""
         if type(self.span_id) == str and self.span_id:
-            sql += f" AND span_id='{self.span_id}'"
+            tailor_sql += f" AND span_id='{self.span_id}'"
         if type(self.x_request_id) == str and self.x_request_id:
-            sql += f" AND x_request_id='{self.x_request_id}'"
+            tailor_sql += f" AND x_request_id='{self.x_request_id}'"
+        if tailor_sql:
+            # 相同协议使用span_id、x_request_id进行裁剪
+            sql += f"AND (l7_protocol!={self.l7_protocol} OR (l7_protocol={self.l7_protocol} {tailor_sql}))"
         return f"({sql})"
 
 
