@@ -1,7 +1,7 @@
 import math
 import pandas as pd
 
-from ast import Tuple
+from ast import Index, Tuple
 from pandas import DataFrame
 from collections import defaultdict
 from data.querier_client import Querier
@@ -239,11 +239,13 @@ class L7FlowTracing(Base):
             app_metas |= new_app_metas
 
             # 主动注入的追踪信息
-            new_trace_ids = set([dataframe_flowmetas['trace_id'][0]
-                                 ]) - trace_ids - {0, ''}
+            new_trace_ids = set([
+                dataframe_flowmetas['trace_id'][index] for index in range(len(dataframe_flowmetas.index))
+            ]) - trace_ids - {0, ''}
             trace_ids |= new_trace_ids
-            new_x_request_ids = set([dataframe_flowmetas['x_request_id'][0]
-                                     ]) - x_request_ids - {0, ''}
+            new_x_request_ids = set([
+                dataframe_flowmetas['x_request_id'][index] for index in range(len(dataframe_flowmetas.index))
+            ]) - x_request_ids - {0, ''}
             x_request_ids |= new_x_request_ids
 
             # L7 Flow ID信息
