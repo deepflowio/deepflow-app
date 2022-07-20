@@ -31,7 +31,7 @@ async def before_server_stop(app, loop):
 
 
 def main():
-    logger_manager = logger.LoggerManager('metaflow-app',
+    logger_manager = logger.LoggerManager('deepflow-app',
                                           config.log_level,
                                           log_stream=sys.stdout)
     logger_manager.init_logger()
@@ -39,7 +39,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGHUP, signal_handler)
 
-    log.info('Launching Metaflow-app ...')
+    log.info('Launching Deepflow-app ...')
     server.server.register_listener(notify_server_started,
                                     'before_server_start')
     server.server.register_listener(before_server_stop, 'before_server_stop')

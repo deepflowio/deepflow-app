@@ -1,6 +1,6 @@
 app:
   # logfile path
-  log-file: /var/log/metaflow/app.log
+  log-file: /var/log/deefplow/app.log
   # loglevel: "debug/info/warn/error"
   log-level: info
   # app http listenport
@@ -10,12 +10,12 @@ app:
   http_response_timeout: 600
 
   querier:
-    host: metaflow-server
+    host: deefplow-server
     port: 20416
     timeout: 60
   
   controller:
-    host: metaflow-server
+    host: deefplow-server
     port: 20417
     timeout: 60
   
