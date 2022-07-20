@@ -35,7 +35,7 @@ RUN pip install --user  --disable-pip-version-check \
 FROM python:3.8-slim-buster AS runner
 COPY --from=builder-custom /root/.local /usr/local
 # Copy code
-COPY ./app.yaml /etc/metaflow/
+COPY ./app.yaml /etc/deepflow/
 COPY ./app/ /root/app/
 
 CMD python3 -u /root/app/app.py
