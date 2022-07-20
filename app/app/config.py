@@ -1,7 +1,7 @@
 import yaml
 import sys
 
-CONFIG_FILE = "/etc/metaflow/app.yaml"
+CONFIG_FILE = "/etc/deefplow/app.yaml"
 
 class Config(object):
     
@@ -10,7 +10,7 @@ class Config(object):
 
     def parse_log(self, cfg):
         self.log_level = cfg.get('log-level', 'info')
-        self.log_file = cfg.get('log-file', '/etc/metaflow/app.log')
+        self.log_file = cfg.get('log-file', '/etc/deefplow/app.log')
 
     def parse_spec(self, cfg):
         spec = cfg.get('spec')
@@ -18,13 +18,13 @@ class Config(object):
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
-        self.querier_server = querier.get('host', 'metaflow-server')
+        self.querier_server = querier.get('host', 'deefplow-server')
         self.querier_port = querier.get('port', 20416)
         self.querier_timeout = querier.get('timeout', 60)
 
     def parse_controller(self, cfg):
         controller = cfg.get('controller', dict())
-        self.controller_server = controller.get('host', 'metaflow-server')
+        self.controller_server = controller.get('host', 'deefplow-server')
         self.controller_port = controller.get('port', 20417)
         self.controller_timeout = controller.get('timeout', 60)
 
