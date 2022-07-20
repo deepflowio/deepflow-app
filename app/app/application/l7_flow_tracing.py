@@ -1340,8 +1340,8 @@ def format(services: list, unattached_flows: list,
         id_map[flow["_uid"]] = flow["span_id"]
         response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
-        trace["metaflow_span_id"] = id_map[trace["id"]]
-        trace["metaflow_parent_span_id"] = id_map[trace["parent_id"]]
+        trace["deepflow_span_id"] = id_map[trace["id"]]
+        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
     response["services"] = _call_metrics(metrics_map)
     return response
 
