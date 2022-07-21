@@ -240,11 +240,13 @@ class L7FlowTracing(Base):
 
             # 主动注入的追踪信息
             new_trace_ids = set([
-                dataframe_flowmetas['trace_id'][index] for index in range(len(dataframe_flowmetas.index))
+                dataframe_flowmetas['trace_id'][index]
+                for index in range(len(dataframe_flowmetas.index))
             ]) - trace_ids - {0, ''}
             trace_ids |= new_trace_ids
             new_x_request_ids = set([
-                dataframe_flowmetas['x_request_id'][index] for index in range(len(dataframe_flowmetas.index))
+                dataframe_flowmetas['x_request_id'][index]
+                for index in range(len(dataframe_flowmetas.index))
             ]) - x_request_ids - {0, ''}
             x_request_ids |= new_x_request_ids
 
@@ -568,14 +570,24 @@ class Service:
     def parent_set(self):
         # 网络span排序
         self.trace_sorted()
+        self.app_flow_of_direct_flows = sorted(
+            self.app_flow_of_direct_flows,
+            key=lambda x: x.get("start_time_us"))
         # 有s-p
         if self.direct_flows[0]['tap_side'] == TAP_SIDE_SERVER_PROCESS:
             for i, direct_flow in enumerate(self.direct_flows[1:]):
                 if not direct_flow.get('parent_id'):
-                    # c-p的parent设置为s-p
+                    # c-p setparent
                     if not direct_flow.get('parent_app_flow', None):
-                        _set_parent(direct_flow, self.direct_flows[0])
+                        # service内有app_flow则挂到最后一个app_flow上
+                        if self.app_flow_of_direct_flows:
+                            _set_parent(direct_flow,
+                                        self.app_flow_of_direct_flows[-1])
+                        else:
+                            # c-p的parent设置为s-p
+                            _set_parent(direct_flow, self.direct_flows[0])
                     else:
+                        # 有parnet_app
                         _set_parent(direct_flow,
                                     direct_flow['parent_app_flow'])
                 for j, trace in enumerate(self.traces_of_direct_flows[i + 1]):
@@ -716,12 +728,14 @@ class Service:
                     # 只有c-p和x-app的span_id相同时，属于同一个service
                     if direct_flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
                         flow["service"] = self
+                        self.app_flow_of_direct_flows.append(flow)
                 # x-app的parent是x-p时，一定属于同一个service
                 elif flow['parent_span_id'] == direct_flow[
                         'span_id'] and direct_flow[
                             'tap_side'] == TAP_SIDE_SERVER_PROCESS:
                     _set_parent(flow, direct_flow)
                     flow["service"] = self
+                    self.app_flow_of_direct_flows.append(flow)
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
         """将一个flow附加到direct_flow上，附加的前提是这两个flow拥有相同的网络流量追踪信息"""
@@ -1072,6 +1086,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 对service上挂的flow排序
     # 1. 同一组flow按时间排序
     # 2. 选取时间最早或最晚的作为incoming_flow
+    app_flow_sort(app_flows)
     for service_key, service in service_map.items():
         service.sort_flow_traces()
         service.parent_set()
@@ -1080,7 +1095,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     services = list(service_map.values())
     parent_sort(services)
     parent_fill(services, app_flows)
-    app_flow_sort(app_flows)
     ''' services = bfs_sort(
         services,
         lambda x, y: x.min_start_time_us - ntp_delay_us <= y.min_start_time_us
@@ -1113,9 +1127,13 @@ def app_flow_sort(array: list):
                     if flow_0.get("service",
                                   None) and not flow_1.get("service", None):
                         flow_1["service"] = flow_0["service"]
+                        flow_0["service"].app_flow_of_direct_flows.append(
+                            flow_1)
                     elif not flow_0.get("service", None) and flow_1.get(
                             "service", None):
                         flow_0["service"] = flow_1["service"]
+                        flow_1["service"].app_flow_of_direct_flows.append(
+                            flow_0)
                 break
     for flow in array:
         if flow.get("parent_id", -1) < 0 and flow.get("service"):
