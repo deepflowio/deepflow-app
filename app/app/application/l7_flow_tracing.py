@@ -537,9 +537,9 @@ class L7SyscallMeta:
         if not sql_filters:
             return '1!=1'
         sql = f"vtap_id={self.vtap_id} AND ({' OR '.join(sql_filters)})"
-        tailor_sql = ""
-        if type(self.span_id) == str and self.span_id:
-            tailor_sql += f" AND span_id='{self.span_id}'"
+        # tailor_sql = ""
+        # if type(self.span_id) == str and self.span_id:
+        #     tailor_sql += f" AND span_id='{self.span_id}'"
         # else:
         #     tailor_sql += f" AND span_id=''"
         # if type(self.x_request_id) == str and self.x_request_id:
@@ -736,6 +736,7 @@ class Service:
                 'process_kname',
         ]:
             if getattr(self, key):
+                flow[key] = getattr(self, key)
                 continue
             if flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
                 direction_key = key + "_0"
