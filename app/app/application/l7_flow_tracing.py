@@ -563,9 +563,9 @@ class Service:
 
     def connect(self, index, flow):
         if self.traces_of_direct_flows[index]:
-            _set_parent(self.traces_of_direct_flows[index][0], flow)
+            _set_parent(self.traces_of_direct_flows[index][0], flow, "service_connnect")
         else:
-            _set_parent(self.direct_flows[index], flow)
+            _set_parent(self.direct_flows[index], flow, "service_connnect")
 
     def parent_set(self):
         # 网络span排序
@@ -582,34 +582,34 @@ class Service:
                         # service内有app_flow则挂到最后一个app_flow上
                         if self.app_flow_of_direct_flows:
                             _set_parent(direct_flow,
-                                        self.app_flow_of_direct_flows[-1])
+                                        self.app_flow_of_direct_flows[-1], "c-p mounted on latest app_flow")
                         else:
                             # c-p的parent设置为s-p
-                            _set_parent(direct_flow, self.direct_flows[0])
+                            _set_parent(direct_flow, self.direct_flows[0], "c-p mounted on s-p")
                     else:
                         # 有parnet_app
                         _set_parent(direct_flow,
-                                    direct_flow['parent_app_flow'])
+                                    direct_flow['parent_app_flow'], "c-p mounted on parent_app_flow")
                 for j, trace in enumerate(self.traces_of_direct_flows[i + 1]):
                     if j == 0:
                         # 第一个trace的parent为c-p
-                        _set_parent(trace, direct_flow)
+                        _set_parent(trace, direct_flow, "first trace mounted on c-p")
                     else:
                         # trace的parent为前一个trace
                         _set_parent(trace,
-                                    self.traces_of_direct_flows[i + 1][j - 1])
+                                    self.traces_of_direct_flows[i + 1][j - 1], "trace mounted on prefix trace")
             # s-p有trace
             if self.traces_of_direct_flows[0]:
                 # s-p的parent为trace的最后一个
                 _set_parent(self.direct_flows[0],
-                            self.traces_of_direct_flows[0][-1])
+                            self.traces_of_direct_flows[0][-1], "s-p mounted on latest trace")
                 if self.traces_of_direct_flows[0][0].get('parent_id', -1) < 0:
                     # s-p的第一个trace的parent设置为-1
                     self.traces_of_direct_flows[0][0]['parent_id'] = -1
                 for i, trace in enumerate(self.traces_of_direct_flows[0][1:]):
                     # 除了第一个外的每个trace的parent都是前一个trace
                     _set_parent(trace,
-                                self.traces_of_direct_flows[0][i - 1 + 1])
+                                self.traces_of_direct_flows[0][i - 1 + 1], "trace mounted on prefix trace")
             else:
                 # s-p没有trace则parent设为-1
                 if self.direct_flows[0].get('parent_id', -1) < 0:
@@ -621,17 +621,17 @@ class Service:
                 if not direct_flow.get('parent_id'):
                     if direct_flow.get('parent_app_flow', None):
                         _set_parent(self.direct_flows[i],
-                                    self.direct_flows[i]['parent_app_flow'])
+                                    self.direct_flows[i]['parent_app_flow'], "c-p mounted on own app_flow")
                     else:
                         self.direct_flows[i]['parent_id'] = -1
                 for j, trace in enumerate(self.traces_of_direct_flows[i]):
                     if j == 0:
                         # 第一条trace的parent为c-p
-                        _set_parent(trace, direct_flow)
+                        _set_parent(trace, direct_flow, "first trace mounted on c-p")
                     else:
                         # 每一条trace的parent为前一条trace
                         _set_parent(trace,
-                                    self.traces_of_direct_flows[i][j - 1])
+                                    self.traces_of_direct_flows[i][j - 1], "trace mounted on prefix trace")
 
     def trace_sorted(self):
         """
@@ -712,6 +712,7 @@ class Service:
             elif flow['tap_side'] == TAP_SIDE_SERVER_PROCESS:
                 direction_key = key + "_1"
             setattr(self, key, flow[direction_key])
+            flow[key] = flow[direction_key]
         self.direct_flows.append(flow)
         self.traces_of_direct_flows.append([])
 
@@ -733,7 +734,7 @@ class Service:
                 elif flow['parent_span_id'] == direct_flow[
                         'span_id'] and direct_flow[
                             'tap_side'] == TAP_SIDE_SERVER_PROCESS:
-                    _set_parent(flow, direct_flow)
+                    _set_parent(flow, direct_flow, "app_flow mounted on s-p due to parent_span_id")
                     flow["service"] = self
                     self.app_flow_of_direct_flows.append(flow)
 
@@ -909,6 +910,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
             flows[i]['_id'].extend(flow['_id'])
             flows[i]['resource_gl0_0'] = flow['resource_gl0_0']
             flows[i]['resource_gl0_1'] = flow['resource_gl0_1']
+            flows[i]['resource_gl2_0'] = flow['resource_gl2_0']
+            flows[i]['resource_gl2_1'] = flow['resource_gl2_1']
             for key in MERGE_KEYS:
                 if key in MERGE_KEY_REQUEST:
                     if flow['type'] in [
@@ -1122,7 +1125,7 @@ def app_flow_sort(array: list):
             continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
-                _set_parent(flow_0, flow_1)
+                _set_parent(flow_0, flow_1, "app_flow mounted due to parent_span_id")
                 if flow_0["service_name"] == flow_1["service_name"]:
                     if flow_0.get("service",
                                   None) and not flow_1.get("service", None):
@@ -1139,7 +1142,7 @@ def app_flow_sort(array: list):
         if flow.get("parent_id", -1) < 0 and flow.get("service"):
             if flow["service"].direct_flows[0][
                     "tap_side"] == TAP_SIDE_SERVER_PROCESS:
-                _set_parent(flow, flow["service"].direct_flows[0])
+                _set_parent(flow, flow["service"].direct_flows[0], "app_flow mouted on s-p in service")
                 continue
 
 
@@ -1157,10 +1160,10 @@ def parent_fill(services, app_flows):
             if services[i].traces_of_direct_flows[0] and services[
                     i].traces_of_direct_flows[0][0].get('parent_id', -1) < 0:
                 _set_parent(services[i].traces_of_direct_flows[0][0],
-                            app_flows_map[server_process_parent_span_id])
+                            app_flows_map[server_process_parent_span_id], "trace mounted on parent_span of s-p(from s-app)")
             elif services[i].direct_flows[0].get('parent_id', -1) < 0:
                 _set_parent(services[i].direct_flows[0],
-                            app_flows_map[server_process_parent_span_id])
+                            app_flows_map[server_process_parent_span_id], "parent fill s-p mounted on parent_span of s-app")
 
 
 def parent_sort(array: list):
@@ -1361,7 +1364,7 @@ def format(services: list, unattached_flows: list,
         response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
-        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
+        trace["deepflow_parent_span_id"] = id_map[trace.pop("parent_id")]
     response["services"] = _call_metrics(metrics_map)
     return response
 
@@ -1381,7 +1384,7 @@ def _call_metrics(services: dict):
 
 
 def _get_flow_dict(flow: DataFrame):
-    return {
+    flow_dict = {
         "_ids":
         list(map(str, flow["_id"])),
         "related_type":
@@ -1432,8 +1435,6 @@ def _get_flow_dict(flow: DataFrame):
         flow["_uid"],
         "parent_id":
         flow.get("parent_id", -1),
-        "process_kname":
-        flow.get("process_kname", None),
         "process_id":
         flow.get("process_id", None),
         "vtap_id":
@@ -1453,11 +1454,17 @@ def _get_flow_dict(flow: DataFrame):
         "resource_from_vtap":
         flow["resource_from_vtap"][2]
         if flow["resource_from_vtap"][0] else None,
+        "set_parent_info": flow.get("set_parent_info"),
         "resource_gl0":
         flow["resource_gl0_0"]
-        if flow["tap_side"][0] == 'c' else flow["resource_gl0_1"]
+        if flow["tap_side"][0] == 'c' and flow["tap_side"] != "app" else flow["resource_gl0_1"]
     }
-
+    if flow["tap_side"] in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
+        flow_dict["subnet"] = flow.get("subnet")
+        flow_dict["ip"] = flow.get("ip")
+        flow_dict["resource_gl2"] = flow.get("resource_gl2")
+        flow_dict["process_kname"] = flow.get("process_kname")
+    return flow_dict
 
 def _get_df_key(df: DataFrame, key: str):
     if type(df[key]) == float:
@@ -1466,7 +1473,7 @@ def _get_df_key(df: DataFrame, key: str):
     return df[key]
 
 
-def _set_parent(flow, flow_parent):
+def _set_parent(flow, flow_parent, info=None):
     flow['parent_id'] = flow_parent['_uid']
     if flow_parent['duration'] >= (flow['end_time_us'] -
                                    flow['start_time_us']):
@@ -1474,6 +1481,7 @@ def _set_parent(flow, flow_parent):
                                     flow['start_time_us'])
     else:
         flow_parent['duration'] = 0
+    flow['set_parent_info'] = info
 
 
 def generate_span_id():
