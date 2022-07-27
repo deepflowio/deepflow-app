@@ -195,14 +195,15 @@ class L7FlowTracing(Base):
                         TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS
                 ]:
                     continue
-                new_network_metas.add(
-                    (dataframe_flowmetas['type'][index],
-                     dataframe_flowmetas['req_tcp_seq'][index],
-                     dataframe_flowmetas['resp_tcp_seq'][index],
-                     dataframe_flowmetas['start_time_us'][index],
-                     dataframe_flowmetas['end_time_us'][index],
-                     dataframe_flowmetas['span_id'][index],
-                     dataframe_flowmetas['x_request_id'][index],))
+                new_network_metas.add((
+                    dataframe_flowmetas['type'][index],
+                    dataframe_flowmetas['req_tcp_seq'][index],
+                    dataframe_flowmetas['resp_tcp_seq'][index],
+                    dataframe_flowmetas['start_time_us'][index],
+                    dataframe_flowmetas['end_time_us'][index],
+                    dataframe_flowmetas['span_id'][index],
+                    dataframe_flowmetas['x_request_id'][index],
+                ))
             new_network_metas -= network_metas
             network_metas |= new_network_metas
 
@@ -761,15 +762,19 @@ class Service:
                     if direct_flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
                         flow["service"] = self
                         self.app_flow_of_direct_flows.append(flow)
-                # x-app的parent是x-p时，一定属于同一个service
-                elif flow['parent_span_id'] == direct_flow[
-                        'span_id'] and direct_flow[
-                            'tap_side'] == TAP_SIDE_SERVER_PROCESS:
-                    _set_parent(
-                        flow, direct_flow,
+                        return True
+        # x-app的parent是s-p时，一定属于同一个service
+        if flow['parent_span_id'] == self.direct_flows[0][
+                'span_id'] and self.direct_flows[0][
+                    'tap_side'] == TAP_SIDE_SERVER_PROCESS:
+            for client_process_flow in self.direct_flows[1:]:
+                if flow['parent_span_id'] == client_process_flow['span_id']:
+                    return False
+            _set_parent(flow, self.direct_flows[0],
                         "app_flow mounted on s-p due to parent_span_id")
-                    flow["service"] = self
-                    self.app_flow_of_direct_flows.append(flow)
+            flow["service"] = self
+            self.app_flow_of_direct_flows.append(flow)
+            return True
 
     def attach_indirect_flow(self, flow: dict, network_delay_us: int):
         """将一个flow附加到direct_flow上，附加的前提是这两个flow拥有相同的网络流量追踪信息"""
@@ -1158,8 +1163,6 @@ def app_flow_sort(array: list):
             continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
-                _set_parent(flow_0, flow_1,
-                            "app_flow mounted due to parent_span_id")
                 if flow_0["service_name"] == flow_1["service_name"]:
                     if flow_0.get("service",
                                   None) and not flow_1.get("service", None):
@@ -1172,6 +1175,33 @@ def app_flow_sort(array: list):
                         flow_1["service"].app_flow_of_direct_flows.append(
                             flow_0)
                 break
+    array.reverse()
+    for flow_0 in array:
+        if flow_0.get('parent_id', -1) >= 0:
+            continue
+        for flow_1 in array:
+            if flow_0["parent_span_id"] == flow_1["span_id"]:
+                if flow_0["service_name"] == flow_1["service_name"]:
+                    if flow_0.get("service",
+                                  None) and not flow_1.get("service", None):
+                        flow_1["service"] = flow_0["service"]
+                        flow_0["service"].app_flow_of_direct_flows.append(
+                            flow_1)
+                    elif not flow_0.get("service", None) and flow_1.get(
+                            "service", None):
+                        flow_0["service"] = flow_1["service"]
+                        flow_1["service"].app_flow_of_direct_flows.append(
+                            flow_0)
+                break
+    array.reverse()
+    for flow_0 in array:
+        if flow_0.get('parent_id', -1) >= 0:
+            continue
+        for flow_1 in array:
+            if flow_0["parent_span_id"] == flow_1["span_id"]:
+                _set_parent(flow_0, flow_1,
+                            "app_flow mounted due to parent_span_id")
+
     for flow in array:
         if flow.get("parent_id", -1) < 0 and flow.get("service"):
             if flow["service"].direct_flows[0][
