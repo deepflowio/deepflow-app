@@ -1,0 +1,173 @@
+#### 获取关联flow
+
+-  根据tcp_seq获取flow：1.network span 2.service间调用的system span
+  - type=request,使用req_tcp_seq关联查询，相同req_tcp_seq的flow会被关联
+
+  ```
+  req_tcp_seq={flow.req_tcp_seq} AND start_time_us>={min_start_time} AND start_time_us<={max_start_time}
+  ```
+
+  - type=response,使用resp_tcp_seq关联查询，相同resp_tcp_seq的flow会被关联
+
+  ```
+  resp_tcp_seq={flow.resp_tcp_seq} AND end_time_us>={min_end_time} AND end_time_us<={max_end_time}
+  ```
+
+  - type=session: req_tcp_seq or resp_tcp_seq
+
+  ```
+  (req_tcp_seq={flow.req_tcp_seq} or resp_tcp_seq={flow.resp_tcp_seq}) AND end_time_us>={min_end_time} AND end_time_us<={max_end_time}
+  ```
+
+  - 额外条件
+    - resp_tcp_seq!=0 OR req_tcp_seq!=0
+    - span_id必须相同
+    - x_request_id必须相同
+
+- 根据syscalltraceid获取flow：1.service内部的system span
+
+  - syscall_trace_id_request以及syscall_trace_id_request只要不为0则都会被关联查询
+
+  ```
+  syscall_trace_id_request={flow.syscall_trace_id_request} OR syscall_trace_id_response={flow.syscall_trace_id_request} OR 
+  syscall_trace_id_request={flow.syscall_trace_id_response} OR syscall_trace_id_response={flow.syscall_trace_id_response}
+  ```
+
+  - 额外条件
+    - vtap_id必须相同
+
+- 获取app span
+ 
+  - 根据parent_span_id以及span_id关联查询
+
+  ```
+  parent_span_id={flow.span_id} OR span_id={flow.span_id}
+  span_id={flow.parent_span_id} OR parent_span_id={flow.parent_span_id}
+  ```
+
+- x_request_id
+
+  ```
+  x_request_id={flow.x_request_id}
+  ```
+
+- trace_id
+
+  ```
+  trace_id={trace_id}
+  ```
+
+
+
+#### merge flow
+
+  - 以下flow不进行合并
+    1. type == session && tap_side != sysspan，会话类型的非系统span
+    2. tap_side != sysspan时，每条flow的_id最多只有一来一回两条， 大于等于两条
+    3. ('vtap_id', 'tap_port', 'tap_port_type', 'l7_protocol', 'request_id', 'tap_side', 'flow_id')不同
+    4. request的start_time > response的start_time
+    5. sysspan的flow，request_flow['syscall_cap_seq_0'] + 1 != response_flow['syscall_cap_seq_1']
+
+  - 合并字段,被合并的flow会将原flow中缺少的字段补充进去
+    - flow['type'] == 0，按以下字段合并
+  
+    ```
+    [
+      'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
+      'request_resource', 'request_id'
+    ]
+    ```
+  
+    - flow['type'] == 1，按以下字段合并
+  
+    ```
+    [
+      'response_status', 'response_code', 'response_exception',
+      'response_result', 'http_proxy_client'
+    ]
+    ```
+  
+    - 其他
+  
+    ``` 
+    [ 
+      'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
+      'request_resource', 'request_id', 'response_status', 'response_code',
+      'response_exception', 'response_result', 'http_proxy_client', 'trace_id',
+      'span_id', 'x_request_id'
+    ]
+    ```
+  
+    - request 和 response合并时，flow[type] 会改成2（session）
+
+    - sysspan首次merge会出现merge失败，需要将flow倒序，再进行第二次merge
+
+#### 排序逻辑
+
+##### 构建service
+  - 进程span
+    - 基于每个tap_side为s-p的flow构建一个service
+    - 将每个tap_side为c-p的flow添加进所属的service中，判断所属service的逻辑为vtap_id及process_id与service相同，并且s-p的时间范围需要覆盖c-p，有多个service符合条件的情况下选择start_time最近的。
+  - 网络span添加进service
+    - 与service比较以下字段是否相等。
+    ```
+    [
+      'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
+      'request_resource', 'request_id', 'response_status', 'response_code',
+      'response_exception', 'response_result', 'http_proxy_client', 'trace_id',
+      'span_id', 'x_request_id'
+    ]
+    ```
+    - 在service的进程span中寻找到含有相同的req_tcp_seq或者resp_tcp_seq的进程span，并且start_time时间差在参数network_delay_us之内，将网络span的flow并挂在该进程span下
+
+  - 应用span添加进service
+    - 应用span的span_id与系统span_id相同。如果系统span的tap_side是c-p，则将该应用span添加进service
+    - 应用span的parent_id与系统span_id相同时。如果系统span的tap_side是s-p并且不存在和s-p相同的c-p时，将该应用span添加进service
+    - 两条应用span的span_id有关联并且service_name相同时，将其中一条还为添加进service的flow添加进另一条flow所属的service中
+
+
+##### 设置parent
+
+- 应用span内部设置parent
+  - 先按照应用span中parent_span_id寻找匹配的父应用span，将该应用span挂载到父应用span上
+  - 如果没有parent并且该应用span有所属的service，则将该应用span挂载到该service的s-p上
+
+- service内部设置parent
+  - 每个进程span中的网络span排序
+    - 使用tap_side按照TAP_SIDE_RANKS进行排序
+    ```
+    TAP_SIDE_RANKS = {
+      TAP_SIDE_CLIENT_PROCESS: 1,
+      TAP_SIDE_CLIENT_NIC: 2,
+      TAP_SIDE_CLIENT_POD_NODE: 3,
+      TAP_SIDE_CLIENT_HYPERVISOR: 4,
+      TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR: 5,
+      TAP_SIDE_CLIENT_GATEWAY: 6,
+      TAP_SIDE_SERVER_GATEWAY: 6,
+      TAP_SIDE_SERVER_GATEWAY_HAPERVISOR: 8,
+      TAP_SIDE_SERVER_HYPERVISOR: 9,
+      TAP_SIDE_SERVER_POD_NODE: 10,
+      TAP_SIDE_SERVER_NIC: 11,
+      TAP_SIDE_SERVER_PROCESS: 12,
+      TAP_SIDE_REST: 13,
+      TAP_SIDE_LOCAL: 13,
+    }
+    ```
+    - 对Local和rest就近（比较采集器）排到其他位置附近（按时间排）
+    - 根据排序顺序，每条flow将自己前一条flow设为parent，第一条flow的parent_id设为-1
+  - 进程span设置parent
+      1. c-p如果包含parent_app_flow(与c-p具有相同span_id的应用span)，则将该c-p的parent设置为该应用span。
+         如果不包含parent_app_flow，如果该service包含任意一条应用span，则将该c-p的parent设置为该service内最后一条应用span。
+         以上条件都没满足则将该c-p的parent设置为该service的s-p
+      2. 如果c-p包含网络span，将网络span中的第一条的parent设置为该c-p
+      3. s-p如果包含网络span，则将该s-p的parent设置为最后一条网络span
+      
+
+- service间设置parent
+  - 将service中tap_side为s-p的flow的tcp_seq收集为incoming_tcp_seqs,网络span的uid(每条flow的唯一标识)收集为incoming_uids
+  - 将service中tap_side所有为c-p的flow的tcp_seq收集为outgoing_tcp_seqs,网络span的uid收集为outgoing_uids
+  - 若serviceA的outgoing_tcp_seqs 与 serviceB的incoming_tcp_seqs有交集 或者 若serviceA的outgoing_uids与serviceB的incoming_uids有交集
+    - 将serviceB中s-p的进程span的parent设为serviceA中交集部分的最后一条flow
+  - 若s-p此时还未有parent并且该s-p，并且该s-p包含parent_app_flow(应用span的span_id与系统span_id相同),则将该s-p挂载到该应用span的parent_span_id的span上，
+
+
