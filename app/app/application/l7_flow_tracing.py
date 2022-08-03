@@ -764,9 +764,10 @@ class Service:
                         self.app_flow_of_direct_flows.append(flow)
                         return True
         # x-app的parent是s-p时，一定属于同一个service
-        if flow['parent_span_id'] == self.direct_flows[0][
-                'span_id'] and self.direct_flows[0][
-                    'tap_side'] == TAP_SIDE_SERVER_PROCESS:
+        if flow['parent_span_id'] and self.direct_flows[0]['span_id'] and flow[
+                'parent_span_id'] == self.direct_flows[0][
+                    'span_id'] and self.direct_flows[0][
+                        'tap_side'] == TAP_SIDE_SERVER_PROCESS:
             for client_process_flow in self.direct_flows[1:]:
                 if flow['parent_span_id'] == client_process_flow['span_id']:
                     return False
