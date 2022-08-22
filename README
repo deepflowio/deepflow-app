@@ -4,19 +4,19 @@
   - type=request,使用req_tcp_seq关联查询，相同req_tcp_seq的flow会被关联
 
   ```
-  req_tcp_seq={flow.req_tcp_seq} AND start_time_us>={min_start_time} AND start_time_us<={max_start_time}
+  req_tcp_seq={flow.req_tcp_seq}
   ```
 
   - type=response,使用resp_tcp_seq关联查询，相同resp_tcp_seq的flow会被关联
 
   ```
-  resp_tcp_seq={flow.resp_tcp_seq} AND end_time_us>={min_end_time} AND end_time_us<={max_end_time}
+  resp_tcp_seq={flow.resp_tcp_seq}
   ```
 
   - type=session: req_tcp_seq or resp_tcp_seq
 
   ```
-  (req_tcp_seq={flow.req_tcp_seq} or resp_tcp_seq={flow.resp_tcp_seq}) AND end_time_us>={min_end_time} AND end_time_us<={max_end_time}
+  (req_tcp_seq={flow.req_tcp_seq} or resp_tcp_seq={flow.resp_tcp_seq})
   ```
 
   - 额外条件
@@ -57,6 +57,15 @@
   trace_id={trace_id}
   ```
 
+- sql,将上述所有条件用OR进行拼接，查询所有符合条件的flow，然后进行细粒度的筛选：
+  
+  - network span：
+      - 时间范围差距不能超过配置的网络最大时延`network_delay_us`
+
+      ```
+      abs(self.start_time_us - flow.start_time_us) <= self.network_delay_us
+      abs(self.end_time_us - flow.end_time_us) <= self.network_delay_us
+      ```
 
 
 #### merge flow
@@ -104,6 +113,8 @@
 
 #### 排序逻辑
 
+
+
 ##### 构建service
   - 进程span
     - 基于每个tap_side为s-p的flow构建一个service
@@ -128,46 +139,28 @@
 
 ##### 设置parent
 
-- 应用span内部设置parent
-  - 先按照应用span中parent_span_id寻找匹配的父应用span，将该应用span挂载到父应用span上
-  - 如果没有parent并且该应用span有所属的service，则将该应用span挂载到该service的s-p上
 
-- service内部设置parent
-  - 每个进程span中的网络span排序
-    - 使用tap_side按照TAP_SIDE_RANKS进行排序
-    ```
-    TAP_SIDE_RANKS = {
-      TAP_SIDE_CLIENT_PROCESS: 1,
-      TAP_SIDE_CLIENT_NIC: 2,
-      TAP_SIDE_CLIENT_POD_NODE: 3,
-      TAP_SIDE_CLIENT_HYPERVISOR: 4,
-      TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR: 5,
-      TAP_SIDE_CLIENT_GATEWAY: 6,
-      TAP_SIDE_SERVER_GATEWAY: 6,
-      TAP_SIDE_SERVER_GATEWAY_HAPERVISOR: 8,
-      TAP_SIDE_SERVER_HYPERVISOR: 9,
-      TAP_SIDE_SERVER_POD_NODE: 10,
-      TAP_SIDE_SERVER_NIC: 11,
-      TAP_SIDE_SERVER_PROCESS: 12,
-      TAP_SIDE_REST: 13,
-      TAP_SIDE_LOCAL: 13,
-    }
-    ```
-    - 对Local和rest就近（比较采集器）排到其他位置附近（按时间排）
-    - 根据排序顺序，每条flow将自己前一条flow设为parent，第一条flow的parent_id设为-1
-  - 进程span设置parent
-      1. c-p如果包含parent_app_flow(与c-p具有相同span_id的应用span)，则将该c-p的parent设置为该应用span。
-         如果不包含parent_app_flow，如果该service包含任意一条应用span，则将该c-p的parent设置为该service内最后一条应用span。
-         以上条件都没满足则将该c-p的parent设置为该service的s-p
-      2. 如果c-p包含网络span，将网络span中的第一条的parent设置为该c-p
-      3. s-p如果包含网络span，则将该s-p的parent设置为最后一条网络span
-      
+- 网络span
+  1. 存在tcp_seq相同的flow，非local和rest按照以下优先级确认parent，local和rest就近（比较采集器）排到其他位置（tcp_seq相同）附近（按时间排）
+  ```
+  [c, c-nd, c-hv, c-gw-hv, c-gw, s-gw, s-gw-hv, s-hv, s-nd, s]
+  ```
+  2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
 
-- service间设置parent
-  - 将service中tap_side为s-p的flow的tcp_seq收集为incoming_tcp_seqs,网络span的uid(每条flow的唯一标识)收集为incoming_uids
-  - 将service中tap_side所有为c-p的flow的tcp_seq收集为outgoing_tcp_seqs,网络span的uid收集为outgoing_uids
-  - 若serviceA的outgoing_tcp_seqs 与 serviceB的incoming_tcp_seqs有交集 或者 若serviceA的outgoing_uids与serviceB的incoming_uids有交集
-    - 将serviceB中s-p的进程span的parent设为serviceA中交集部分的最后一条flow
-  - 若s-p此时还未有parent并且该s-p，并且该s-p包含parent_app_flow(应用span的span_id与系统span_id相同),则将该s-p挂载到该应用span的parent_span_id的span上，
+- 系统span，tap_side=s
+  1. 存在tcp_seq相同的flow，按以下优先级确认parent
+  ```
+  [c, c-nd, c-hv, c-gw-hv, c-gw, s-gw, s-gw-hv, s-hv, s-nd, s]
+  ```
+  2. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
+  3. 存在span_id相同且存在parent_span_id的flow，将该系统span的parent设置为span_id等于该parent_span_id的flow
 
+- 系统span，tap_side=c
+  2. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
+  2. 所属service中存在应用span，将该系统span的arent设置为service中最后一条应用span
+  3. 存在syscalltraceid相同且tap_side=s的系统span，该系统span的parent设置为该flow(syscalltraceid相同且tap_side=s)
 
+- 应用span
+  1. 若存在parent_span_id，且存在tap_side=s的flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
+  2. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
+  3. 若有所属service，将该应用span的parent设置为该service的s-p的flow
