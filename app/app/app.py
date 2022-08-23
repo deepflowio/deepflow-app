@@ -45,7 +45,10 @@ def main():
     server.server.register_listener(before_server_stop, 'before_server_stop')
 
     server.init(config.http_request_timeout, config.http_response_timeout)
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(('', config.listen_port))
     server.server.run(workers=WORKER_NUMBER,
                       sock=sock,
