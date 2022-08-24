@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - 'feature-**'
+    tags:
+      - '*'
 #   release:
 #     branches: 
 #       - main
