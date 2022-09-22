@@ -325,9 +325,8 @@ class L7FlowTracing(Base):
             if new_app_metas:
                 for app in apps:
                     app.set_relate(new_flows)
-            new_flows.drop(
-                new_flows.loc[new_flows['related_ids'] == ''].index,
-                inplace=True)
+            new_flows.drop(new_flows.loc[new_flows['related_ids'] == ''].index,
+                           inplace=True)
             dataframe_flowmetas = pd.concat([dataframe_flowmetas, new_flows],
                                             join="outer",
                                             ignore_index=True)
@@ -1113,10 +1112,11 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         related_ids = []
         for related_id in flow["related_ids"]:
             related_id = related_id.split("-")
-            if related_id[0] in related_ids["_id"]:
+            if related_id[0] in flow["_id"]:
                 continue
             if id_map.get(related_id[0]):
-                related_ids.append(f"{id_map[related_id[0]]}-{related_id[1]}-{related_id[0]}")
+                related_ids.append(
+                    f"{id_map[related_id[0]]}-{related_id[1]}-{related_id[0]}")
         flow["related_ids"] = related_ids
 
     # 从Flow中提取Service：一个<vtap_id, local_process_id>二元组认为是一个Service。
