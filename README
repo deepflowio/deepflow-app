@@ -160,20 +160,18 @@
   ```
   2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
 
-- 系统span，tap_side=s
-  1. 存在tcp_seq相同的flow，按以下优先级确认parent
-  ```
-  [c, c-nd, c-hv, c-gw-hv, c-gw, s-gw, s-gw-hv, s-hv, s-nd, s]
-  ```
-  2. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
-  3. 存在span_id相同且存在parent_span_id的flow，将该系统span的parent设置为span_id等于该parent_span_id的flow
+- 应用span
+  1. 若存在parent_span_id，且存在tap_side=s的flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
+  2. 若存在parent_span_id，且span_id等于该parent_span_id的flow存在span_id相同的网络span，则将该应用span的parent设置为该网络span
+  3. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
+  4. 若有所属service，将该应用span的parent设置为该service的s-p的flow
 
 - 系统span，tap_side=c
-  2. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
+  1. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
   2. 所属service中存在应用span，将该系统span的arent设置为service中最后一条应用span
   3. 存在syscalltraceid相同且tap_side=s的系统span，该系统span的parent设置为该flow(syscalltraceid相同且tap_side=s)
 
-- 应用span
-  1. 若存在parent_span_id，且存在tap_side=s的flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
-  2. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
-  3. 若有所属service，将该应用span的parent设置为该service的s-p的flow
+- 系统span，tap_side=s
+  1. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
+  2. 存在span_id相同且存在parent_span_id的flow，将该系统span的parent设置为span_id等于该parent_span_id的flow
+  
