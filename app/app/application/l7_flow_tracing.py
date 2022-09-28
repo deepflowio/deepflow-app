@@ -1516,22 +1516,27 @@ def format(services: list, unattached_flows: list, app_flows: list) -> list:
                     response["tracing"].append(_get_flow_dict(indirect_flow))
                     tracing.add(indirect_flow['_uid'])
     for flow in app_flows:
-        if not flow.get("service"):
-            service_uid = f"-{flow['service_name']}"
-            if service_uid not in metrics_map:
-                metrics_map[service_uid] = {
-                    "service_uid": service_uid,
-                    "service_uname": flow["service_name"],
-                    "duration": 0,
-                }
-            flow["service_uid"] = service_uid
-            flow["service_uname"] = flow["service_name"]
-            metrics_map[service_uid]["duration"] += flow["duration"]
-        else:
-            service_uid = f"{flow['service'].resource_gl2_id}-"
-            flow["service_uid"] = service_uid
-            flow["service_uname"] = metrics_map[service_uid]["service_uname"]
-            metrics_map[service_uid]["duration"] += flow["duration"]
+        if flow['tap_side'] in [
+                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+        ]:
+            if not flow.get("service"):
+                service_uid = f"-{flow['service_name']}"
+                if service_uid not in metrics_map:
+                    metrics_map[service_uid] = {
+                        "service_uid": service_uid,
+                        "service_uname": flow["service_name"],
+                        "duration": 0,
+                    }
+                flow["service_uid"] = service_uid
+                flow["service_uname"] = flow["service_name"]
+                metrics_map[service_uid]["duration"] += flow["duration"]
+            else:
+                service_uid = f"{flow['service'].resource_gl2_id}-"
+                flow["service_uid"] = service_uid
+                flow["service_uname"] = metrics_map[service_uid][
+                    "service_uname"]
+                metrics_map[service_uid]["duration"] += flow["duration"]
+
         if flow['tap_side'] in const.TAP_SIDE_RANKS:
             id_map[flow[
                 "_uid"]] = f"{flow['span_id']}.{flow['tap_side']}.{flow['_uid']}"
