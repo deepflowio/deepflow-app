@@ -448,6 +448,8 @@ class L7TraceMeta:
 
     def set_relate(self, df):
         for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
             if type(self.trace_id) == str and self.trace_id:
                 if self.trace_id == df.trace_id[i]:
                     df.related_ids[i] = str(self._id) + "-traceid"
@@ -467,6 +469,8 @@ class L7XrequestMeta:
 
     def set_relate(self, df):
         for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
             if type(self.x_request_id) == str and self.x_request_id:
                 if self.x_request_id == df.x_request_id[i]:
                     df.related_ids[i] = str(self._id) + "-xrequestid"
@@ -490,6 +494,8 @@ class L7AppMeta:
 
     def set_relate(self, df):
         for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
             if type(self.span_id) == str and self.span_id:
                 if self.span_id == df.span_id[
                         i] or self.span_id == df.parent_span_id[i]:
@@ -538,6 +544,8 @@ class L7NetworkMeta:
 
     def set_relate(self, df):
         for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
             if type(self.span_id) == str:
                 if df.span_id[i] != self.span_id:
                     continue
@@ -609,6 +617,8 @@ class L7SyscallMeta:
 
     def set_relate(self, df):
         for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
             if self.vtap_id != df.vtap_id[i]:
                 continue
             if self.tap_side != df.tap_side[i]:
