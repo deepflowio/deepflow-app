@@ -67,6 +67,19 @@
       abs(self.end_time_us - flow.end_time_us) <= self.network_delay_us
       ```
 
+- 返回结果中对关联关系的描述：
+  
+  - 字段：related_ids
+  - 值：[flowindex-关联type-数据库id]，例：
+  ```
+  ["16-traceid-7148686813239271301", "1-app-7148686813239271297"]
+  ```
+  - 关联type：
+    1. network，表示是通过tcp_seq追踪出的数据
+    2. syscall，表示是通过syscalltraceid追踪出的数据
+    3. app，表示是通过span_id以及parent_span_id追踪出的数据
+    4. traceid，表示是通过trace_id追踪出的数据
+    5. xrequestid，表示是通过x_request_id追踪出的数据
 
 #### merge flow
 
