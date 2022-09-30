@@ -331,7 +331,7 @@ class L7FlowTracing(Base):
             dataframe_flowmetas = pd.concat([dataframe_flowmetas, new_flows],
                                             join="outer",
                                             ignore_index=True).drop_duplicates(
-                                                ["_id"]).reset_index()
+                                                ["_id"]).reset_index(drop=True)
             if len(set(dataframe_flowmetas['_id'])) - len_of_flows < 1:
                 break
         if not l7_flow_ids:
