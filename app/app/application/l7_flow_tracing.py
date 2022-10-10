@@ -116,7 +116,7 @@ MERGE_KEYS = [
 ]
 MERGE_KEY_REQUEST = [
     'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
-    'request_resource', 'request_id'
+    'request_resource', 'request_id', 'trace_id', 'span_id'
 ]
 MERGE_KEY_RESPONSE = [
     'response_status', 'response_code', 'response_exception',
@@ -547,7 +547,8 @@ class L7NetworkMeta:
         for i in range(len(df.index)):
             if df._id[i] == self._id:
                 continue
-            if type(self.span_id) == str:
+            if df.type[i] != L7_FLOW_TYPE_RESPONSE and type(
+                    self.span_id) == str and self.type!= L7_FLOW_TYPE_RESPONSE:
                 if df.span_id[i] != self.span_id:
                     continue
             if type(self.x_request_id) == str:
@@ -584,10 +585,11 @@ class L7NetworkMeta:
 
         sql = '(' + ' OR '.join(sql_filters) + ')'
         tailor_sql = ""
-        if type(self.span_id) == str and self.span_id:
-            tailor_sql += f" AND span_id='{self.span_id}'"
-        else:
-            tailor_sql += f" AND span_id=''"
+        if self.type != L7_FLOW_TYPE_RESPONSE:
+            if type(self.span_id) == str and self.span_id:
+                tailor_sql += f" AND (span_id='{self.span_id}' OR type=1)"
+            else:
+                tailor_sql += f" AND span_id=''"
         if type(self.x_request_id) == str and self.x_request_id:
             tailor_sql += f" AND x_request_id='{self.x_request_id}'"
         else:
