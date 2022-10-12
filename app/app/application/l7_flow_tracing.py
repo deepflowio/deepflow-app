@@ -548,7 +548,8 @@ class L7NetworkMeta:
             if df._id[i] == self._id:
                 continue
             if df.type[i] != L7_FLOW_TYPE_RESPONSE and type(
-                    self.span_id) == str and self.type!= L7_FLOW_TYPE_RESPONSE:
+                    self.span_id
+            ) == str and self.type != L7_FLOW_TYPE_RESPONSE:
                 if df.span_id[i] != self.span_id:
                     continue
             if type(self.x_request_id) == str:
@@ -626,19 +627,6 @@ class L7SyscallMeta:
                 continue
             if self.vtap_id != df.vtap_id[i]:
                 continue
-            if self.tap_side != df.tap_side[i]:
-                if self.tap_side == TAP_SIDE_SERVER_PROCESS and self.end_time_us - self.start_time_us > 0:
-                    if df.start_time_us[
-                            i] < self.start_time_us or df.end_time_us[
-                                i] > self.end_time_us:
-                        continue
-                elif df.tap_side[
-                        i] == TAP_SIDE_SERVER_PROCESS and df.end_time_us[
-                            i] - df.start_time_us[i] > 0:
-                    if df.start_time_us[
-                            i] > self.start_time_us or df.end_time_us[
-                                i] < self.end_time_us:
-                        continue
             if self.syscall_trace_id_request > 0:
                 if self.syscall_trace_id_request == df.syscall_trace_id_request[
                         i] or self.syscall_trace_id_request == df.syscall_trace_id_response[
@@ -1227,7 +1215,7 @@ def app_flow_sort(array):
             if flow_0["parent_span_id"] == flow_1["span_id"]:
                 # 2. 若存在parent_span_id，且span_id等于该parent_span_id的flow存在span_id相同的网络span，则将该应用span的parent设置为该网络span
                 if flow_1.get("network_flows"):
-                    _set_parent(flow_0, flow_1["network_flows"][-1],
+                    _set_parent(flow_0, flow_1["network_flows"].flows[-1],
                                 "app_flow mounted due to parent_network")
                 else:
                     # 3. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
