@@ -7,6 +7,12 @@ on:
       - 'feature-**'
     tags:
       - '*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Why trigger?"
+        required: true 
+        type: string
 #   release:
 #     branches: 
 #       - main
@@ -17,13 +23,100 @@ env:
 
 jobs:
   build_app:
-    runs-on: ubuntu-latest
+    runs-on: cirun-aws-amd64-32c
     steps:
       - name: Checkout
         uses: actions/checkout@v3
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: install docker
+        run: |
+          sudo systemctl stop unattended-upgrades
+          curl -fsSL https://get.docker.com | bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          install: true
+
+      - name: Build and push deepflow app images
+        uses: docker/build-push-action@v2
+        with:
+          context: app
+          push: false 
+          file: app/Dockerfile_depends
+          platforms: linux/amd64
+          outputs: type=local,dest=./app/output_amd64
+
+      - name: Package code build results
+        run: |
+          tar cvf app-artifact-amd64.tar ./app/output_amd64
+
+      - name: Archive code build results
+        uses: actions/upload-artifact@v3
+        with:
+          name: app build results amd64
+          path: |
+            app-artifact-amd64.tar
+
+  build_app_arm64:
+    runs-on: cirun-aws-arm64-32c
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: install docker
+        run: |
+          sudo systemctl stop unattended-upgrades
+          curl -fsSL https://get.docker.com | bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          install: true
+
+      - name: Build and push deepflow app images
+        uses: docker/build-push-action@v2
+        with:
+          context: app
+          push: false 
+          file: app/Dockerfile_depends
+          platforms: linux/arm64
+          outputs: type=local,dest=./app/output_arm64
+
+      - name: Package code build results
+        run: |
+          tar cvf app-artifact-arm64.tar ./app/output_arm64
+
+      - name: Archive code build results
+        uses: actions/upload-artifact@v3
+        with:
+          name: app build results arm64
+          path: |
+            app-artifact-arm64.tar
+
+
+  build_app_image:
+    runs-on: cirun-aws-amd64-16c
+    needs: 
+    - build_app
+    - build_app_arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: install docker
+        run: |
+          sudo systemctl stop unattended-upgrades
+          curl -fsSL https://get.docker.com | bash
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
@@ -62,15 +155,30 @@ jobs:
           echo "IMAGE_TAG_PREFIX=${{ github.ref_name }}"|sed 's|main|latest|' >> $GITHUB_ENV
           echo "IMAGE_TAG=$(git rev-list --count HEAD)" >> $GITHUB_ENV
 
+      - name: Download code build results
+        uses: actions/download-artifact@v3
+        with:
+          name: app build results arm64
+          path: .
+
+      - name: Download code build results
+        uses: actions/download-artifact@v3
+        with:
+          name: app build results amd64
+          path: .
+
+      - name: Unpack code build results
+        run: |
+          tar xvf app-artifact-amd64.tar
+          tar xvf app-artifact-arm64.tar
+
       - name: Build and push deepflow app images
         uses: docker/build-push-action@v2
         with:
           context: app
           push: true 
           file: app/Dockerfile
-          platforms: linux/amd64
-          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache
-          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache
+          platforms: linux/amd64,linux/arm64
           tags: |
             "ghcr.io/${{ github.repository_owner }}/deepflow-ce/${{ env.IMAGE }}:${{ env.IMAGE_TAG_PREFIX }}-${{ env.IMAGE_TAG }}"
             "ghcr.io/${{ github.repository_owner }}/deepflow-ce/${{ env.IMAGE }}:${{ env.IMAGE_TAG_PREFIX }}"
