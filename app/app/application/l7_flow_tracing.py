@@ -213,7 +213,7 @@ class L7FlowTracing(Base):
             ]
             if networks:
                 networks_filters = '((' + ' OR '.join([
-                    nnm.to_sql_filter() for nnm in networks
+                    nnm.to_sql_filter() for nnm in set(networks)
                 ]) + ')' + ' AND (resp_tcp_seq!=0 OR req_tcp_seq!=0))'
                 filters.append(networks_filters)
 
@@ -237,7 +237,7 @@ class L7FlowTracing(Base):
             syscalls = [L7SyscallMeta(nsm) for nsm in new_syscall_metas]
             if syscalls:
                 syscall_filters = '(' + ' OR '.join(
-                    [nsm.to_sql_filter() for nsm in syscalls]) + ')'
+                    [nsm.to_sql_filter() for nsm in set(syscalls)]) + ')'
                 filters.append(syscall_filters)
 
             # 新的应用span追踪信息
@@ -247,6 +247,8 @@ class L7FlowTracing(Base):
                         TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
                         TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
                 ] or not dataframe_flowmetas['span_id'][index]:
+                    continue
+                if dataframe_flowmetas['trace_id'][index] not in [0, '']:
                     continue
                 if type(dataframe_flowmetas['span_id'][index]) == str and \
                     dataframe_flowmetas['span_id'][index] and \
@@ -262,7 +264,7 @@ class L7FlowTracing(Base):
             apps = [L7AppMeta(nam) for nam in new_app_metas]
             if apps:
                 app_filters = '(' + ' OR '.join(
-                    [nam.to_sql_filter() for nam in apps]) + ')'
+                    [nam.to_sql_filter() for nam in set(apps)]) + ')'
                 filters.append(app_filters)
 
             # 主动注入的追踪信息
@@ -276,9 +278,9 @@ class L7FlowTracing(Base):
             trace_ids |= new_trace_ids
             if new_trace_ids:
                 traceids = [L7TraceMeta(ntid) for ntid in new_trace_ids]
+                trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
                 filters.append('(' + ' OR '.join([
-                    "trace_id='{ntid}'".format(ntid=ntid[1])
-                    for ntid in new_trace_ids
+                    "trace_id='{tid}'".format(tid=tid) for tid in trace_ids_set
                 ]) + ')')
 
             new_x_request_ids = set()
@@ -294,9 +296,11 @@ class L7FlowTracing(Base):
                 xrequestids = [
                     L7XrequestMeta(nxrid) for nxrid in new_x_request_ids
                 ]
+                x_request_ids_set = set(
+                    [nxrid[1] for nxrid in new_x_request_ids])
                 filters.append('(' + ' OR '.join([
-                    "x_request_id='{nxrid}'".format(nxrid=nxrid[1])
-                    for nxrid in new_x_request_ids
+                    "x_request_id='{nxrid}'".format(nxrid=nxrid)
+                    for nxrid in x_request_ids_set
                 ]) + ')')
 
             if not filters:
@@ -958,13 +962,18 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 if flow['start_time_us'] < flows[i]['start_time_us']:
                     flows[i]['start_time_us'] = flow['start_time_us']
                 else:
-                    flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
+                    if flows[i]['req_tcp_seq'] in [0, '']:
+                        flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
                 flows[i]['syscall_cap_seq_0'] = flow['syscall_cap_seq_0']
             else:
                 if flow['end_time_us'] > flows[i]['end_time_us']:
                     flows[i]['end_time_us'] = flow['end_time_us']
-                    flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+                    if flows[i]['resp_tcp_seq'] in [0, '']:
+                        flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
                 flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
+            if flow['type'] == L7_FLOW_TYPE_SESSION:
+                flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
+                flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
             # request response合并后type改为session
             if flow['type'] + flows[i]['type'] == 1:
                 flows[i]['type'] = 2
