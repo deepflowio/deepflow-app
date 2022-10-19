@@ -32,6 +32,7 @@ RETURN_FIELDS = list(
     set([
         # 追踪Meta信息
         "l7_protocol",
+        "l7_protocol_str",
         "type",
         "req_tcp_seq",
         "resp_tcp_seq",
@@ -95,6 +96,7 @@ RETURN_FIELDS = list(
         "request_resource",
         "request_id",
         "http_proxy_client",
+        "endpoint",
     ]))
 FIELDS_MAP = {
     "start_time_us": "toUnixTimestamp64Micro(start_time) as start_time_us",
@@ -112,11 +114,12 @@ MERGE_KEYS = [
     'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
     'request_resource', 'request_id', 'response_status', 'response_code',
     'response_exception', 'response_result', 'http_proxy_client', 'trace_id',
-    'span_id', 'x_request_id'
+    'span_id', 'x_request_id', 'l7_protocol_str', 'endpoint'
 ]
 MERGE_KEY_REQUEST = [
     'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
-    'request_resource', 'request_id', 'trace_id', 'span_id'
+    'request_resource', 'request_id', 'trace_id', 'span_id', 'l7_protocol_str',
+    'endpoint'
 ]
 MERGE_KEY_RESPONSE = [
     'response_status', 'response_code', 'response_exception',
@@ -1420,6 +1423,10 @@ def _get_flow_dict(flow: DataFrame):
         flow["tap_side"],
         "l7_protocol":
         flow["l7_protocol"],
+        "l7_protocol_str":
+        flow["l7_protocol_str"],
+        "endpoint":
+        flow["endpoint"],
         "request_type":
         flow["request_type"],
         "request_resource":
