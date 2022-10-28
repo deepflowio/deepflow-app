@@ -330,9 +330,9 @@ class L7FlowTracing(Base):
             l7_flow_ids |= set(dataframe_flowmetas['_id'])
 
             len_of_flows = len(l7_flow_ids)
-            if traceids:
-                for trace_id in traceids:
-                    trace_id.set_relate(new_flows, related_map)
+            # if traceids:
+            #     for trace_id in traceids:
+            #         trace_id.set_relate(new_flows, related_map)
 
             if xrequestids:
                 for x_request_id in xrequestids:
