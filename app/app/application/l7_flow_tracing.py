@@ -602,10 +602,14 @@ class L7NetworkMeta:
         # 由于会话可能没有合并，有一侧的seq可以是零（数据不会存在两侧同时为0的情况）
         # 考虑到网络传输时延，时间需要增加一个delay
         sql_filters = []
-        if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
+        if self.type == L7_FLOW_TYPE_SESSION and self.req_tcp_seq > 0 and self.resp_tcp_seq > 0:
+            sql_filters.append(
+                f"""((req_tcp_seq={self.req_tcp_seq} AND resp_tcp_seq={self.resp_tcp_seq}) OR (req_tcp_seq={self.req_tcp_seq} AND type=0) OR (type=1 AND resp_tcp_seq={self.resp_tcp_seq}))"""
+            )
+        elif self.type == L7_FLOW_TYPE_REQUEST and self.req_tcp_seq > 0:
             sql_filters.append("""(req_tcp_seq={req_tcp_seq})""".format(
                 req_tcp_seq=self.req_tcp_seq))
-        if self.type != L7_FLOW_TYPE_REQUEST and self.resp_tcp_seq > 0:
+        elif self.type == L7_FLOW_TYPE_RESPONSE and self.resp_tcp_seq > 0:
             sql_filters.append("""(resp_tcp_seq={resp_tcp_seq})""".format(
                 resp_tcp_seq=self.resp_tcp_seq))
         if not sql_filters:
