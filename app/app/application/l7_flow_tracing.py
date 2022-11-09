@@ -714,6 +714,12 @@ class Networks:
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
                 return False
             for key in MERGE_KEYS:
+                if flow["type"] == L7_FLOW_TYPE_RESPONSE or not self.req_tcp_seq:
+                    if key in MERGE_KEY_REQUEST:
+                        continue
+                if flow["type"] == L7_FLOW_TYPE_REQUEST or not self.resp_tcp_seq:
+                    if key in MERGE_KEY_RESPONSE:
+                        continue
                 if self.get(key) and flow.get(key) and (self.get(key) !=
                                                         flow.get(key)):
                     return False
