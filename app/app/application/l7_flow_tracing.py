@@ -884,10 +884,9 @@ class Service:
             # x-app的parent是c-p时，一定不属于同一个service
             for client_process_flow in self.direct_flows[1:]:
                 if flow['parent_span_id'] == client_process_flow['span_id']:
+                    flow["parent_syscall_flow"] = client_process_flow
                     return False
             flow["parent_syscall_flow"] = self.direct_flows[0]
-            _set_parent(flow, self.direct_flows[0],
-                        "app_flow mounted on s-p due to parent_span_id")
             flow["service"] = self
             self.app_flow_of_direct_flows.append(flow)
             return True
@@ -1154,6 +1153,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                            key=lambda x: x.get("type"),
                            reverse=True)
     for flow in network_flows:
+        if not flow["req_tcp_seq"] and not flow["resp_tcp_seq"]:
+            continue
         is_add = False
         for network in networks:
             if network.add_flow(flow, network_delay_us):
@@ -1252,10 +1253,10 @@ def networks_set_to_app_fow(array, network_flows):
 def app_flow_sort(array):
 
     for flow_0 in array:
-        # 1. 若存在parent_span_id，且存在tap_side=s的flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
+        # 1. 若存在parent_span_id，且存在flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
         if flow_0.get("parent_syscall_flow"):
             _set_parent(flow_0, flow_0["parent_syscall_flow"],
-                        "app_flow mounted on s-p due to parent_span_id")
+                        "app_flow mounted on syscall due to parent_span_id")
             continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
@@ -1373,8 +1374,15 @@ def format(services: list, networks: list, app_flows: list) -> list:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
 
+    serivce_name_to_service_uid = {}
     for flow in app_flows:
-        if not flow.get("service"):
+        if flow.get("service"):
+            service_uid = f"{flow['service'].resource_gl2_id}-"
+            serivce_name_to_service_uid[flow['service_name']] = service_uid
+
+    for flow in app_flows:
+        if not flow.get("service") and flow[
+                'service_name'] not in serivce_name_to_service_uid:
             service_uid = f"-{flow['service_name']}"
             if service_uid not in metrics_map:
                 metrics_map[service_uid] = {
@@ -1385,7 +1393,12 @@ def format(services: list, networks: list, app_flows: list) -> list:
             flow["service_uid"] = service_uid
             flow["service_uname"] = flow["service_name"]
             metrics_map[service_uid]["duration"] += flow["duration"]
-        else:
+        elif flow['service_name'] in serivce_name_to_service_uid:
+            service_uid = serivce_name_to_service_uid[flow['service_name']]
+            flow["service_uid"] = service_uid
+            flow["service_uname"] = metrics_map[service_uid]["service_uname"]
+            metrics_map[service_uid]["duration"] += flow["duration"]
+        elif flow.get("service"):
             service_uid = f"{flow['service'].resource_gl2_id}-"
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
