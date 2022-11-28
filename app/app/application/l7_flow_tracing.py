@@ -136,6 +136,12 @@ class L7FlowTracing(Base):
         self.failed_regions = set()
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
         _id = self.args.get("_id")
+        self.has_attributes = self.args.get("has_attributes", 0)
+        if not _id:
+            trace_id = self.args.get("trace_id")
+            _id = await self.get_id_by_trace_id(trace_id, time_filter)
+        if not _id:
+            return self.status, {}, self.failed_regions
         base_filter = f"_id={_id}"
         rst = await self.trace_l7_flow(time_filter=time_filter,
                                        base_filter=base_filter,
@@ -144,6 +150,14 @@ class L7FlowTracing(Base):
                                        network_delay_us=network_delay_us,
                                        ntp_delay_us=ntp_delay_us)
         return self.status, rst, self.failed_regions
+
+    async def get_id_by_trace_id(self, trace_id, time_filter):
+        sql = f"SELECT _id FROM l7_flow_log WHERE trace_id='{trace_id}' AND {time_filter} limit 1"
+        resp = await self.query_ck(sql)
+        data = resp["data"]
+        if type(data) != DataFrame:
+            return ""
+        return data["_id"][0]
 
     async def trace_l7_flow(self,
                             time_filter: str,
@@ -359,8 +373,12 @@ class L7FlowTracing(Base):
             return []
         # 获取追踪到的所有应用流日志
         return_fields += RETURN_FIELDS
+        flow_fields = list(RETURN_FIELDS)
+        if self.has_attributes:
+            return_fields.append("attributes")
+            flow_fields.append("attributes")
         l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
-                                              RETURN_FIELDS)
+                                              flow_fields)
         if type(l7_flows) != DataFrame:
             return []
         l7_flows.insert(0, "related_ids", "")
@@ -411,7 +429,7 @@ class L7FlowTracing(Base):
         SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
-        trace_id, x_request_id, _id, tap_side, resource_gl0_0, resource_gl0_1  
+        trace_id, x_request_id, _id, tap_side, resource_gl0_0, resource_gl0_1
         FROM `l7_flow_log` 
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -1408,10 +1426,32 @@ def format(services: list, networks: list, app_flows: list) -> list:
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
         trace["deepflow_parent_span_id"] = id_map[trace.pop("parent_id")]
-    response["tracing"] = sorted(response["tracing"],
-                                 key=lambda x: x["start_time_us"])
+    response["tracing"] = sort_tracing(response["tracing"])
     response["services"] = _call_metrics(metrics_map)
     return response
+
+
+def sort_tracing(traces):
+    spans = []
+    traces = sorted(traces, key=lambda x: x["start_time_us"])
+    for i, trace in enumerate(traces):
+        if trace["parent_span_id"] == "":
+            spans.append(trace)
+            spans.extend(
+                find_spans_by_parent_id(trace["span_id"],
+                                        traces[0:i] + trace[i + 1:]))
+    return spans
+
+
+def find_spans_by_parent_id(parent_span_id, traces):
+    spans = []
+    for i, trace in enumerate(traces):
+        if trace["parent_span_id"] == parent_span_id:
+            spans.append(trace)
+            spans.extend(
+                find_spans_by_parent_id(trace["span_id"],
+                                        traces[0:i] + traces[i + 1:]))
+    return spans
 
 
 def _call_metrics(services: dict):
@@ -1480,6 +1520,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["syscall_cap_seq_0"],
         "syscall_cap_seq_1":
         flow["syscall_cap_seq_1"],
+        "attributes":
+        flow.get("attributes", None),
         "id":
         flow["_uid"],
         "parent_id":
