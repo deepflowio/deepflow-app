@@ -1425,33 +1425,34 @@ def format(services: list, networks: list, app_flows: list) -> list:
         response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
-        trace["deepflow_parent_span_id"] = id_map[trace.pop("parent_id")]
-    response["tracing"] = sort_tracing(response["tracing"])
+        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
+    response["tracing"] = TraceSort(response["tracing"]).sort_tracing()
     response["services"] = _call_metrics(metrics_map)
     return response
 
 
-def sort_tracing(traces):
-    spans = []
-    traces = sorted(traces, key=lambda x: x["start_time_us"])
-    for i, trace in enumerate(traces):
-        if trace["parent_span_id"] == "":
-            spans.append(trace)
-            spans.extend(
-                find_spans_by_parent_id(trace["span_id"],
-                                        traces[0:i] + traces[i + 1:]))
-    return spans
+class TraceSort:
+    def __init__(self, traces):
+        self.traces = traces
+        self.sorted_indexs = []
 
+    def sort_tracing(self):
+        self.traces = sorted(self.traces, key=lambda x: x["start_time_us"])
+        self.uid_index_map = {trace["id"]: i for i, trace in enumerate(self.traces)}
+        spans = []
+        for trace in self.traces:
+            if trace["parent_id"] == -1:
+                spans.append(trace)
+                spans.extend(self.find_child(trace["childs"]))
+        return spans
 
-def find_spans_by_parent_id(parent_span_id, traces):
-    spans = []
-    for i, trace in enumerate(traces):
-        if trace["parent_span_id"] == parent_span_id:
+    def find_child(self, child_ids):
+        spans = []
+        for _id in child_ids:
+            trace = self.traces[self.uid_index_map[_id]]
             spans.append(trace)
-            spans.extend(
-                find_spans_by_parent_id(trace["span_id"],
-                                        traces[0:i] + traces[i + 1:]))
-    return spans
+            spans.extend(self.find_child(trace["childs"]))
+        return spans
 
 
 def _call_metrics(services: dict):
@@ -1526,6 +1527,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["_uid"],
         "parent_id":
         flow.get("parent_id", -1),
+        "childs":
+        flow.get("childs", []),
         "process_id":
         flow.get("process_id", None),
         "vtap_id":
@@ -1574,6 +1577,10 @@ def _set_parent(flow, flow_parent, info=None):
                                     flow['start_time_us'])
     else:
         flow_parent['duration'] = 0
+    if flow_parent.get("childs"):
+        flow_parent["childs"].append(flow['_uid'])
+    else:
+        flow_parent["childs"] = [flow['_uid']]
     flow['set_parent_info'] = info
 
 
