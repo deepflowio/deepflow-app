@@ -1439,7 +1439,7 @@ def sort_tracing(traces):
             spans.append(trace)
             spans.extend(
                 find_spans_by_parent_id(trace["span_id"],
-                                        traces[0:i] + trace[i + 1:]))
+                                        traces[0:i] + traces[i + 1:]))
     return spans
 
 
