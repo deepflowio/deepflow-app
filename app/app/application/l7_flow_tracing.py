@@ -1363,7 +1363,7 @@ def format(services: list, networks: list, app_flows: list) -> list:
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
             direct_flow_span_id = generate_span_id(
-            ) if not flow.get('span_id') else flow['span_id']
+            ) if not flow.get('span_id') or len(str(flow['span_id'])) < 16 else flow['span_id']
             id_map[flow[
                 '_uid']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_uid']}"
             if flow['_uid'] not in tracing:
