@@ -59,6 +59,7 @@ RETURN_FIELDS = list(
         "process_id_0",
         "process_id_1",
         "tap_side",
+        "Enum(tap_side)",
         "subnet_id_0",
         "subnet_0",
         "ip_0",
@@ -1365,7 +1366,8 @@ def format(services: list, networks: list, app_flows: list) -> list:
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
             direct_flow_span_id = generate_span_id(
-            ) if not flow.get('span_id') or len(str(flow['span_id'])) < 16 else flow['span_id']
+            ) if not flow.get('span_id') or len(str(
+                flow['span_id'])) < 16 else flow['span_id']
             id_map[flow[
                 '_uid']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_uid']}"
             if flow['_uid'] not in tracing:
@@ -1440,7 +1442,10 @@ class TraceSort:
 
     def sort_tracing(self):
         self.traces = sorted(self.traces, key=lambda x: x["start_time_us"])
-        self.uid_index_map = {trace["id"]: i for i, trace in enumerate(self.traces)}
+        self.uid_index_map = {
+            trace["id"]: i
+            for i, trace in enumerate(self.traces)
+        }
         spans = []
         for trace in self.traces:
             if trace["parent_id"] == -1:
@@ -1487,6 +1492,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["duration"],
         "tap_side":
         flow["tap_side"],
+        "Enum(tap_side)":
+        flow.get("Enum(tap_side)"),
         "l7_protocol":
         flow["l7_protocol"],
         "l7_protocol_str":
