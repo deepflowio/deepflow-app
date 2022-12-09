@@ -1322,6 +1322,8 @@ def service_sort(services, app_flows):
 
             server_process_parent_span_id = services[i].direct_flows[0].get(
                 "parent_span_id", None)
+            if server_process_parent_span_id not in app_flows_map:
+                continue
             # s-p没有c-app的parent
             if server_process_parent_span_id is None or server_process_parent_span_id == '':
                 continue
