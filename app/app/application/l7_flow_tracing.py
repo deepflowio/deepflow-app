@@ -594,10 +594,12 @@ class L7NetworkMeta:
                 continue
             if df.type[i] != L7_FLOW_TYPE_RESPONSE and type(
                     self.span_id
-            ) == str and self.type != L7_FLOW_TYPE_RESPONSE:
+            ) == str and self.type != L7_FLOW_TYPE_RESPONSE and type(
+                    df.span_id[i]) == str and df.span_id[i]:
                 if df.span_id[i] != self.span_id:
                     continue
-            if type(self.x_request_id) == str:
+            if type(self.x_request_id) == str and type(
+                    df.x_request_id[i]) == str and df.x_request_id[i]:
                 if df.x_request_id[i] != self.x_request_id:
                     continue
             if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
@@ -637,13 +639,9 @@ class L7NetworkMeta:
         tailor_sql = ""
         if self.type != L7_FLOW_TYPE_RESPONSE:
             if type(self.span_id) == str and self.span_id:
-                tailor_sql += f" AND (span_id='{self.span_id}' OR type=1)"
-            else:
-                tailor_sql += f" AND span_id=''"
+                tailor_sql += f" AND (span_id='{self.span_id}' OR type=1 OR span_id='')"
         if type(self.x_request_id) == str and self.x_request_id:
-            tailor_sql += f" AND x_request_id='{self.x_request_id}'"
-        else:
-            tailor_sql += f" AND x_request_id=''"
+            tailor_sql += f" AND (x_request_id='{self.x_request_id}' OR x_request_id='')"
         if tailor_sql:
             sql = f"({sql} {tailor_sql})"
         return sql
