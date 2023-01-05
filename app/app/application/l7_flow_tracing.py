@@ -276,8 +276,8 @@ class L7FlowTracing(Base):
                         TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
                 ] or not dataframe_flowmetas['span_id'][index]:
                     continue
-                if dataframe_flowmetas['trace_id'][index] not in [0, '']:
-                    continue
+                #if dataframe_flowmetas['trace_id'][index] not in [0, '']:
+                #    continue
                 if type(dataframe_flowmetas['span_id'][index]) == str and \
                     dataframe_flowmetas['span_id'][index] and \
                         type(dataframe_flowmetas['parent_span_id'][index]) == str and \
@@ -360,7 +360,7 @@ class L7FlowTracing(Base):
                 for network in networks:
                     network.set_relate(new_flows, related_map)
 
-            if new_app_metas:
+            if apps:
                 for app in apps:
                     app.set_relate(new_flows, related_map)
             dataframe_flowmetas = pd.concat([dataframe_flowmetas, new_flows],
@@ -1436,7 +1436,10 @@ class TraceSort:
 
     def sort_tracing(self):
         self.traces = sorted(self.traces, key=lambda x: x["start_time_us"])
-        self.uid_index_map = {trace["id"]: i for i, trace in enumerate(self.traces)}
+        self.uid_index_map = {
+            trace["id"]: i
+            for i, trace in enumerate(self.traces)
+        }
         spans = []
         for trace in self.traces:
             if trace["parent_id"] == -1:
