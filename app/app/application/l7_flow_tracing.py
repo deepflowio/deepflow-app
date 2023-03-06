@@ -72,8 +72,8 @@ RETURN_FIELDS = list(
         "subnet_id_1",
         "subnet_1",
         "ip_1",
-        "service_name",
-        "service_instance_id",
+        "app_service",
+        "app_instance",
         "resource_gl0_type_1",
         "resource_gl0_id_1",
         "resource_gl0_1",
@@ -1223,7 +1223,7 @@ def app_flow_set_service(array):
             continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
-                if flow_0["service_name"] == flow_1["service_name"]:
+                if flow_0["app_service"] == flow_1["app_service"]:
                     if flow_0.get("service",
                                   None) and not flow_1.get("service", None):
                         flow_1["service"] = flow_0["service"]
@@ -1241,7 +1241,7 @@ def app_flow_set_service(array):
             continue
         for flow_1 in array:
             if flow_0["parent_span_id"] == flow_1["span_id"]:
-                if flow_0["service_name"] == flow_1["service_name"]:
+                if flow_0["app_service"] == flow_1["app_service"]:
                     if flow_0.get("service",
                                   None) and not flow_1.get("service", None):
                         flow_1["service"] = flow_0["service"]
@@ -1398,23 +1398,23 @@ def format(services: list, networks: list, app_flows: list) -> list:
     for flow in app_flows:
         if flow.get("service"):
             service_uid = f"{flow['service'].resource_gl2_id}-"
-            serivce_name_to_service_uid[flow['service_name']] = service_uid
+            serivce_name_to_service_uid[flow['app_service']] = service_uid
 
     for flow in app_flows:
         if not flow.get("service") and flow[
-                'service_name'] not in serivce_name_to_service_uid:
-            service_uid = f"-{flow['service_name']}"
+                'app_service'] not in serivce_name_to_service_uid:
+            service_uid = f"-{flow['app_service']}"
             if service_uid not in metrics_map:
                 metrics_map[service_uid] = {
                     "service_uid": service_uid,
-                    "service_uname": flow["service_name"],
+                    "service_uname": flow["app_service"],
                     "duration": 0,
                 }
             flow["service_uid"] = service_uid
-            flow["service_uname"] = flow["service_name"]
+            flow["service_uname"] = flow["app_service"]
             metrics_map[service_uid]["duration"] += flow["duration"]
-        elif flow['service_name'] in serivce_name_to_service_uid:
-            service_uid = serivce_name_to_service_uid[flow['service_name']]
+        elif flow['app_service'] in serivce_name_to_service_uid:
+            service_uid = serivce_name_to_service_uid[flow['app_service']]
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
@@ -1544,10 +1544,10 @@ def _get_flow_dict(flow: DataFrame):
         flow.get("service_uid", None),
         "service_uname":
         flow.get("service_uname", None),
-        "service_name":
-        flow.get("service_name", None),
-        "service_instance_id":
-        flow.get("service_instance_id", None),
+        "app_service":
+        flow.get("app_service", None),
+        "app_instance":
+        flow.get("app_instance", None),
         "tap_port":
         flow["tap_port"],
         "tap_port_name":
