@@ -376,8 +376,8 @@ class L7FlowTracing(Base):
         return_fields += RETURN_FIELDS
         flow_fields = list(RETURN_FIELDS)
         if self.has_attributes:
-            return_fields.append("attributes")
-            flow_fields.append("attributes")
+            return_fields.append("attribute")
+            flow_fields.append("attribute")
         l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
                                               flow_fields)
         if type(l7_flows) != DataFrame:
@@ -1528,8 +1528,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["syscall_cap_seq_0"],
         "syscall_cap_seq_1":
         flow["syscall_cap_seq_1"],
-        "attributes":
-        flow.get("attributes", None),
+        "attribute":
+        flow.get("attribute", None),
         "id":
         flow["_uid"],
         "parent_id":
