@@ -1,7 +1,7 @@
-# deepflow-app
+# Deepflow-App
 DeepFlow-app is based on the DeepFlow visibility platform, providing the ability to call the link trace function
 
-## background and premise
+## Background and premise
 
 DeepFlow stores the details related to system calls and network calls in Log Event format, and there are three kinds of data according to the Flow `type` classification:
 - a single request for Event data.
