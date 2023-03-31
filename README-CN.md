@@ -21,4 +21,4 @@ DeepFlow 将系统调用和网络调用相关的细节以 Log Event 格式存储
 - 排序合并后的数据，构建符合调用栈的类 Span 数据。
 
 ## 其他
-相关细节请参考[这里](#)
+相关细节请参考[这里](https://github.com/deepflowio/deepflow-app/blob/feature-edit-desc/HOW-TO-GET-SPAN-LIKE-DATA.md)
