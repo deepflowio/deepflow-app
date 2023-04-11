@@ -1363,6 +1363,7 @@ def format(services: list, networks: list, app_flows: list) -> list:
             metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
+            flow['process_id'] = service.process_id
             direct_flow_span_id = generate_span_id(
             ) if not flow.get('span_id') or len(str(
                 flow['span_id'])) < 16 else flow['span_id']
