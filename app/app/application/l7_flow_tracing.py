@@ -707,7 +707,7 @@ class L7SyscallMeta:
                     syscall_trace_id_response=self.syscall_trace_id_response))
         if not sql_filters:
             return '1!=1'
-        sql = f"vtap_id={self.vtap_id} AND ({' OR '.join(sql_filters)})"
+        sql = f"vtap_id={self.vtap_id} AND start_time <=fromUnixTimestamp64Micro({self.end_time_us}) AND end_time >=fromUnixTimestamp64Micro({self.start_time_us}) AND ({' OR '.join(sql_filters)})"
         return f"({sql})"
 
 
