@@ -707,6 +707,7 @@ class L7SyscallMeta:
                     syscall_trace_id_response=self.syscall_trace_id_response))
         if not sql_filters:
             return '1!=1'
+        # filter time range to prune
         sql = f"vtap_id={self.vtap_id} AND start_time <=fromUnixTimestamp64Micro({self.end_time_us}) AND end_time >=fromUnixTimestamp64Micro({self.start_time_us}) AND ({' OR '.join(sql_filters)})"
         return f"({sql})"
 
@@ -867,15 +868,21 @@ class Service:
                 'resource_gl2',
                 'process_kname',
         ]:
-            if getattr(self, key):
-                flow[key] = getattr(self, key)
-                continue
             if flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
                 direction_key = key + "_0"
-            elif flow['tap_side'] == TAP_SIDE_SERVER_PROCESS:
+            else:
                 direction_key = key + "_1"
-            setattr(self, key, flow[direction_key])
-            flow[key] = flow[direction_key]
+            if getattr(self, key) and key != 'resource_gl2':
+                flow[key] = getattr(self, key)
+                continue
+            elif not getattr(self, key):
+                setattr(self, key, flow[direction_key])
+                flow[key] = flow[direction_key]
+            else:
+                if self.resource_gl2_type in [0, 255]:
+                    setattr(self, key, flow[direction_key])
+                    setattr(self, 'resource_gl2_type',
+                            flow[direction_key.replace("gl2", "gl2_type")])
         self.direct_flows.append(flow)
 
     def attach_app_flow(self, flow: dict):
