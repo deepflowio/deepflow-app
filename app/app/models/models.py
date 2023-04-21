@@ -3,6 +3,7 @@ from schematics.types import IntType, StringType, BooleanType
 
 
 class FlowLogL7Tracing(Model):
+    region = StringType(serialized_name="REGION", required=False)
     time_start = IntType(serialized_name="TIME_START",
                          required=True,
                          min_value=0)

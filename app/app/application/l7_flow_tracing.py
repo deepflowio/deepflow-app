@@ -394,7 +394,7 @@ class L7FlowTracing(Base):
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
-        response = await querier.exec_all_clusters(DATABASE, sql)
+        response = await querier.exec_all_clusters(DATABASE, sql, region_name=self.region)
         '''
         database = 'flow_log'  # database
         host = '10.1.20.22'  # ck ip
@@ -438,7 +438,7 @@ class L7FlowTracing(Base):
                    l7_tracing_limit=config.l7_tracing_limit)
         response = await self.query_ck(sql)
         self.status.append("Query FlowMetas", response)
-        return response['data']
+        return response.get("data", [])
 
     async def query_all_flows(self, time_filter: str, l7_flow_ids: list,
                               return_fields: list):
