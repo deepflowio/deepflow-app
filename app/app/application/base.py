@@ -8,3 +8,4 @@ class Base(object):
         self.end_time = int(self.args.get("time_end", 0))
         self.headers = headers
         self.status = Status()
+        self.region = self.args.get("region", None)
