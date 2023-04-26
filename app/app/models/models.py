@@ -1,5 +1,8 @@
 from schematics.models import Model
 from schematics.types import IntType, StringType, BooleanType
+from schematics.types.compound import ListType, ModelType
+
+SPAN_KIND = [0, 1, 2, 3, 4, 5]
 
 
 class FlowLogL7Tracing(Model):
@@ -26,3 +29,35 @@ class FlowLogL7Tracing(Model):
                            required=False,
                            min_value=1,
                            default=10000)
+
+
+class AppSpans(Model):
+    start_time_us = IntType(serialized_name="start_time_us",
+                            required=True,
+                            min_value=0)
+    end_time_us = IntType(serialized_name="end_time_us",
+                          required=True,
+                          min_value=0)
+    span_kind = IntType(serialized_name="span_kind",
+                        required=True,
+                        choices=SPAN_KIND)
+    trace_id = StringType(serialized_name="trace_id", required=True)
+    span_id = StringType(serialized_name="span_id", required=True)
+    parent_span_id = StringType(serialized_name="parent_span_id",
+                                required=True)
+
+
+class TracingCompletionByExternalAppSpans(Model):
+    app_spans = ListType(ModelType(AppSpans),
+                         serialized_name="APP_SPANS",
+                         min_size=1,
+                         required=True)
+    max_iteration = IntType(serialized_name="MAX_ITERATION",
+                            required=False,
+                            min_value=1,
+                            default=30)
+    network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
+                               required=False,
+                               min_value=1,
+                               default=3000000)
+    debug = BooleanType(serialized_name="DEBUG", required=False)
