@@ -389,12 +389,14 @@ class L7FlowTracing(Base):
         # 对所有应用流日志排序
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
-
-        return format(l7_flows_merged, networks, app_flows)
+        return format(l7_flows_merged, networks, app_flows,
+                      self.args.get('_id'))
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
-        response = await querier.exec_all_clusters(DATABASE, sql, region_name=self.region)
+        response = await querier.exec_all_clusters(DATABASE,
+                                                   sql,
+                                                   region_name=self.region)
         '''
         database = 'flow_log'  # database
         host = '10.1.20.22'  # ck ip
@@ -708,7 +710,7 @@ class L7SyscallMeta:
         if not sql_filters:
             return '1!=1'
         # filter time range to prune
-        sql = f"vtap_id={self.vtap_id} AND start_time <=fromUnixTimestamp64Micro({self.end_time_us}) AND end_time >=fromUnixTimestamp64Micro({self.start_time_us}) AND ({' OR '.join(sql_filters)})"
+        sql = f"vtap_id={self.vtap_id} AND ({' OR '.join(sql_filters)})"
         return f"({sql})"
 
 
@@ -1194,7 +1196,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             if service.attach_app_flow(app_flow):
                 break
     app_flow_set_service(app_flows)
-
     # 获取没有系统span存在的networks分组
     net_spanid_flows = defaultdict(list)
     for network in networks:
@@ -1220,7 +1221,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     services = list(service_map.values())
     # s-p排序
     service_sort(services, app_flows)
-
     return services, app_flows, networks
 
 
@@ -1347,29 +1347,12 @@ def service_sort(services, app_flows):
                 continue
 
 
-def format(services: list, networks: list, app_flows: list) -> list:
-    response = {'services': [], 'tracing': []}
-    metrics_map = {}
+def format_trace(services: list, networks: list, app_flows: list) -> dict:
+    response = {'tracing': []}
     tracing = set()
     id_map = {-1: ""}
     for service in services:
-        service_uid = f"{service.resource_gl2_id}-"
-        service_uname = service.resource_gl2 if service.resource_gl2 else service.ip
-        if service_uid not in metrics_map:
-            metrics_map[service_uid] = {
-                "service_uid": service_uid,
-                "service_uname": service_uname,
-                "duration": 0,
-            }
-        else:
-            if metrics_map[service_uid].get('service_uname'):
-                pass
-            elif service_uname:
-                metrics_map[service_uid]['service_uname'] = service_uname
         for index, flow in enumerate(service.direct_flows):
-            metrics_map[service_uid]["duration"] += flow["duration"]
-            flow['service_uid'] = service_uid
-            flow['service_uname'] = service_uname
             flow['process_id'] = service.process_id
             direct_flow_span_id = generate_span_id(
             ) if not flow.get('span_id') or len(str(
@@ -1381,10 +1364,6 @@ def format(services: list, networks: list, app_flows: list) -> list:
                 tracing.add(flow['_uid'])
             if flow.get("networks"):
                 for indirect_flow in flow["networks"].flows:
-                    #if indirect_flow["start_time_us"] < flow["start_time_us"]:
-                    #    flow["start_time_us"] = indirect_flow["start_time_us"]
-                    #if indirect_flow["end_time_us"] > flow["end_time_us"]:
-                    #    flow["end_time_us"] = indirect_flow["end_time_us"]
                     if indirect_flow["response_status"] > flow[
                             "response_status"]:
                         flow["response_status"] = indirect_flow[
@@ -1402,13 +1381,92 @@ def format(services: list, networks: list, app_flows: list) -> list:
                 response["tracing"].append(_get_flow_dict(flow))
                 tracing.add(flow['_uid'])
 
+    for flow in app_flows:
+        id_map[flow["_uid"]] = flow["span_id"]
+        response["tracing"].append(_get_flow_dict(flow))
+    for trace in response["tracing"]:
+        trace["deepflow_span_id"] = id_map[trace["id"]]
+        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
+    response["tracing"] = TraceSort(response["tracing"]).sort_tracing()
+    return response
+
+
+def pruning_trace(response, _id):
+    tree = []
+    root_start_time_us = 0
+    root_end_time_us = 0
+    tree_ids = set()
+    for i, trace in enumerate(response.get('tracing', [])):
+        trace_start_time_us = trace.get('start_time_us', 0)
+        trace_end_time_us = trace.get('end_time_us', 0)
+        _ids = trace.get('_ids')
+        if not tree:
+            tree.append(trace)
+            root_start_time_us = trace_start_time_us
+            root_end_time_us = trace_end_time_us
+            tree_ids |= set(_ids)
+            continue
+        if trace_start_time_us <= root_end_time_us and trace_end_time_us >= root_start_time_us:
+            tree.append(trace)
+            tree_ids |= set(_ids)
+        else:
+            if _id in tree_ids:
+                response['tracing'] = tree
+                break
+            else:
+                tree = [trace]
+                tree_ids = set()
+                tree_ids |= set(_ids)
+                root_start_time_us = trace_start_time_us
+                root_end_time_us = trace_end_time_us
+
+
+def merge_service(services, app_flows, response):
+    metrics_map = {}
+    prun_services = set()
+    resource_gl2s = set()
+    ids = set()
+    id_to_trace_map = {}
+    for res in response.get('tracing', []):
+        id_to_trace_map[res.get('id')] = res
+        if res.get('resource_gl2'):
+            resource_gl2s.add(res.get('resource_gl2'))
+        ids.add(res.get('id'))
+    for service in services:
+        if service.resource_gl2 in resource_gl2s:
+            prun_services.add(service)
+    for service in prun_services:
+        service_uid = f"{service.resource_gl2_id}-"
+        service_uname = service.resource_gl2 if service.resource_gl2 else service.ip
+        if service_uid not in metrics_map:
+            metrics_map[service_uid] = {
+                "service_uid": service_uid,
+                "service_uname": service_uname,
+                "duration": 0,
+            }
+        else:
+            if metrics_map[service_uid].get('service_uname'):
+                pass
+            elif service_uname:
+                metrics_map[service_uid]['service_uname'] = service_uname
+        for index, flow in enumerate(service.direct_flows):
+            metrics_map[service_uid]["duration"] += flow["duration"]
+            flow['service_uid'] = service_uid
+            flow['service_uname'] = service_uname
+            trace = id_to_trace_map.get(flow.get('_uid'))
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = flow["app_service"]
+            flow['process_id'] = service.process_id
     serivce_name_to_service_uid = {}
     for flow in app_flows:
         if flow.get("service"):
             service_uid = f"{flow['service'].resource_gl2_id}-"
             serivce_name_to_service_uid[flow['app_service']] = service_uid
-
     for flow in app_flows:
+        if flow.get('_uid') not in ids:
+            continue
+        trace = id_to_trace_map.get(flow.get('_uid'))
         if not flow.get("service") and flow[
                 'app_service'] not in serivce_name_to_service_uid:
             service_uid = f"-{flow['app_service']}"
@@ -1420,24 +1478,47 @@ def format(services: list, networks: list, app_flows: list) -> list:
                 }
             flow["service_uid"] = service_uid
             flow["service_uname"] = flow["app_service"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = flow["app_service"]
             metrics_map[service_uid]["duration"] += flow["duration"]
         elif flow['app_service'] in serivce_name_to_service_uid:
             service_uid = serivce_name_to_service_uid[flow['app_service']]
+            if service_uid not in metrics_map:
+                metrics_map[service_uid] = {
+                    "service_uid": service_uid,
+                    "service_uname": flow["app_service"],
+                    "duration": 0,
+                }
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = metrics_map[service_uid][
+                    "service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
         elif flow.get("service"):
             service_uid = f"{flow['service'].resource_gl2_id}-"
+            if service_uid not in metrics_map:
+                metrics_map[service_uid] = {
+                    "service_uid": service_uid,
+                    "service_uname": flow["app_service"],
+                    "duration": 0,
+                }
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = metrics_map[service_uid][
+                    "service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
-        id_map[flow["_uid"]] = flow["span_id"]
-        response["tracing"].append(_get_flow_dict(flow))
-    for trace in response["tracing"]:
-        trace["deepflow_span_id"] = id_map[trace["id"]]
-        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
-    response["tracing"] = TraceSort(response["tracing"]).sort_tracing()
     response["services"] = _call_metrics(metrics_map)
+
+
+def format(services, networks, app_flows, _id):
+    response = format_trace(services, networks, app_flows)
+    pruning_trace(response, _id)
+    merge_service(services, app_flows, response)
     return response
 
 
