@@ -1395,26 +1395,28 @@ def pruning_trace(response, _id):
     tree = []
     root_start_time_us = 0
     root_end_time_us = 0
-    _ids = set()
+    tree_ids = set()
     for i, trace in enumerate(response.get('tracing', [])):
         trace_start_time_us = trace.get('start_time_us', 0)
         trace_end_time_us = trace.get('end_time_us', 0)
-        _id = trace.get('_id')
+        _ids = trace.get('_ids')
         if not tree:
             tree.append(trace)
             root_start_time_us = trace_start_time_us
             root_end_time_us = trace_end_time_us
+            tree_ids |= set(_ids)
+            continue
         if trace_start_time_us <= root_end_time_us and trace_end_time_us >= root_start_time_us:
             tree.append(trace)
-            _ids.add(_id)
+            tree_ids |= set(_ids)
         else:
-            if _id in _ids:
+            if _id in tree_ids:
                 response['tracing'] = tree
                 break
             else:
                 tree = [trace]
-                _ids = set()
-                _ids.add(_id)
+                tree_ids = set()
+                tree_ids |= set(_ids)
                 root_start_time_us = trace_start_time_us
                 root_end_time_us = trace_end_time_us
 
@@ -1452,10 +1454,10 @@ def merge_service(services, app_flows, response):
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
             trace = id_to_trace_map.get(flow.get('_uid'))
-            trace["service_uid"] = service_uid
-            trace["service_uname"] = flow["app_service"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = flow["app_service"]
             flow['process_id'] = service.process_id
-
     serivce_name_to_service_uid = {}
     for flow in app_flows:
         if flow.get("service"):
@@ -1476,22 +1478,39 @@ def merge_service(services, app_flows, response):
                 }
             flow["service_uid"] = service_uid
             flow["service_uname"] = flow["app_service"]
-            trace["service_uid"] = service_uid
-            trace["service_uname"] = flow["app_service"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = flow["app_service"]
             metrics_map[service_uid]["duration"] += flow["duration"]
         elif flow['app_service'] in serivce_name_to_service_uid:
             service_uid = serivce_name_to_service_uid[flow['app_service']]
+            if service_uid not in metrics_map:
+                metrics_map[service_uid] = {
+                    "service_uid": service_uid,
+                    "service_uname": flow["app_service"],
+                    "duration": 0,
+                }
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
-            trace["service_uid"] = service_uid
-            trace["service_uname"] = metrics_map[service_uid]["service_uname"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = metrics_map[service_uid][
+                    "service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
         elif flow.get("service"):
             service_uid = f"{flow['service'].resource_gl2_id}-"
+            if service_uid not in metrics_map:
+                metrics_map[service_uid] = {
+                    "service_uid": service_uid,
+                    "service_uname": flow["app_service"],
+                    "duration": 0,
+                }
             flow["service_uid"] = service_uid
             flow["service_uname"] = metrics_map[service_uid]["service_uname"]
-            trace["service_uid"] = service_uid
-            trace["service_uname"] = metrics_map[service_uid]["service_uname"]
+            if trace:
+                trace["service_uid"] = service_uid
+                trace["service_uname"] = metrics_map[service_uid][
+                    "service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
     response["services"] = _call_metrics(metrics_map)
 
