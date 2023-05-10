@@ -1519,6 +1519,15 @@ def format(services, networks, app_flows, _id):
     response = format_trace(services, networks, app_flows)
     pruning_trace(response, _id)
     merge_service(services, app_flows, response)
+    deepflow_span_ids = {
+        trace.get('deepflow_span_id')
+        for trace in response.get('tracing', [])
+    }
+    for trace in response.get('tracing', []):
+        if trace.get('deepflow_parent_span_id') and trace[
+                'deepflow_parent_span_id'] not in deepflow_span_ids:
+            trace['deepflow_parent_span_id'] = ''
+            trace['parent_id'] = -1
     return response
 
 
