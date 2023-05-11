@@ -289,7 +289,8 @@ class TracingCompletion(L7FlowTracing):
         # 对所有应用流日志排序
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
-        return format(l7_flows_merged, networks, app_flows)
+        return format(l7_flows_merged, networks, app_flows,
+                      self.args.get('_id'))
 
     # update start time and end time
     def update_time(self):
