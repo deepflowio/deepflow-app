@@ -1456,7 +1456,7 @@ def merge_service(services, app_flows, response):
             trace = id_to_trace_map.get(flow.get('_uid'))
             if trace:
                 trace["service_uid"] = service_uid
-                trace["service_uname"] = flow["app_service"]
+                trace["service_uname"] = service_uname
             flow['process_id'] = service.process_id
     serivce_name_to_service_uid = {}
     for flow in app_flows:
