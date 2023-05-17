@@ -1429,10 +1429,11 @@ def merge_service(services, app_flows, response):
     for res in response.get('tracing', []):
         id_to_trace_map[res.get('id')] = res
         if res.get('resource_gl2'):
-            resource_gl2s.add(res.get('resource_gl2'))
+            resource_gl2s.add(
+                (res.get('resource_gl2_id'), res.get('resource_gl2')))
         ids.add(res.get('id'))
     for service in services:
-        if service.resource_gl2 in resource_gl2s:
+        if (service.resource_gl2_id, service.resource_gl2) in resource_gl2s:
             prun_services.add(service)
     for service in prun_services:
         service_uid = f"{service.resource_gl2_id}-"
@@ -1662,6 +1663,7 @@ def _get_flow_dict(flow: DataFrame):
         flow_dict["subnet"] = flow.get("subnet")
         flow_dict["ip"] = flow.get("ip")
         flow_dict["resource_gl2"] = flow.get("resource_gl2")
+        flow_dict["resource_gl2_id"] = flow.get("resource_gl2_id")
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
