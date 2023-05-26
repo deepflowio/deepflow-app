@@ -112,20 +112,14 @@ FIELDS_MAP = {
     "icon_id(resource_gl0_1) as resource_gl0_1_icon_id"
 }
 MERGE_KEYS = [
-    'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
-    'request_resource', 'request_id', 'response_status', 'response_code',
-    'response_exception', 'response_result', 'http_proxy_client', 'trace_id',
-    'span_id', 'x_request_id', 'l7_protocol_str', 'endpoint'
+    'l7_protocol', 'protocol', 'version', 'request_id', 'http_proxy_client',
+    'trace_id', 'span_id', 'x_request_id', 'l7_protocol_str', 'endpoint'
 ]
 MERGE_KEY_REQUEST = [
-    'l7_protocol', 'protocol', 'version', 'request_type', 'request_domain',
-    'request_resource', 'request_id', 'trace_id', 'span_id', 'l7_protocol_str',
-    'endpoint'
+    'l7_protocol', 'protocol', 'version', 'request_id', 'trace_id', 'span_id',
+    'l7_protocol_str', 'endpoint'
 ]
-MERGE_KEY_RESPONSE = [
-    'response_status', 'response_code', 'response_exception',
-    'response_result', 'http_proxy_client'
-]
+MERGE_KEY_RESPONSE = ['http_proxy_client']
 DATABASE = "flow_log"
 
 
@@ -740,6 +734,15 @@ class Networks:
                         continue
                 if self.get(key) and flow.get(key) and (self.get(key) !=
                                                         flow.get(key)):
+                    # http2 == grpc
+                    if key == 'l7_protocol' and self.get(key) in [
+                            21, 41
+                    ] and flow.get(key) in [21, 41]:
+                        continue
+                    elif key == 'l7_protocol_str' and self.get(key) in [
+                            'HTTP2', 'gRPC'
+                    ] and flow.get(key) in ['HTTP2', 'gRPC']:
+                        continue
                     return False
             if abs(self.start_time_us -
                    flow["start_time_us"]) > network_delay_us or abs(
