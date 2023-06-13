@@ -384,7 +384,7 @@ class L7FlowTracing(Base):
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
         return format(l7_flows_merged, networks, app_flows,
-                      self.args.get('_id'))
+                      self.args.get('_id'), network_delay_us)
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
@@ -1392,7 +1392,7 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
     return response
 
 
-def pruning_trace(response, _id):
+def pruning_trace(response, _id, network_delay_us):
     tree = []
     root_start_time_us = 0
     root_end_time_us = 0
@@ -1407,7 +1407,7 @@ def pruning_trace(response, _id):
             root_end_time_us = trace_end_time_us
             tree_ids |= set(_ids)
             continue
-        if trace_start_time_us <= root_end_time_us and trace_end_time_us >= root_start_time_us:
+        if trace_start_time_us - network_delay_us <= root_end_time_us and trace_end_time_us + network_delay_us >= root_start_time_us:
             tree.append(trace)
             tree_ids |= set(_ids)
         else:
@@ -1517,9 +1517,9 @@ def merge_service(services, app_flows, response):
     response["services"] = _call_metrics(metrics_map)
 
 
-def format(services, networks, app_flows, _id):
+def format(services, networks, app_flows, _id, network_delay_us):
     response = format_trace(services, networks, app_flows)
-    pruning_trace(response, _id)
+    pruning_trace(response, _id, network_delay_us)
     merge_service(services, app_flows, response)
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
