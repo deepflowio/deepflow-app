@@ -875,7 +875,7 @@ class Service:
                 direction_key = key + "_0"
             else:
                 direction_key = key + "_1"
-            if getattr(self, key) and key != 'resource_gl2':
+            if getattr(self, key) and 'resource_gl2' not in key:
                 flow[key] = getattr(self, key)
                 continue
             elif not getattr(self, key):
@@ -884,8 +884,7 @@ class Service:
             else:
                 if self.resource_gl2_type in [0, 255]:
                     setattr(self, key, flow[direction_key])
-                    setattr(self, 'resource_gl2_type',
-                            flow[direction_key.replace("gl2", "gl2_type")])
+                flow[key] = getattr(self, key)
         self.direct_flows.append(flow)
 
     def attach_app_flow(self, flow: dict):
