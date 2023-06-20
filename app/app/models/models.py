@@ -24,7 +24,7 @@ class FlowLogL7Tracing(Model):
     network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
                                required=False,
                                min_value=1,
-                               default=3000000)
+                               default=1000000)
     ntp_delay_us = IntType(serialized_name="NTP_DELAY_US",
                            required=False,
                            min_value=1,
@@ -59,5 +59,5 @@ class TracingCompletionByExternalAppSpans(Model):
     network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
                                required=False,
                                min_value=1,
-                               default=3000000)
+                               default=1000000)
     debug = BooleanType(serialized_name="DEBUG", required=False)
