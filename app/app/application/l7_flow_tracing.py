@@ -63,29 +63,29 @@ RETURN_FIELDS = list(
         "subnet_id_0",
         "subnet_0",
         "ip_0",
-        "resource_gl0_type_0",
-        "resource_gl0_id_0",
-        "resource_gl0_0",
-        "resource_gl0_0_node_type",
-        "resource_gl0_0_icon_id",
+        "auto_instance_type_0",
+        "auto_instance_id_0",
+        "auto_instance_0",
+        "auto_instance_0_node_type",
+        "auto_instance_0_icon_id",
         "process_kname_0",
         "subnet_id_1",
         "subnet_1",
         "ip_1",
         "app_service",
         "app_instance",
-        "resource_gl0_type_1",
-        "resource_gl0_id_1",
-        "resource_gl0_1",
-        "resource_gl0_1_node_type",
-        "resource_gl0_1_icon_id",
+        "auto_instance_type_1",
+        "auto_instance_id_1",
+        "auto_instance_1",
+        "auto_instance_1_node_type",
+        "auto_instance_1_icon_id",
         "process_kname_1",
-        "resource_gl2_type_0",
-        "resource_gl2_id_0",
-        "resource_gl2_0",
-        "resource_gl2_type_1",
-        "resource_gl2_id_1",
-        "resource_gl2_1",
+        "auto_service_type_0",
+        "auto_service_id_0",
+        "auto_service_0",
+        "auto_service_type_1",
+        "auto_service_id_1",
+        "auto_service_1",
         # 指标信息
         "response_status",
         "response_duration",
@@ -100,16 +100,18 @@ RETURN_FIELDS = list(
         "endpoint",
     ]))
 FIELDS_MAP = {
-    "start_time_us": "toUnixTimestamp64Micro(start_time) as start_time_us",
-    "end_time_us": "toUnixTimestamp64Micro(end_time) as end_time_us",
-    "resource_gl0_0_node_type":
-    "node_type(resource_gl0_0) as resource_gl0_0_node_type",
-    "resource_gl0_0_icon_id":
-    "icon_id(resource_gl0_0) as resource_gl0_0_icon_id",
-    "resource_gl0_1_node_type":
-    "node_type(resource_gl0_1) as resource_gl0_1_node_type",
-    "resource_gl0_1_icon_id":
-    "icon_id(resource_gl0_1) as resource_gl0_1_icon_id"
+    "start_time_us":
+    "toUnixTimestamp64Micro(start_time) as start_time_us",
+    "end_time_us":
+    "toUnixTimestamp64Micro(end_time) as end_time_us",
+    "auto_instance_0_node_type":
+    "node_type(auto_instance_0) as auto_instance_0_node_type",
+    "auto_instance_0_icon_id":
+    "icon_id(auto_instance_0) as auto_instance_0_icon_id",
+    "auto_instance_1_node_type":
+    "node_type(auto_instance_1) as auto_instance_1_node_type",
+    "auto_instance_1_icon_id":
+    "icon_id(auto_instance_1) as auto_instance_1_icon_id"
 }
 MERGE_KEYS = [
     'l7_protocol', 'protocol', 'version', 'request_id', 'http_proxy_client',
@@ -424,7 +426,7 @@ class L7FlowTracing(Base):
         SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
-        trace_id, x_request_id, _id, tap_side, resource_gl0_0, resource_gl0_1
+        trace_id, x_request_id, _id, tap_side, auto_instance_0, auto_instance_1
         FROM `l7_flow_log` 
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -798,9 +800,9 @@ class Service:
         self.subnet_id = None
         self.subnet = None
         self.ip = None
-        self.resource_gl2_type = None
-        self.resource_gl2_id = None
-        self.resource_gl2 = None
+        self.auto_service_type = None
+        self.auto_service_id = None
+        self.auto_service = None
         self.process_kname = None
         self.start_time_us = 0
         self.end_time_us = 0
@@ -866,23 +868,23 @@ class Service:
                 'subnet_id',
                 'subnet',
                 'ip',
-                'resource_gl2_type',
-                'resource_gl2_id',
-                'resource_gl2',
+                'auto_service_type',
+                'auto_service_id',
+                'auto_service',
                 'process_kname',
         ]:
             if flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
                 direction_key = key + "_0"
             else:
                 direction_key = key + "_1"
-            if getattr(self, key) and 'resource_gl2' not in key:
+            if getattr(self, key) and 'auto_service' not in key:
                 flow[key] = getattr(self, key)
                 continue
             elif not getattr(self, key):
                 setattr(self, key, flow[direction_key])
                 flow[key] = flow[direction_key]
             else:
-                if self.resource_gl2_type in [0, 255]:
+                if self.auto_service_type in [0, 255]:
                     setattr(self, key, flow[direction_key])
                 flow[key] = getattr(self, key)
         self.direct_flows.append(flow)
@@ -1002,10 +1004,10 @@ def merge_flow(flows: list, flow: dict) -> bool:
             # FIXME 确认要合并哪些字段
 
             flows[i]['_id'].extend(flow['_id'])
-            flows[i]['resource_gl0_0'] = flow['resource_gl0_0']
-            flows[i]['resource_gl0_1'] = flow['resource_gl0_1']
-            flows[i]['resource_gl2_0'] = flow['resource_gl2_0']
-            flows[i]['resource_gl2_1'] = flow['resource_gl2_1']
+            flows[i]['auto_instance_0'] = flow['auto_instance_0']
+            flows[i]['auto_instance_1'] = flow['auto_instance_1']
+            flows[i]['auto_service_0'] = flow['auto_service_0']
+            flows[i]['auto_service_1'] = flow['auto_service_1']
             for key in MERGE_KEYS:
                 if key in MERGE_KEY_REQUEST:
                     if flow['type'] in [
@@ -1424,21 +1426,21 @@ def pruning_trace(response, _id, network_delay_us):
 def merge_service(services, app_flows, response):
     metrics_map = {}
     prun_services = set()
-    resource_gl2s = set()
+    auto_services = set()
     ids = set()
     id_to_trace_map = {}
     for res in response.get('tracing', []):
         id_to_trace_map[res.get('id')] = res
-        if res.get('resource_gl2'):
-            resource_gl2s.add(
-                (res.get('resource_gl2_id'), res.get('resource_gl2')))
+        if res.get('auto_service'):
+            auto_services.add(
+                (res.get('auto_service_id'), res.get('auto_service')))
         ids.add(res.get('id'))
     for service in services:
-        if (service.resource_gl2_id, service.resource_gl2) in resource_gl2s:
+        if (service.auto_service_id, service.auto_service) in auto_services:
             prun_services.add(service)
     for service in prun_services:
-        service_uid = f"{service.resource_gl2_id}-"
-        service_uname = service.resource_gl2 if service.resource_gl2 else service.ip
+        service_uid = f"{service.auto_service_id}-"
+        service_uname = service.auto_service if service.auto_service else service.ip
         if service_uid not in metrics_map:
             metrics_map[service_uid] = {
                 "service_uid": service_uid,
@@ -1462,7 +1464,7 @@ def merge_service(services, app_flows, response):
     serivce_name_to_service_uid = {}
     for flow in app_flows:
         if flow.get("service"):
-            service_uid = f"{flow['service'].resource_gl2_id}-"
+            service_uid = f"{flow['service'].auto_service_id}-"
             serivce_name_to_service_uid[flow['app_service']] = service_uid
     for flow in app_flows:
         if flow.get('_uid') not in ids:
@@ -1499,7 +1501,7 @@ def merge_service(services, app_flows, response):
                     "service_uname"]
             metrics_map[service_uid]["duration"] += flow["duration"]
         elif flow.get("service"):
-            service_uid = f"{flow['service'].resource_gl2_id}-"
+            service_uid = f"{flow['service'].auto_service_id}-"
             if service_uid not in metrics_map:
                 metrics_map[service_uid] = {
                     "service_uid": service_uid,
@@ -1656,15 +1658,15 @@ def _get_flow_dict(flow: DataFrame):
         if flow["resource_from_vtap"][0] else None,
         "set_parent_info":
         flow.get("set_parent_info"),
-        "resource_gl0":
-        flow["resource_gl0_0"] if flow["tap_side"][0] == 'c'
-        and flow["tap_side"] != "app" else flow["resource_gl0_1"]
+        "auto_instance":
+        flow["auto_instance_0"] if flow["tap_side"][0] == 'c'
+        and flow["tap_side"] != "app" else flow["auto_instance_1"]
     }
     if flow["tap_side"] in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
         flow_dict["subnet"] = flow.get("subnet")
         flow_dict["ip"] = flow.get("ip")
-        flow_dict["resource_gl2"] = flow.get("resource_gl2")
-        flow_dict["resource_gl2_id"] = flow.get("resource_gl2_id")
+        flow_dict["auto_service"] = flow.get("auto_service")
+        flow_dict["auto_service_id"] = flow.get("auto_service_id")
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
