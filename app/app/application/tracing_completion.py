@@ -63,7 +63,7 @@ class TracingCompletion(L7FlowTracing):
             res.pop("tap_port_name", None)
             res.pop("resource_from_vtap", None)
             res.pop("set_parent_info", None)
-            res.pop("resource_gl0", None)
+            res.pop("auto_instance", None)
         return self.status, rst, self.failed_regions
 
     async def trace_l7_flow(self,
@@ -322,27 +322,27 @@ class TracingCompletion(L7FlowTracing):
                     "vtap_id", "protocol", "flow_id",
                     "syscall_trace_id_request", "syscall_trace_id_response",
                     "_id", "syscall_cap_seq_0", "tap_port_type",
-                    "resource_gl0_0_icon_id", "resource_gl0_1_icon_id",
-                    "resource_gl2_type_0", "response_status",
-                    "resource_gl2_id_0", "resource_gl0_id_1",
-                    "resource_gl0_type_0", "resource_gl2_id_1", "tap_port",
-                    "response_duration", "resource_gl0_id_0", "process_id_0",
-                    "subnet_id_1", "resource_gl0_type_1", "syscall_cap_seq_1",
+                    "auto_instance_0_icon_id", "auto_instance_1_icon_id",
+                    "auto_service_type_0", "response_status",
+                    "auto_service_id_0", "auto_instance_id_1",
+                    "auto_instance_type_0", "auto_service_id_1", "tap_port",
+                    "response_duration", "auto_instance_id_0", "process_id_0",
+                    "subnet_id_1", "auto_instance_type_1", "syscall_cap_seq_1",
                     "process_id_1", "response_code", "request_id",
-                    "subnet_id_0", "resource_gl2_type_1"
+                    "subnet_id_0", "auto_service_type_1"
             ]:
                 app_span[tag_int] = 0
             for tag_str in [
-                    "x_request_id", "resource_gl0_0", "resource_gl0_1",
+                    "x_request_id", "auto_instance_0", "auto_instance_1",
                     "subnet_0", "app_service", "_tsdb_region_name",
                     "process_kname_0", "http_proxy_client",
-                    "resource_gl0_1_node_type", "app_instance",
+                    "auto_instance_1_node_type", "app_instance",
                     "response_exception", "version", "l7_protocol_str",
-                    "resource_gl0_0_node_type", "resource_gl2_0",
+                    "auto_instance_0_node_type", "auto_service_0",
                     "request_type", "request_domain", "ip_0", "ip_1",
                     "process_kname_1", "subnet_1", "request_resource",
                     "Enum(tap_side)", "tap_port_name", "endpoint",
-                    "resource_gl2_1", "response_result"
+                    "auto_service_1", "response_result"
             ]:
                 app_span[tag_str] = ""
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")
