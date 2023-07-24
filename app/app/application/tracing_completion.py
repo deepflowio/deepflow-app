@@ -88,9 +88,9 @@ class TracingCompletion(L7FlowTracing):
         syscall_metas = set()
         trace_ids = set()
         app_metas = set()
-        x_request_ids = set()
+        x_request_metas = set()
         l7_flow_ids = set()
-        xrequestids = []
+        xrequests = []
         related_map = defaultdict(list)
         dataframe_flowmetas = self.app_spans_df
         if dataframe_flowmetas.empty:
@@ -154,7 +154,8 @@ class TracingCompletion(L7FlowTracing):
                     dataframe_flowmetas['start_time_us'][index],
                     dataframe_flowmetas['end_time_us'][index],
                     dataframe_flowmetas['span_id'][index],
-                    dataframe_flowmetas['x_request_id'][index],
+                    dataframe_flowmetas['x_request_id_0'][index],
+                    dataframe_flowmetas['x_request_id_1'][index],
                 ))
             new_network_metas -= network_metas
             network_metas |= new_network_metas
@@ -232,25 +233,29 @@ class TracingCompletion(L7FlowTracing):
                 ]) + ')'
                 filters.append(app_filters)
 
-            new_x_request_ids = set()
+            new_x_request_metas = set()
             for index in range(len(dataframe_flowmetas.index)):
-                if dataframe_flowmetas['x_request_id'][index] in [0, '']:
+                if dataframe_flowmetas['x_request_id_0'][index] in [
+                        0, ''
+                ] and dataframe_flowmetas['x_request_id_1'][index] in [0, '']:
                     continue
-                new_x_request_ids.add(
+                new_x_request_metas.add(
                     (dataframe_flowmetas['_id'][index],
-                     dataframe_flowmetas['x_request_id'][index]))
-            new_x_request_ids -= x_request_ids
-            x_request_ids |= new_x_request_ids
-            if new_x_request_ids:
-                xrequestids = [
-                    L7XrequestMeta(nxrid) for nxrid in new_x_request_ids
-                ]
-                x_request_ids_set = set(
-                    [nxrid[1] for nxrid in new_x_request_ids])
-                filters.append('(' + ' OR '.join([
-                    "x_request_id='{nxrid}'".format(nxrid=nxrid)
-                    for nxrid in x_request_ids_set
-                ]) + ')')
+                     dataframe_flowmetas['x_request_id_0'][index],
+                     dataframe_flowmetas['x_request_id_1'][index]))
+            new_x_request_metas -= x_request_metas
+            x_request_metas |= new_x_request_metas
+            x_requests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
+            if x_requests:
+                x_requests_tuple_map = {
+                    x_request.to_tuple(): x_request
+                    for x_request in x_requests
+                }
+                x_request_filters = '(' + ' OR '.join([
+                    x_requests_tuple_map[xrm].to_sql_filter()
+                    for xrm in set(list(x_requests_tuple_map.keys()))
+                ]) + ')'
+                filters.append(x_request_filters)
 
             if not filters:
                 break
@@ -271,9 +276,9 @@ class TracingCompletion(L7FlowTracing):
 
             len_of_flows = len(l7_flow_ids)
 
-            if xrequestids:
-                for x_request_id in xrequestids:
-                    x_request_id.set_relate(new_flows, related_map)
+            if xrequests:
+                for x_request in xrequests:
+                    x_request.set_relate(new_flows, related_map)
 
             if syscalls:
                 for syscall in syscalls:
@@ -359,14 +364,14 @@ class TracingCompletion(L7FlowTracing):
             ]:
                 app_span[tag_int] = 0
             for tag_str in [
-                    "x_request_id", "auto_instance_0", "auto_instance_1",
-                    "subnet_0", "app_service", "_tsdb_region_name",
-                    "process_kname_0", "http_proxy_client",
-                    "auto_instance_1_node_type", "app_instance",
-                    "response_exception", "version", "l7_protocol_str",
-                    "auto_instance_0_node_type", "auto_service_0",
-                    "request_type", "request_domain", "ip_0", "ip_1",
-                    "process_kname_1", "subnet_1", "request_resource",
+                    "x_request_id_0", "x_request_id_1", "auto_instance_0",
+                    "auto_instance_1", "subnet_0", "app_service",
+                    "_tsdb_region_name", "process_kname_0",
+                    "http_proxy_client", "auto_instance_1_node_type",
+                    "app_instance", "response_exception", "version",
+                    "l7_protocol_str", "auto_instance_0_node_type",
+                    "auto_service_0", "request_type", "request_domain", "ip_0",
+                    "ip_1", "process_kname_1", "subnet_1", "request_resource",
                     "Enum(tap_side)", "tap_port_name", "endpoint",
                     "auto_service_1", "response_result"
             ]:
