@@ -50,7 +50,8 @@ RETURN_FIELDS = list(
         "trace_id",
         "span_id",
         "parent_span_id",
-        "x_request_id",
+        "x_request_id_0",
+        "x_request_id_1",
         "_id",
         "flow_id",
         "protocol",
@@ -115,7 +116,8 @@ FIELDS_MAP = {
 }
 MERGE_KEYS = [
     'l7_protocol', 'protocol', 'version', 'request_id', 'http_proxy_client',
-    'trace_id', 'span_id', 'x_request_id', 'l7_protocol_str', 'endpoint'
+    'trace_id', 'span_id', 'x_request_id_0', 'x_request_id_1',
+    'l7_protocol_str', 'endpoint'
 ]
 MERGE_KEY_REQUEST = [
     'l7_protocol', 'protocol', 'version', 'request_id', 'trace_id', 'span_id',
@@ -178,13 +180,13 @@ class L7FlowTracing(Base):
         syscall_metas = set()
         trace_ids = set()
         app_metas = set()
-        x_request_ids = set()
+        x_request_metas = set()
         l7_flow_ids = set()
         networks = []
         syscalls = []
         apps = []
         traceids = []
-        xrequestids = []
+        xrequests = []
         related_map = defaultdict(list)
 
         dataframe_flowmetas = await self.query_flowmetas(
@@ -250,7 +252,8 @@ class L7FlowTracing(Base):
                     dataframe_flowmetas['start_time_us'][index],
                     dataframe_flowmetas['end_time_us'][index],
                     dataframe_flowmetas['span_id'][index],
-                    dataframe_flowmetas['x_request_id'][index],
+                    dataframe_flowmetas['x_request_id_0'][index],
+                    dataframe_flowmetas['x_request_id_1'][index],
                 ))
             new_network_metas -= network_metas
             network_metas |= new_network_metas
@@ -328,25 +331,29 @@ class L7FlowTracing(Base):
                 ]) + ')'
                 filters.append(app_filters)
 
-            new_x_request_ids = set()
+            new_x_request_metas = set()
             for index in range(len(dataframe_flowmetas.index)):
-                if dataframe_flowmetas['x_request_id'][index] in [0, '']:
+                if dataframe_flowmetas['x_request_id_0'][index] in [
+                        0, ''
+                ] and dataframe_flowmetas['x_request_id_1'][index] in [0, '']:
                     continue
-                new_x_request_ids.add(
+                new_x_request_metas.add(
                     (dataframe_flowmetas['_id'][index],
-                     dataframe_flowmetas['x_request_id'][index]))
-            new_x_request_ids -= x_request_ids
-            x_request_ids |= new_x_request_ids
-            if new_x_request_ids:
-                xrequestids = [
-                    L7XrequestMeta(nxrid) for nxrid in new_x_request_ids
-                ]
-                x_request_ids_set = set(
-                    [nxrid[1] for nxrid in new_x_request_ids])
-                filters.append('(' + ' OR '.join([
-                    "x_request_id='{nxrid}'".format(nxrid=nxrid)
-                    for nxrid in x_request_ids_set
-                ]) + ')')
+                     dataframe_flowmetas['x_request_id_0'][index],
+                     dataframe_flowmetas['x_request_id_1'][index]))
+            new_x_request_metas -= x_request_metas
+            x_request_metas |= new_x_request_metas
+            x_requests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
+            if x_requests:
+                x_requests_tuple_map = {
+                    x_request.to_tuple(): x_request
+                    for x_request in x_requests
+                }
+                x_request_filters = '(' + ' OR '.join([
+                    x_requests_tuple_map[xrm].to_sql_filter()
+                    for xrm in set(list(x_requests_tuple_map.keys()))
+                ]) + ')'
+                filters.append(x_request_filters)
 
             if not filters:
                 break
@@ -370,9 +377,9 @@ class L7FlowTracing(Base):
             #     for trace_id in traceids:
             #         trace_id.set_relate(new_flows, related_map)
 
-            if xrequestids:
-                for x_request_id in xrequestids:
-                    x_request_id.set_relate(new_flows, related_map)
+            if xrequests:
+                for x_request in xrequests:
+                    x_request.set_relate(new_flows, related_map)
 
             if syscalls:
                 for syscall in syscalls:
@@ -445,13 +452,14 @@ class L7FlowTracing(Base):
     
         主动注入的追踪信息：
             trace_id：通过Tracing SDK主动注入的trace_id追踪
-            x_request_id：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
+            x_request_id_0：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
+            x_request_id_1：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
         """
         sql = """
         SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
-        trace_id, x_request_id, _id, tap_side, auto_instance_0, auto_instance_1
+        trace_id, x_request_id_0, x_request_id_1, _id, tap_side, auto_instance_0, auto_instance_1
         FROM `l7_flow_log` 
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -523,20 +531,43 @@ class L7XrequestMeta:
     """
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
-        self.x_request_id = flow_metas[1]
+        self.x_request_id_0 = flow_metas[1]
+        self.x_request_id_1 = flow_metas[2]
 
     def __eq__(self, rhs):
-        return (self.x_request_id == rhs.x_request_id)
+        return (self.x_request_id_0 == rhs.x_request_id_0
+                and self.x_request_id_1 == rhs.x_request_id_1)
+
+    def to_tuple(self):
+        return (self.x_request_id_0, self.x_request_id_1)
 
     def set_relate(self, df, related_map):
         for i in range(len(df.index)):
             if df._id[i] == self._id:
                 continue
-            if type(self.x_request_id) == str and self.x_request_id:
-                if self.x_request_id == df.x_request_id[i]:
+            if type(self.x_request_id_0) == str and self.x_request_id_0:
+                if self.x_request_id_0 == df.x_request_id_1[i]:
                     related_map[df._id[i]].append(
                         str(self._id) + "-xrequestid")
                     continue
+            if type(self.x_request_id_1) == str and self.x_request_id_1:
+                if self.x_request_id_1 == df.x_request_id_0[i]:
+                    related_map[df._id[i]].append(
+                        str(self._id) + "-xrequestid")
+                    continue
+
+    def to_sql_filter(self) -> str:
+        # 返回空时需要忽略此条件
+        sql_filters = []
+        if type(self.x_request_id_0) == str and self.x_request_id_0:
+            sql_filters.append('x_request_id_1={self.x_request_id_0}')
+        if type(self.x_request_id_1) == str and self.x_request_id_1:
+            sql_filters.append('x_request_id_0={self.x_request_id_1}')
+        if not sql_filters:
+            return '1!=1'
+        # filter time range to prune
+        sql = f"{' OR '.join(sql_filters)}"
+        return f"({sql})"
 
 
 class L7AppMeta:
@@ -600,7 +631,6 @@ class L7NetworkMeta:
         self.start_time_us = flow_metas[4]
         self.end_time_us = flow_metas[5]
         self.span_id = flow_metas[6] if flow_metas[6] else ''
-        self.x_request_id = flow_metas[7] if flow_metas[7] else ''
         self.network_delay_us = network_delay_us
 
     def __eq__(self, rhs):
@@ -619,10 +649,6 @@ class L7NetworkMeta:
             ) == str and self.type != L7_FLOW_TYPE_RESPONSE and type(
                     df.span_id[i]) == str and df.span_id[i]:
                 if df.span_id[i] != self.span_id:
-                    continue
-            if type(self.x_request_id) == str and type(
-                    df.x_request_id[i]) == str and df.x_request_id[i]:
-                if df.x_request_id[i] != self.x_request_id:
                     continue
             if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
                 if abs(self.start_time_us -
@@ -662,8 +688,6 @@ class L7NetworkMeta:
         if self.type != L7_FLOW_TYPE_RESPONSE:
             if type(self.span_id) == str and self.span_id:
                 tailor_sql += f" AND (span_id='{self.span_id}' OR type=1 OR span_id='')"
-        if type(self.x_request_id) == str and self.x_request_id:
-            tailor_sql += f" AND (x_request_id='{self.x_request_id}' OR x_request_id='')"
         if tailor_sql:
             sql = f"({sql} {tailor_sql})"
         return sql
@@ -1248,6 +1272,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     services = list(service_map.values())
     # s-p排序
     service_sort(services, app_flows)
+    sort_by_x_request_id(network_flows)
     return services, app_flows, networks
 
 
@@ -1634,8 +1659,10 @@ def _get_flow_dict(flow: DataFrame):
         str(flow["flow_id"]),
         "request_id":
         _get_df_key(flow, "request_id"),
-        "x_request_id":
-        flow["x_request_id"],
+        "x_request_id_0":
+        flow["x_request_id_0"],
+        "x_request_id_1":
+        flow["x_request_id_1"],
         "trace_id":
         flow["trace_id"],
         "span_id":
@@ -1759,3 +1786,18 @@ def network_flow_sort(traces):
                         sorted_traces.insert(i, trace)
                         break
     return sorted_traces
+
+
+def sort_by_x_request_id(traces):
+    for trace_0 in traces:
+        if trace_0.get('parent_id', -1) < 0:
+            for trace_1 in traces:
+                if trace_0.get('_uid') == trace_1.get('_uid'):
+                    continue
+                if not trace_1.get('x_request_id_1') or not trace_0.get(
+                        'x_request_id_0'):
+                    continue
+                if trace_1.get('x_request_id_1') == trace_0.get(
+                        'x_request_id_0'):
+                    _set_parent(trace_0, trace_1,
+                                "trace mounted due to x_request_id")
