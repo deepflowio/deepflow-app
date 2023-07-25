@@ -3,8 +3,8 @@ import sys
 
 CONFIG_FILE = "/etc/deepflow/app.yaml"
 
+
 class Config(object):
-    
     def __init__(self):
         pass
 
@@ -15,6 +15,7 @@ class Config(object):
     def parse_spec(self, cfg):
         spec = cfg.get('spec')
         self.l7_tracing_limit = spec.get('l7_tracing_limit', 100)
+        self.network_delay_us = spec.get('network_delay_us', 1000000)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
@@ -45,6 +46,7 @@ class Config(object):
         except Exception as e:
             print("Yaml Error: %s" % e)
             sys.exit(1)
-            
+
+
 config = Config()
 config.is_valid(CONFIG_FILE)
