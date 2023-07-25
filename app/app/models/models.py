@@ -2,6 +2,8 @@ from schematics.models import Model
 from schematics.types import IntType, StringType, BooleanType
 from schematics.types.compound import ListType, ModelType
 
+from config import config
+
 SPAN_KIND = [0, 1, 2, 3, 4, 5]
 
 
@@ -24,7 +26,7 @@ class FlowLogL7Tracing(Model):
     network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
                                required=False,
                                min_value=1,
-                               default=3000000)
+                               default=config.network_delay_us)
     ntp_delay_us = IntType(serialized_name="NTP_DELAY_US",
                            required=False,
                            min_value=1,
@@ -59,5 +61,5 @@ class TracingCompletionByExternalAppSpans(Model):
     network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
                                required=False,
                                min_value=1,
-                               default=3000000)
+                               default=config.network_delay_us)
     debug = BooleanType(serialized_name="DEBUG", required=False)

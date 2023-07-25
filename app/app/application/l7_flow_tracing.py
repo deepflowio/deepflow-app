@@ -134,7 +134,7 @@ DATABASE = "flow_log"
 class L7FlowTracing(Base):
     async def query(self):
         max_iteration = self.args.get("max_iteration", 30)
-        network_delay_us = self.args.get("network_delay_us", 3000000)
+        network_delay_us = self.args.get("network_delay_us")
         ntp_delay_us = self.args.get("ntp_delay_us", 10000)
         self.failed_regions = set()
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
@@ -167,7 +167,7 @@ class L7FlowTracing(Base):
                             base_filter: str,
                             return_fields: list,
                             max_iteration: int = 30,
-                            network_delay_us: int = 3000000,
+                            network_delay_us: int = config.network_delay_us,
                             ntp_delay_us: int = 10000) -> list:
         """L7 FlowLog 追踪入口
     
@@ -396,8 +396,7 @@ class L7FlowTracing(Base):
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
-        response = await querier.exec_all_clusters(DATABASE,
-                                                   sql)
+        response = await querier.exec_all_clusters(DATABASE, sql)
         '''
         database = 'flow_log'  # database
         host = '10.1.20.22'  # ck ip
