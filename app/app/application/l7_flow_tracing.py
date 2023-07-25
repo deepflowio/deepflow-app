@@ -194,10 +194,43 @@ class L7FlowTracing(Base):
         related_map[dataframe_flowmetas['_id'][0]] = [
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
+        trace_id = ''
+        allow_multiple_trace_ids_in_tracing_result = self.args.get(
+            'allow_multiple_trace_ids_in_tracing_result', False)
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break
             filters = []
+
+            # 主动注入的追踪信息
+            if not allow_multiple_trace_ids_in_tracing_result and not trace_id:
+                delete_index = []
+                for index in range(len(dataframe_flowmetas.index)):
+                    if dataframe_flowmetas['trace_id'][index] in [0, '']:
+                        continue
+                    if trace_id and trace_id != dataframe_flowmetas[
+                            'trace_id'][index]:
+                        delete_index.append(index)
+                    trace_id = dataframe_flowmetas['trace_id'][index]
+                    continue
+                dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
+            else:
+                new_trace_ids = set()
+                for index in range(len(dataframe_flowmetas.index)):
+                    if dataframe_flowmetas['trace_id'][index] in [0, '']:
+                        continue
+                    new_trace_ids.add((dataframe_flowmetas['_id'][index],
+                                       dataframe_flowmetas['trace_id'][index]))
+                new_trace_ids -= trace_ids
+                trace_ids |= new_trace_ids
+                if new_trace_ids:
+                    traceids = [L7TraceMeta(ntid) for ntid in new_trace_ids]
+                    trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
+                    filters.append('(' + ' OR '.join([
+                        "trace_id='{tid}'".format(tid=tid)
+                        for tid in trace_ids_set
+                    ]) + ')')
+
             # 新的网络追踪信息
             new_network_metas = set()
             for index in range(len(dataframe_flowmetas.index)):
@@ -295,22 +328,6 @@ class L7FlowTracing(Base):
                 ]) + ')'
                 filters.append(app_filters)
 
-            # 主动注入的追踪信息
-            new_trace_ids = set()
-            for index in range(len(dataframe_flowmetas.index)):
-                if dataframe_flowmetas['trace_id'][index] in [0, '']:
-                    continue
-                new_trace_ids.add((dataframe_flowmetas['_id'][index],
-                                   dataframe_flowmetas['trace_id'][index]))
-            new_trace_ids -= trace_ids
-            trace_ids |= new_trace_ids
-            if new_trace_ids:
-                traceids = [L7TraceMeta(ntid) for ntid in new_trace_ids]
-                trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
-                filters.append('(' + ' OR '.join([
-                    "trace_id='{tid}'".format(tid=tid) for tid in trace_ids_set
-                ]) + ')')
-
             new_x_request_ids = set()
             for index in range(len(dataframe_flowmetas.index)):
                 if dataframe_flowmetas['x_request_id'][index] in [0, '']:
@@ -333,8 +350,16 @@ class L7FlowTracing(Base):
 
             if not filters:
                 break
-            new_flows = await self.query_flowmetas(time_filter,
-                                                   ' OR '.join(filters))
+
+            if not allow_multiple_trace_ids_in_tracing_result and trace_id:
+                new_filters = []
+                new_filters.append(f"({'OR '.join(filters)})")
+                new_filters.append(f"(trace_id='{trace_id}' OR trace_id='')")
+                new_flows = await self.query_flowmetas(
+                    time_filter, ' AND '.join(new_filters))
+            else:
+                new_flows = await self.query_flowmetas(time_filter,
+                                                       ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
             # L7 Flow ID信息
