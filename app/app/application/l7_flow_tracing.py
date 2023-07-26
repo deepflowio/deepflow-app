@@ -560,9 +560,9 @@ class L7XrequestMeta:
         # 返回空时需要忽略此条件
         sql_filters = []
         if type(self.x_request_id_0) == str and self.x_request_id_0:
-            sql_filters.append('x_request_id_1={self.x_request_id_0}')
+            sql_filters.append(f'x_request_id_1={self.x_request_id_0}')
         if type(self.x_request_id_1) == str and self.x_request_id_1:
-            sql_filters.append('x_request_id_0={self.x_request_id_1}')
+            sql_filters.append(f'x_request_id_0={self.x_request_id_1}')
         if not sql_filters:
             return '1!=1'
         # filter time range to prune
