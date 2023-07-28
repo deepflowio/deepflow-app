@@ -1438,7 +1438,7 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
         response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
-        trace["deepflow_parent_span_id"] = id_map[trace["parent_id"]]
+        trace["deepflow_parent_span_id"] = id_map.get(trace["parent_id"], -1)
     response["tracing"] = TraceSort(response["tracing"]).sort_tracing()
     return response
 
@@ -1605,6 +1605,8 @@ class TraceSort:
     def find_child(self, child_ids):
         spans = []
         for _id in child_ids:
+            if _id not in self.uid_index_map:
+                continue
             trace = self.traces[self.uid_index_map[_id]]
             spans.append(trace)
             spans.extend(self.find_child(trace["childs"]))
@@ -1788,9 +1790,20 @@ def network_flow_sort(traces):
     return sorted_traces
 
 
+def get_parent_trace(parent_trace, traces):
+    for trace in traces:
+        if trace.get('_uid') == parent_trace.get('_uid'):
+            continue
+        if trace.get('x_request_id_0') == parent_trace.get('x_request_id_1'):
+            return get_parent_trace(trace, traces)
+    else:
+        return parent_trace
+
+
 def sort_by_x_request_id(traces):
     for trace_0 in traces:
         if trace_0.get('parent_id', -1) < 0:
+            parent_traces = []
             for trace_1 in traces:
                 if trace_0.get('_uid') == trace_1.get('_uid'):
                     continue
@@ -1799,5 +1812,10 @@ def sort_by_x_request_id(traces):
                     continue
                 if trace_1.get('x_request_id_1') == trace_0.get(
                         'x_request_id_0'):
-                    _set_parent(trace_0, trace_1,
-                                "trace mounted due to x_request_id")
+                    parent_traces.append(trace_1)
+            # 如果span有多个父span，选父span的叶子span作为parent
+            if parent_traces:
+                parent_trace = get_parent_trace(parent_traces[0],
+                                                parent_traces)
+                _set_parent(trace_0, parent_trace,
+                            "trace mounted due to x_request_id")
