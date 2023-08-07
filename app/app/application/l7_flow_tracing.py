@@ -87,6 +87,8 @@ RETURN_FIELDS = list(
         "auto_service_type_1",
         "auto_service_id_1",
         "auto_service_1",
+        "tap_id",
+        "tap",
         # 指标信息
         "response_status",
         "response_duration",
@@ -197,8 +199,7 @@ class L7FlowTracing(Base):
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
         trace_id = ''
-        allow_multiple_trace_ids_in_tracing_result = self.args.get(
-            'allow_multiple_trace_ids_in_tracing_result', False)
+        allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break

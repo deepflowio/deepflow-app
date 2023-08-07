@@ -99,8 +99,7 @@ class TracingCompletion(L7FlowTracing):
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
         trace_id = ''
-        allow_multiple_trace_ids_in_tracing_result = self.args.get(
-            'allow_multiple_trace_ids_in_tracing_result', False)
+        allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break
@@ -360,7 +359,7 @@ class TracingCompletion(L7FlowTracing):
                     "response_duration", "auto_instance_id_0", "process_id_0",
                     "subnet_id_1", "auto_instance_type_1", "syscall_cap_seq_1",
                     "process_id_1", "response_code", "request_id",
-                    "subnet_id_0", "auto_service_type_1"
+                    "subnet_id_0", "auto_service_type_1", "tap_id"
             ]:
                 app_span[tag_int] = 0
             for tag_str in [
@@ -373,7 +372,7 @@ class TracingCompletion(L7FlowTracing):
                     "auto_service_0", "request_type", "request_domain", "ip_0",
                     "ip_1", "process_kname_1", "subnet_1", "request_resource",
                     "Enum(tap_side)", "tap_port_name", "endpoint",
-                    "auto_service_1", "response_result"
+                    "auto_service_1", "response_result", "tap"
             ]:
                 app_span[tag_str] = ""
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")

@@ -31,10 +31,6 @@ class FlowLogL7Tracing(Model):
                            required=False,
                            min_value=1,
                            default=10000)
-    allow_multiple_trace_ids_in_tracing_result = BooleanType(
-        serialized_name="ALLOW_MULTIPLE_TRACE_IDS_IN_TRACING_RESULT",
-        required=False,
-        default=False)
 
 
 class AppSpans(Model):
@@ -67,7 +63,3 @@ class TracingCompletionByExternalAppSpans(Model):
                                min_value=1,
                                default=config.network_delay_us)
     debug = BooleanType(serialized_name="DEBUG", required=False)
-    allow_multiple_trace_ids_in_tracing_result = BooleanType(
-        serialized_name="ALLOW_MULTIPLE_TRACE_IDS_IN_TRACING_RESULT",
-        required=False,
-        default=False)
