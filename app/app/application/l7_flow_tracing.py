@@ -1715,7 +1715,11 @@ def _get_flow_dict(flow: DataFrame):
         flow.get("set_parent_info"),
         "auto_instance":
         flow["auto_instance_0"] if flow["tap_side"][0] == 'c'
-        and flow["tap_side"] != "app" else flow["auto_instance_1"]
+        and flow["tap_side"] != "app" else flow["auto_instance_1"],
+        "tap_id":
+        flow.get("tap_id", None),
+        "tap":
+        flow.get("tap", None)
     }
     if flow["tap_side"] in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
         flow_dict["subnet"] = flow.get("subnet")
