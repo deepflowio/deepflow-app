@@ -40,7 +40,7 @@ class Query(object):
         log.debug(
             f"Query UUID: {self.query_uuid} | Database: {self.database}@{self.host} | SQL: {self.sql}"
         )
-        url = f"http://{self.host}:{config.querier_port}/v1/query/?query_uuid={self.query_uuid}"
+        url = f"http://{self.host}:{config.querier_port}/v1/query/?query_uuid={self.query_uuid}&prewhere=false"
         if self.debug:
             url += "&debug=true"
         data = {'db': self.database, 'sql': self.sql}
