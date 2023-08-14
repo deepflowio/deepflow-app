@@ -1472,6 +1472,8 @@ def pruning_trace(response, _id, network_delay_us):
                 tree_ids |= set(_ids)
                 root_start_time_us = trace_start_time_us
                 root_end_time_us = trace_end_time_us
+        if i == len(response['tracing']) - 1:
+            response['tracing'] = tree
 
 
 def merge_service(services, app_flows, response):
