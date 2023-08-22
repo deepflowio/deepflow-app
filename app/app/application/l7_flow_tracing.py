@@ -865,9 +865,9 @@ class Service:
                 'subnet_id',
                 'subnet',
                 'ip',
-                'auto_service_type',
                 'auto_service_id',
                 'auto_service',
+                'auto_service_type',
                 'process_kname',
         ]:
             if flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
