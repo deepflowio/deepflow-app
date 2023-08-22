@@ -155,10 +155,21 @@ class L7FlowTracing(Base):
     async def get_id_by_trace_id(self, trace_id, time_filter):
         sql = f"SELECT _id FROM l7_flow_log WHERE trace_id='{trace_id}' AND {time_filter} limit 1"
         resp = await self.query_ck(sql)
+        self.status.append("Query _id", resp)
         data = resp["data"]
-        if type(data) != DataFrame:
+        if type(data) != DataFrame or data.empty:
             return ""
         return data["_id"][0]
+
+    async def get_trace_id_by_id(self):
+        time_filter = f"time>={self.start_time} AND time<={self.end_time}"
+        _id = self.args.get("_id")
+        sql = f"SELECT trace_id FROM l7_flow_log WHERE _id={_id} AND {time_filter} limit 1"
+        resp = await self.query_ck(sql)
+        data = resp["data"]
+        if type(data) != DataFrame or data.empty:
+            return ""
+        return data["trace_id"][0], resp
 
     async def trace_l7_flow(self,
                             time_filter: str,
@@ -184,10 +195,6 @@ class L7FlowTracing(Base):
         app_metas = set()
         x_request_metas = set()
         l7_flow_ids = set()
-        networks = []
-        syscalls = []
-        apps = []
-        traceids = []
         xrequests = []
         related_map = defaultdict(list)
 
@@ -227,7 +234,6 @@ class L7FlowTracing(Base):
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
-                    traceids = [L7TraceMeta(ntid) for ntid in new_trace_ids]
                     trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
                     filters.append('(' + ' OR '.join([
                         "trace_id='{tid}'".format(tid=tid)
@@ -310,8 +316,6 @@ class L7FlowTracing(Base):
                         TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
                 ] or not dataframe_flowmetas['span_id'][index]:
                     continue
-                #if dataframe_flowmetas['trace_id'][index] not in [0, '']:
-                #    continue
                 if type(dataframe_flowmetas['span_id'][index]) == str and \
                     dataframe_flowmetas['span_id'][index] and \
                         type(dataframe_flowmetas['parent_span_id'][index]) == str and \
@@ -374,10 +378,6 @@ class L7FlowTracing(Base):
                                                        ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
-
-            # if traceids:
-            #     for trace_id in traceids:
-            #         trace_id.set_relate(new_flows, related_map)
 
             if xrequests:
                 for x_request in xrequests:
@@ -504,27 +504,6 @@ class L7FlowTracing(Base):
         response = await self.query_ck(sql)
         self.status.append("Query All Flows", response)
         return response["data"]
-
-
-class L7TraceMeta:
-    """
-    trace_id追踪
-    """
-    def __init__(self, flow_metas: Tuple):
-        self._id = flow_metas[0]
-        self.trace_id = flow_metas[1]
-
-    def __eq__(self, rhs):
-        return (self.trace_id == rhs.trace_id)
-
-    def set_relate(self, df, related_map):
-        for i in range(len(df.index)):
-            if df._id[i] == self._id:
-                continue
-            if type(self.trace_id) == str and self.trace_id:
-                if self.trace_id == df.trace_id[i]:
-                    related_map[df._id[i]].append(str(self._id) + "-traceid")
-                    continue
 
 
 class L7XrequestMeta:
@@ -969,23 +948,6 @@ class Service:
             flow["service"] = self
             self.app_flow_of_direct_flows.append(flow)
             return True
-
-    def attach_network(self, network: Networks):
-        for index in range(len(self.direct_flows)):
-            direct_flow = self.direct_flows[index]
-            if (
-                    # 请求方向TCP SEQ无需比较（无请求方向的信息）、或相等
-                    direct_flow['type'] == L7_FLOW_TYPE_RESPONSE or
-                (network.req_tcp_seq == direct_flow['req_tcp_seq']
-                 and abs(network.start_time_us - direct_flow['start_time_us'])
-                 < network_delay_us)) and (
-                     # 响应方向TCP SEQ无需比较（无请求方向的信息）、或相等
-                     flow['type'] == L7_FLOW_TYPE_REQUEST
-                     or direct_flow['type'] == L7_FLOW_TYPE_REQUEST or
-                     (flow['resp_tcp_seq'] == direct_flow['resp_tcp_seq']
-                      and abs(flow['end_time_us'] - direct_flow['end_time_us'])
-                      < network_delay_us)):
-                pass
 
 
 def merge_flow(flows: list, flow: dict) -> bool:
