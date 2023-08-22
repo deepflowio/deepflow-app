@@ -27,7 +27,7 @@ class TracingCompletion(L7FlowTracing):
         super().__init__(args, headers)
         self.app_spans = [
             app_span.to_primitive() for app_span in self.args.app_spans
-        ]
+        ] if not isinstance(self.args.app_spans, list) else self.args.app_spans
         self.update_time()
         self.complete_app_span()
         self.app_spans_df = pd.DataFrame(self.app_spans)
@@ -38,32 +38,31 @@ class TracingCompletion(L7FlowTracing):
         ntp_delay_us = self.args.get("ntp_delay_us", 10000)
         self.failed_regions = set()
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
-        _id = self.args.get("_id")
         self.has_attributes = self.args.get("has_attributes", 0)
-        base_filter = f"_id={_id}"
         rst = await self.trace_l7_flow(time_filter=time_filter,
-                                       base_filter=base_filter,
+                                       base_filter='',
                                        return_fields=["related_ids"],
                                        max_iteration=max_iteration,
                                        network_delay_us=network_delay_us,
                                        ntp_delay_us=ntp_delay_us)
         if not rst:
             return self.status, rst, self.failed_regions
-        rst.pop("services", None)
-        for res in rst.get("tracing", []):
-            res.pop("selftime", None)
-            res.pop("Enum(tap_side)", None)
-            res.pop("attribute", None)
-            res.pop("id", None)
-            res.pop("parent_id", None)
-            res.pop("childs", None)
-            res.pop("service_uid", None)
-            res.pop("service_uname", None)
-            res.pop("tap_port", None)
-            res.pop("tap_port_name", None)
-            res.pop("resource_from_vtap", None)
-            res.pop("set_parent_info", None)
-            res.pop("auto_instance", None)
+        if not config.call_apm_api_to_supplement_trace:
+            rst.pop("services", None)
+            for res in rst.get("tracing", []):
+                res.pop("selftime", None)
+                res.pop("Enum(tap_side)", None)
+                res.pop("attribute", None)
+                res.pop("id", None)
+                res.pop("parent_id", None)
+                res.pop("childs", None)
+                res.pop("service_uid", None)
+                res.pop("service_uname", None)
+                res.pop("tap_port", None)
+                res.pop("tap_port_name", None)
+                res.pop("resource_from_vtap", None)
+                res.pop("set_parent_info", None)
+                res.pop("auto_instance", None)
         return self.status, rst, self.failed_regions
 
     async def trace_l7_flow(self,
@@ -127,7 +126,6 @@ class TracingCompletion(L7FlowTracing):
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
-                    traceids = [L7TraceMeta(ntid) for ntid in new_trace_ids]
                     trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
                     filters.append('(' + ' OR '.join([
                         "trace_id='{tid}'".format(tid=tid)
@@ -326,7 +324,7 @@ class TracingCompletion(L7FlowTracing):
     def update_time(self):
         min_time = 0
         max_time = 0
-        for app_span in self.args.app_spans:
+        for app_span in self.app_spans:
             start_time_s = int(app_span.get("start_time_us", 0) / 1000000)
             end_time_s = int(app_span.get("end_time_us", 0) / 1000000)
             if not min_time:
@@ -361,7 +359,8 @@ class TracingCompletion(L7FlowTracing):
                     "process_id_1", "response_code", "request_id",
                     "subnet_id_0", "auto_service_type_1", "tap_id"
             ]:
-                app_span[tag_int] = 0
+                app_span[tag_int] = 0 if not app_span.get(
+                    tag_int) else app_span[tag_int]
             for tag_str in [
                     "x_request_id_0", "x_request_id_1", "auto_instance_0",
                     "auto_instance_1", "subnet_0", "app_service",
@@ -374,5 +373,6 @@ class TracingCompletion(L7FlowTracing):
                     "Enum(tap_side)", "tap_port_name", "endpoint",
                     "auto_service_1", "response_result", "tap"
             ]:
-                app_span[tag_str] = ""
+                app_span[tag_str] = "" if not app_span.get(
+                    tag_str) else app_span[tag_str]
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")

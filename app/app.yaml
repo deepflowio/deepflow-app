@@ -23,3 +23,4 @@ app:
     l7_tracing_limit: 100
     network_delay_us: 1000000
     allow_multiple_trace_ids_in_tracing_result: false
+    call_apm_api_to_supplement_trace: false

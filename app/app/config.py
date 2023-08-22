@@ -18,6 +18,8 @@ class Config(object):
         self.network_delay_us = spec.get('network_delay_us', 1000000)
         self.allow_multiple_trace_ids_in_tracing_result = spec.get(
             'allow_multiple_trace_ids_in_tracing_result', False)
+        self.call_apm_api_to_supplement_trace = spec.get(
+            'call_apm_api_to_supplement_trace', False)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
