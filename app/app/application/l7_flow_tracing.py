@@ -337,16 +337,17 @@ class L7FlowTracing(Base):
                     for nxrid in x_request_ids_set
                 ]) + ')')
 
+            # L7 Flow ID信息
+            l7_flow_ids |= set(dataframe_flowmetas['_id'])
+            len_of_flows = len(l7_flow_ids)
+
             if not filters:
                 break
             new_flows = await self.query_flowmetas(time_filter,
                                                    ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
-            # L7 Flow ID信息
-            l7_flow_ids |= set(dataframe_flowmetas['_id'])
 
-            len_of_flows = len(l7_flow_ids)
             # if traceids:
             #     for trace_id in traceids:
             #         trace_id.set_relate(new_flows, related_map)
