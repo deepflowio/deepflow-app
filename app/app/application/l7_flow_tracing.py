@@ -356,6 +356,10 @@ class L7FlowTracing(Base):
                 ]) + ')'
                 filters.append(x_request_filters)
 
+            # L7 Flow ID信息
+            l7_flow_ids |= set(dataframe_flowmetas['_id'])
+            len_of_flows = len(l7_flow_ids)
+
             if not filters:
                 break
 
@@ -370,10 +374,7 @@ class L7FlowTracing(Base):
                                                        ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
-            # L7 Flow ID信息
-            l7_flow_ids |= set(dataframe_flowmetas['_id'])
 
-            len_of_flows = len(l7_flow_ids)
             # if traceids:
             #     for trace_id in traceids:
             #         trace_id.set_relate(new_flows, related_map)
