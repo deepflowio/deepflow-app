@@ -94,9 +94,13 @@ class TracingCompletion(L7FlowTracing):
         dataframe_flowmetas = self.app_spans_df
         if dataframe_flowmetas.empty:
             return []
-        related_map[dataframe_flowmetas['_id'][0]] = [
-            f"{dataframe_flowmetas['_id'][0]}-base"
-        ]
+        for i in range(len(self.app_spans)):
+            for j in range(len(self.app_spans)):
+                if i == j:
+                    continue
+                related_map[dataframe_flowmetas['_id'][i]].append(
+                    str(dataframe_flowmetas['_id'][j]) + "-app")
+
         trace_id = ''
         allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
         for i in range(max_iteration):
@@ -340,7 +344,7 @@ class TracingCompletion(L7FlowTracing):
 
     # Completing application span attribute information
     def complete_app_span(self):
-        for app_span in self.app_spans:
+        for i, app_span in enumerate(self.app_spans):
             tap_side_by_span_kind = TAP_SIDE_BY_SPAN_KIND.get(
                 app_span.get('span_kind'))
             app_span["tap_side"] = tap_side_by_span_kind
@@ -349,7 +353,7 @@ class TracingCompletion(L7FlowTracing):
                     "type", "req_tcp_seq", "resp_tcp_seq", "l7_protocol",
                     "vtap_id", "protocol", "flow_id",
                     "syscall_trace_id_request", "syscall_trace_id_response",
-                    "_id", "syscall_cap_seq_0", "tap_port_type",
+                    "syscall_cap_seq_0", "tap_port_type",
                     "auto_instance_0_icon_id", "auto_instance_1_icon_id",
                     "auto_service_type_0", "response_status",
                     "auto_service_id_0", "auto_instance_id_1",
@@ -376,3 +380,4 @@ class TracingCompletion(L7FlowTracing):
                 app_span[tag_str] = "" if not app_span.get(
                     tag_str) else app_span[tag_str]
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")
+            app_span["_id"] = i
