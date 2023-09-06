@@ -26,23 +26,26 @@ async def application_log_l7_tracing(request):
         trace_id, ch_res = await l7_flow_tracing.get_trace_id_by_id()
         l7_flow_tracing.status.append("Query trace_id", ch_res)
         if not trace_id:
-            status, response, failed_regions = l7_flow_tracing.status, {}, set(
-            )
+            status, response, failed_regions = await l7_flow_tracing.query()
         else:
             app_spans_res, app_spans_code = await curl_perform(
                 'get',
                 f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
             )
             if app_spans_code != HTTP_OK:
-                log.Info("No app spans found!")
-                status, response, failed_regions = l7_flow_tracing.status, {}, set(
-                )
+                log.warning("Get app spans failed!")
+                status, response, failed_regions = await l7_flow_tracing.query()
             else:
-                args.app_spans = app_spans_res.get('data', {}).get('spans', [])
-                tracing_completion = TracingCompletion(args, request.headers)
-                tracing_completion.status.append("Query trace_id", ch_res)
-                status, response, failed_regions = await tracing_completion.query(
-                )
+                app_spans = app_spans_res.get('data', {}).get('spans', [])
+                if not app_spans:
+                    status, response, failed_regions = await l7_flow_tracing.query()
+                else:
+                    args.app_spans = app_spans
+                    tracing_completion = TracingCompletion(
+                        args, request.headers)
+                    tracing_completion.status.append("Query trace_id", ch_res)
+                    status, response, failed_regions = await tracing_completion.query(
+                    )
     else:
         status, response, failed_regions = await L7FlowTracing(
             args, request.headers).query()
