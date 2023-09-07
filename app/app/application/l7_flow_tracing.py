@@ -130,6 +130,7 @@ DATABASE = "flow_log"
 
 
 class L7FlowTracing(Base):
+
     async def query(self):
         max_iteration = self.args.get("max_iteration", 30)
         network_delay_us = self.args.get("network_delay_us")
@@ -201,7 +202,7 @@ class L7FlowTracing(Base):
         dataframe_flowmetas = await self.query_flowmetas(
             time_filter, base_filter)
         if type(dataframe_flowmetas) != DataFrame:
-            return []
+            return {}
         related_map[dataframe_flowmetas['_id'][0]] = [
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
@@ -401,7 +402,7 @@ class L7FlowTracing(Base):
             if len(set(dataframe_flowmetas['_id'])) - len_of_flows < 1:
                 break
         if not l7_flow_ids:
-            return []
+            return {}
         # 获取追踪到的所有应用流日志
         return_fields += RETURN_FIELDS
         flow_fields = list(RETURN_FIELDS)
@@ -411,7 +412,7 @@ class L7FlowTracing(Base):
         l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
                                               flow_fields)
         if type(l7_flows) != DataFrame:
-            return []
+            return {}
         l7_flows.insert(0, "related_ids", "")
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
         for index in range(len(l7_flows.index)):
@@ -510,6 +511,7 @@ class L7XrequestMeta:
     """
     x_request_id追踪：
     """
+
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.x_request_id_0 = flow_metas[1]
@@ -556,6 +558,7 @@ class L7AppMeta:
     应用span追踪：
         span_id, parent_span_id
     """
+
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.tap_side = flow_metas[1]
@@ -604,6 +607,7 @@ class L7NetworkMeta:
     网络流量追踪信息:
         req_tcp_seq, resp_tcp_seq, start_time_us, end_time_us
     """
+
     def __init__(self, flow_metas: Tuple, network_delay_us: int):
         self._id = flow_metas[0]
         self.type = flow_metas[1]
@@ -679,6 +683,7 @@ class L7SyscallMeta:
     系统调用追踪信息:
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, tap_side, start_time_us, end_time_us
     """
+
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.vtap_id = flow_metas[1]
@@ -689,11 +694,10 @@ class L7SyscallMeta:
         self.end_time_us = flow_metas[6]
 
     def __eq__(self, rhs):
-        return (
-            self.vtap_id == rhs.vtap_id
-            and self.syscall_trace_id_request == rhs.syscall_trace_id_request
-            and
-            self.syscall_trace_id_response == rhs.syscall_trace_id_response)
+        return (self.vtap_id == rhs.vtap_id and self.syscall_trace_id_request
+                == rhs.syscall_trace_id_request
+                and self.syscall_trace_id_response
+                == rhs.syscall_trace_id_response)
 
     def to_tuple(self):
         return (self.vtap_id, self.syscall_trace_id_request,
@@ -739,6 +743,7 @@ class L7SyscallMeta:
 
 
 class Networks:
+
     def __init__(self):
         self.req_tcp_seq = None
         self.resp_tcp_seq = None
@@ -820,6 +825,7 @@ class Networks:
 
 
 class Service:
+
     def __init__(self, vtap_id: int, process_id: int):
         self.vtap_id = vtap_id
         self.process_id = process_id
@@ -1551,6 +1557,7 @@ def format(services, networks, app_flows, _id, network_delay_us):
 
 
 class TraceSort:
+
     def __init__(self, traces):
         self.traces = traces
         self.sorted_indexs = []
