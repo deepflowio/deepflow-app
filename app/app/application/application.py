@@ -23,8 +23,12 @@ async def application_log_l7_tracing(request):
     args.validate()
     l7_flow_tracing = L7FlowTracing(args, request.headers)
     if config.call_apm_api_to_supplement_trace:
-        trace_id, ch_res = await l7_flow_tracing.get_trace_id_by_id()
-        l7_flow_tracing.status.append("Query trace_id", ch_res)
+        ch_res = None
+        if not args.get("_id"):
+            trace_id = self.args.get("trace_id")
+        else:
+            trace_id, ch_res = await l7_flow_tracing.get_trace_id_by_id()
+            l7_flow_tracing.status.append("Query trace_id", ch_res)
         if not trace_id:
             status, response, failed_regions = await l7_flow_tracing.query()
         else:
@@ -43,9 +47,9 @@ async def application_log_l7_tracing(request):
                     args.app_spans = app_spans
                     tracing_completion = TracingCompletion(
                         args, request.headers)
-                    tracing_completion.status.append("Query trace_id", ch_res)
-                    status, response, failed_regions = await tracing_completion.query(
-                    )
+                    if ch_res:
+                        tracing_completion.status.append("Query trace_id", ch_res)
+                    status, response, failed_regions = await tracing_completion.query()
     else:
         status, response, failed_regions = await L7FlowTracing(
             args, request.headers).query()
