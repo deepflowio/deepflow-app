@@ -23,6 +23,7 @@ TAP_SIDE_BY_SPAN_KIND = {
 
 
 class TracingCompletion(L7FlowTracing):
+
     def __init__(self, args, headers):
         super().__init__(args, headers)
         self.app_spans = [
@@ -52,7 +53,6 @@ class TracingCompletion(L7FlowTracing):
             for res in rst.get("tracing", []):
                 res.pop("selftime", None)
                 res.pop("Enum(tap_side)", None)
-                res.pop("attribute", None)
                 res.pop("id", None)
                 res.pop("parent_id", None)
                 res.pop("childs", None)
@@ -93,7 +93,7 @@ class TracingCompletion(L7FlowTracing):
         related_map = defaultdict(list)
         dataframe_flowmetas = self.app_spans_df
         if dataframe_flowmetas.empty:
-            return []
+            return {}
         for i in range(len(self.app_spans)):
             for j in range(len(self.app_spans)):
                 if i == j:
@@ -309,7 +309,7 @@ class TracingCompletion(L7FlowTracing):
             l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
                                                   flow_fields)
         if type(l7_flows) != DataFrame:
-            return []
+            return {}
         # Merge Incoming App Spans
         l7_flows = pd.concat([l7_flows, self.app_spans_df],
                              join="outer",
