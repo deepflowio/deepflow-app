@@ -1,14 +1,19 @@
 import math
 import pandas as pd
+from log import logger
 
-from ast import Index, Tuple
+from ast import Tuple
 from pandas import DataFrame
 from collections import defaultdict
 from data.querier_client import Querier
 from config import config
 from .base import Base
 from common import const
+from common.utils import curl_perform
+from common.const import HTTP_OK
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+
+log = logger.getLogger(__name__)
 
 NET_SPAN_TAP_SIDE_PRIORITY = {
     item: i
@@ -162,16 +167,6 @@ class L7FlowTracing(Base):
             return ""
         return data["_id"][0]
 
-    async def get_trace_id_by_id(self):
-        time_filter = f"time>={self.start_time} AND time<={self.end_time}"
-        _id = self.args.get("_id")
-        sql = f"SELECT trace_id FROM l7_flow_log WHERE _id={_id} AND {time_filter} limit 1"
-        resp = await self.query_ck(sql)
-        data = resp["data"]
-        if type(data) != DataFrame or data.empty:
-            return ""
-        return data["trace_id"][0], resp
-
     async def trace_l7_flow(self,
                             time_filter: str,
                             base_filter: str,
@@ -198,6 +193,7 @@ class L7FlowTracing(Base):
         l7_flow_ids = set()
         xrequests = []
         related_map = defaultdict(list)
+        third_app_spans_all = []
 
         dataframe_flowmetas = await self.query_flowmetas(
             time_filter, base_filter)
@@ -206,15 +202,18 @@ class L7FlowTracing(Base):
         related_map[dataframe_flowmetas['_id'][0]] = [
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
-        trace_id = ''
+        trace_id = self.args.get("trace_id") if self.args.get(
+            "trace_id") else ''
         allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
+        call_apm_api_to_supplement_trace = config.call_apm_api_to_supplement_trace
+        multi_trace_ids = set()
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break
             filters = []
 
             # 主动注入的追踪信息
-            if not allow_multiple_trace_ids_in_tracing_result and not trace_id:
+            if not allow_multiple_trace_ids_in_tracing_result:
                 delete_index = []
                 for index in range(len(dataframe_flowmetas.index)):
                     if dataframe_flowmetas['trace_id'][index] in [0, '']:
@@ -222,16 +221,59 @@ class L7FlowTracing(Base):
                     if trace_id and trace_id != dataframe_flowmetas[
                             'trace_id'][index]:
                         delete_index.append(index)
-                    trace_id = dataframe_flowmetas['trace_id'][index]
-                    continue
+                    if not trace_id:
+                        trace_id = dataframe_flowmetas['trace_id'][index]
                 dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
+                if call_apm_api_to_supplement_trace and trace_id not in multi_trace_ids:
+                    get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
+                    app_spans_res, app_spans_code = await curl_perform(
+                        'get', get_third_app_span_url)
+                    if app_spans_code != HTTP_OK:
+                        log.warning(
+                            f"Get app spans failed! url: {get_third_app_span_url}"
+                        )
+                    app_spans = app_spans_res.get('data', {}).get('spans', [])
+                    self.complete_app_span(app_spans)
+                    third_app_spans_all.extend(app_spans)
+                    multi_trace_ids.add(trace_id)
+                    if app_spans:
+                        dataframe_flowmetas = pd.concat(
+                            [dataframe_flowmetas,
+                             pd.DataFrame(app_spans)],
+                            join="outer",
+                            ignore_index=True).drop_duplicates(
+                                ["_id"]).reset_index(drop=True)
             else:
                 new_trace_ids = set()
+                third_app_spans = []
                 for index in range(len(dataframe_flowmetas.index)):
                     if dataframe_flowmetas['trace_id'][index] in [0, '']:
                         continue
-                    new_trace_ids.add((dataframe_flowmetas['_id'][index],
-                                       dataframe_flowmetas['trace_id'][index]))
+                    apm_trace_id = dataframe_flowmetas['trace_id'][index]
+                    new_trace_ids.add(
+                        (dataframe_flowmetas['_id'][index], apm_trace_id))
+                    if call_apm_api_to_supplement_trace and apm_trace_id not in multi_trace_ids:
+                        get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={apm_trace_id}"
+                        app_spans_res, app_spans_code = await curl_perform(
+                            'get', get_third_app_span_url)
+                        if app_spans_code != HTTP_OK:
+                            log.warning(
+                                f"Get app spans failed! url: {get_third_app_span_url}"
+                            )
+                        app_spans = app_spans_res.get('data',
+                                                      {}).get('spans', [])
+                        third_app_spans.extend(app_spans)
+                        multi_trace_ids.add(apm_trace_id)
+                self.complete_app_span(third_app_spans)
+                third_app_spans_all.extend(third_app_spans)
+                if third_app_spans:
+                    dataframe_flowmetas = pd.concat(
+                        [dataframe_flowmetas,
+                         pd.DataFrame(third_app_spans)],
+                        join="outer",
+                        ignore_index=True).drop_duplicates(
+                            ["_id"]).reset_index(drop=True)
+
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
@@ -413,6 +455,10 @@ class L7FlowTracing(Base):
                                               flow_fields)
         if type(l7_flows) != DataFrame:
             return {}
+        l7_flows = pd.concat(
+            [l7_flows, pd.DataFrame(third_app_spans_all)],
+            join="outer",
+            ignore_index=True).drop_duplicates(["_id"]).reset_index(drop=True)
         l7_flows.insert(0, "related_ids", "")
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
         for index in range(len(l7_flows.index)):
