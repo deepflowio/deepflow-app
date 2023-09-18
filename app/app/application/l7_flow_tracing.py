@@ -108,10 +108,8 @@ RETURN_FIELDS = list(
         "endpoint",
     ]))
 FIELDS_MAP = {
-    "start_time_us":
-    "toUnixTimestamp64Micro(start_time) as start_time_us",
-    "end_time_us":
-    "toUnixTimestamp64Micro(end_time) as end_time_us",
+    "start_time_us": "toUnixTimestamp64Micro(start_time) as start_time_us",
+    "end_time_us": "toUnixTimestamp64Micro(end_time) as end_time_us",
     "auto_instance_0_node_type":
     "node_type(auto_instance_0) as auto_instance_0_node_type",
     "auto_instance_0_icon_id":
@@ -119,7 +117,8 @@ FIELDS_MAP = {
     "auto_instance_1_node_type":
     "node_type(auto_instance_1) as auto_instance_1_node_type",
     "auto_instance_1_icon_id":
-    "icon_id(auto_instance_1) as auto_instance_1_icon_id"
+    "icon_id(auto_instance_1) as auto_instance_1_icon_id",
+    "_id": "toString(_id) as `_id_str`"
 }
 MERGE_KEYS = [
     'l7_protocol', 'protocol', 'version', 'request_id', 'http_proxy_client',
@@ -159,7 +158,7 @@ class L7FlowTracing(Base):
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
-        sql = f"SELECT _id FROM l7_flow_log WHERE trace_id='{trace_id}' AND {time_filter} limit 1"
+        sql = f"SELECT toString(_id) AS `_id` FROM l7_flow_log WHERE trace_id='{trace_id}' AND {time_filter} limit 1"
         resp = await self.query_ck(sql)
         self.status.append("Query _id", resp)
         data = resp["data"]
@@ -455,6 +454,7 @@ class L7FlowTracing(Base):
                                               flow_fields)
         if type(l7_flows) != DataFrame:
             return {}
+        l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
         l7_flows = pd.concat(
             [l7_flows, pd.DataFrame(third_app_spans_all)],
             join="outer",
