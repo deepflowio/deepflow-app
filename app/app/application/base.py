@@ -61,5 +61,6 @@ class Base(object):
                 app_span[tag_str] = "" if not app_span.get(
                     tag_str) else app_span[tag_str]
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")
-            app_span["_id"] = uuid.uuid4(
-            ).node if not app_span.get('_id') else app_span['_id']
+            app_span["_id"] = str(
+                uuid.uuid4().node) if not app_span.get('_id') else str(
+                    app_span['_id'])

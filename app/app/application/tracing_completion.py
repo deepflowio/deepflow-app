@@ -299,6 +299,7 @@ class TracingCompletion(L7FlowTracing):
                                                   flow_fields)
         if type(l7_flows) != DataFrame:
             return {}
+        l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
         # Merge Incoming App Spans
         l7_flows = pd.concat([l7_flows, self.app_spans_df],
                              join="outer",
