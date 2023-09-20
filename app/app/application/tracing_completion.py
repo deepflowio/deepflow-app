@@ -108,6 +108,7 @@ class TracingCompletion(L7FlowTracing):
                         delete_index.append(index)
                     trace_id = dataframe_flowmetas['trace_id'][index]
                     continue
+                filters.append(f"trace_id='{trace_id}'")
                 dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
             else:
                 new_trace_ids = set()
