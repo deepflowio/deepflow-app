@@ -222,6 +222,7 @@ class L7FlowTracing(Base):
                         delete_index.append(index)
                     if not trace_id:
                         trace_id = dataframe_flowmetas['trace_id'][index]
+                filters.append(f"trace_id='{trace_id}'")
                 dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
                 if call_apm_api_to_supplement_trace and trace_id not in multi_trace_ids:
                     get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
