@@ -108,7 +108,8 @@ class TracingCompletion(L7FlowTracing):
                         delete_index.append(index)
                     trace_id = dataframe_flowmetas['trace_id'][index]
                     continue
-                filters.append(f"trace_id='{trace_id}'")
+                if trace_id:
+                    filters.append(f"trace_id='{trace_id}'")
                 dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
             else:
                 new_trace_ids = set()
@@ -262,6 +263,7 @@ class TracingCompletion(L7FlowTracing):
                                                        ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
+            new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
             # L7 Flow ID信息
             l7_flow_ids |= set(dataframe_flowmetas['_id'])
 

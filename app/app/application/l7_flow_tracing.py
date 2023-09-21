@@ -198,6 +198,7 @@ class L7FlowTracing(Base):
             time_filter, base_filter)
         if type(dataframe_flowmetas) != DataFrame:
             return {}
+        dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
         related_map[dataframe_flowmetas['_id'][0]] = [
             f"{dataframe_flowmetas['_id'][0]}-base"
         ]
@@ -222,7 +223,8 @@ class L7FlowTracing(Base):
                         delete_index.append(index)
                     if not trace_id:
                         trace_id = dataframe_flowmetas['trace_id'][index]
-                filters.append(f"trace_id='{trace_id}'")
+                if trace_id:
+                    filters.append(f"trace_id='{trace_id}'")
                 dataframe_flowmetas = dataframe_flowmetas.drop(delete_index)
                 if call_apm_api_to_supplement_trace and trace_id not in multi_trace_ids:
                     get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
@@ -421,6 +423,7 @@ class L7FlowTracing(Base):
                                                        ' OR '.join(filters))
             if type(new_flows) != DataFrame:
                 break
+            new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
             if xrequests:
                 for x_request in xrequests:
@@ -509,7 +512,7 @@ class L7FlowTracing(Base):
         SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
-        trace_id, x_request_id_0, x_request_id_1, _id, tap_side, auto_instance_0, auto_instance_1
+        trace_id, x_request_id_0, x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
         FROM `l7_flow_log` 
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
