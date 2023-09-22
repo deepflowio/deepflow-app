@@ -142,6 +142,8 @@ class L7FlowTracing(Base):
         if not _id:
             trace_id = self.args.get("trace_id")
             _id = await self.get_id_by_trace_id(trace_id, time_filter)
+            _id = str(_id)
+            self.args._id = _id
         if not _id:
             return self.status, {}, self.failed_regions
         base_filter = f"_id={_id}"
