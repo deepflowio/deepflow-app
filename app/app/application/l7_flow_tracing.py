@@ -1278,7 +1278,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     ## 排序
 
     ### 网络span排序
-    # 1.网络span及系统span按照tap_side_rank进行排序
+    # 1.网络span按照tap_side_rank或response_duration进行排序，系统span始终在网络span的两头
     for network in networks:
         network.sort_and_set_parent()
     # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
@@ -1785,16 +1785,44 @@ def network_flow_sort(traces):
     对网络span进行排序，排序规则：
     1. 按照TAP_SIDE_RANKS进行排序
     2. 对Local和rest就近（比较采集器）排到其他位置附近（按时间排）
+    3. 网络 Span 中如 tap_side = local 或 rest 或 xx_gw 或者 tap!= 虚拟网络，则取消 tap_side 排序逻辑，改为响应时延长度倒排，TAP_SIDE_RANKS正排
     """
     local_rest_traces = []
     sorted_traces = []
+    sys_traces = []
+    response_duration_sort = False
     for trace in traces:
+        if trace['tap_side'] in [
+                const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST,
+                const.TAP_SIDE_CLIENT_GATEWAY, const.TAP_SIDE_SERVER_GATEWAY,
+                const.TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR,
+                const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR
+        ] or trace['tap'] != "虚拟网络":
+            response_duration_sort = True
+            break
         if trace['tap_side'] in [const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST]:
             local_rest_traces.append(trace)
+        elif trace['tap_side'] in [
+                const.TAP_SIDE_CLIENT_PROCESS, const.TAP_SIDE_SERVER_PROCESS
+        ]:
+            sys_traces.append(trace)
         else:
             sorted_traces.append(trace)
+    if response_duration_sort:
+        sorted_traces = sorted(
+            traces,
+            key=lambda x:
+            (-x['response_duration'], const.TAP_SIDE_RANKS.get(x['tap_side']),
+             x['tap_side']))
+        for sys_trace in sys_traces:
+            if sys_trace['tap_side'] == const.TAP_SIDE_CLIENT_PROCESS:
+                sorted_traces.insert(0, sys_trace)
+            else:
+                sorted_traces.append(sys_trace)
+        return sorted_traces
     sorted_traces = sorted(
-        sorted_traces, key=lambda x: const.TAP_SIDE_RANKS.get(x['tap_side']))
+        sorted_traces,
+        key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
     if not sorted_traces:
         sorted_traces += local_rest_traces
     else:
