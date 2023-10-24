@@ -1,5 +1,6 @@
 FROM python:3.8-slim-buster AS runner
 ARG TARGETARCH
+RUN apt-get update && apt-get upgrade -y
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local && \
     mkdir -p /etc/deepflow/  && \
