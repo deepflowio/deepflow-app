@@ -18,9 +18,9 @@ class TracingCompletion(L7FlowTracing):
         super().__init__(args, headers)
         self.app_spans = [
             app_span.to_primitive() for app_span in self.args.app_spans
-        ] if not isinstance(self.args.app_spans, list) else self.args.app_spans
+        ]
         self.update_time()
-        self.complete_app_span()
+        self.complete_app_span(self.app_spans)
         self.app_spans_df = pd.DataFrame(self.app_spans)
 
     async def query(self):
