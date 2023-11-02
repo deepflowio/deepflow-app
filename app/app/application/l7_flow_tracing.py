@@ -1388,6 +1388,23 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
     return response
 
 
+def format_selftime(traces, parent_trace, child_ids, uid_index_map):
+    parent_self_time = parent_trace["end_time_us"] - parent_trace[
+        "start_time_us"]
+    if parent_self_time == 0:
+        return
+    for child_id in child_ids:
+        child_trace = traces[uid_index_map[child_id]]
+        child_self_time = child_trace["end_time_us"] - child_trace[
+            "start_time_us"]
+        if child_self_time > 0:
+            parent_trace["selftime"] -= child_self_time
+        else:
+            new_child_ids = child_trace.get("childs", [])
+            return format_duration(traces, parent_trace, new_child_ids,
+                                   uid_index_map)
+
+
 def pruning_trace(response, _id, network_delay_us):
     tree = []
     root_start_time_us = 0
@@ -1450,13 +1467,13 @@ def merge_service(services, app_flows, response):
             elif service_uname:
                 metrics_map[service_uid]['service_uname'] = service_uname
         for index, flow in enumerate(service.direct_flows):
-            metrics_map[service_uid]["duration"] += flow["duration"]
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
             trace = id_to_trace_map.get(flow.get('_uid'))
             if trace:
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = service_uname
+                metrics_map[service_uid]["duration"] += trace["selftime"]
             flow['process_id'] = service.process_id
     serivce_name_to_service_uid = {}
     for flow in app_flows:
@@ -1481,7 +1498,7 @@ def merge_service(services, app_flows, response):
             if trace:
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = flow["app_service"]
-            metrics_map[service_uid]["duration"] += flow["duration"]
+                metrics_map[service_uid]["duration"] += trace["selftime"]
         elif flow['app_service'] in serivce_name_to_service_uid:
             service_uid = serivce_name_to_service_uid[flow['app_service']]
             if service_uid not in metrics_map:
@@ -1496,7 +1513,7 @@ def merge_service(services, app_flows, response):
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = metrics_map[service_uid][
                     "service_uname"]
-            metrics_map[service_uid]["duration"] += flow["duration"]
+                metrics_map[service_uid]["duration"] += trace["selftime"]
         elif flow.get("service"):
             service_uid = f"{flow['service'].auto_service_id}-"
             if service_uid not in metrics_map:
@@ -1511,13 +1528,17 @@ def merge_service(services, app_flows, response):
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = metrics_map[service_uid][
                     "service_uname"]
-            metrics_map[service_uid]["duration"] += flow["duration"]
+                metrics_map[service_uid]["duration"] += trace["selftime"]
     response["services"] = _call_metrics(metrics_map)
 
 
 def format(services, networks, app_flows, _id, network_delay_us):
     response = format_trace(services, networks, app_flows)
     pruning_trace(response, _id, network_delay_us)
+    traces = response.get('tracing', [])
+    uid_index_map = {trace["id"]: i for i, trace in enumerate(traces)}
+    for trace in traces:
+        format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
     merge_service(services, app_flows, response)
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
@@ -1692,12 +1713,6 @@ def _get_df_key(df: DataFrame, key: str):
 
 def _set_parent(flow, flow_parent, info=None):
     flow['parent_id'] = flow_parent['_uid']
-    if flow_parent['duration'] >= (flow['end_time_us'] -
-                                   flow['start_time_us']):
-        flow_parent['duration'] -= (flow['end_time_us'] -
-                                    flow['start_time_us'])
-    else:
-        flow_parent['duration'] = 0
     if flow_parent.get("childs"):
         flow_parent["childs"].append(flow['_uid'])
     else:
