@@ -1401,7 +1401,7 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
             parent_trace["selftime"] -= child_self_time
         else:
             new_child_ids = child_trace.get("childs", [])
-            return format_duration(traces, parent_trace, new_child_ids,
+            return format_selftime(traces, parent_trace, new_child_ids,
                                    uid_index_map)
 
 
