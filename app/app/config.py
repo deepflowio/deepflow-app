@@ -35,7 +35,7 @@ class Config(object):
 
     def parse(self, config_path):
         with open(config_path, 'r') as config_file:
-            cfg = yaml.load(config_file).get("app", {})
+            cfg = yaml.safe_load(config_file).get("app", {})
             self.listen_port = cfg.get('listen-port')
             self.http_request_timeout = cfg.get('http_request_timeout', 600)
             self.http_response_timeout = cfg.get('http_response_timeout', 600)

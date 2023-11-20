@@ -12,7 +12,7 @@ from models.models import FlowLogL7Tracing, TracingCompletionByExternalAppSpans
 
 log = logger.getLogger(__name__)
 
-application_app = Blueprint(__name__)
+application_app = Blueprint(str(__name__).replace(".", "_"))
 
 
 @application_app.route(API_PREFIX + '/querier' + '/L7FlowTracing',
