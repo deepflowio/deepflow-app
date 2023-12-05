@@ -1397,12 +1397,10 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
         child_trace = traces[uid_index_map[child_id]]
         child_self_time = child_trace["end_time_us"] - child_trace[
             "start_time_us"]
-        if child_self_time > 0:
+        if child_self_time > 0 and child_self_time <= parent_trace["selftime"]:
             parent_trace["selftime"] -= child_self_time
         else:
-            new_child_ids = child_trace.get("childs", [])
-            return format_selftime(traces, parent_trace, new_child_ids,
-                                   uid_index_map)
+            return
 
 
 def pruning_trace(response, _id, network_delay_us):
