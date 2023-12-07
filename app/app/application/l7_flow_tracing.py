@@ -1394,7 +1394,11 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
     if parent_self_time == 0:
         return
     for child_id in child_ids:
-        child_trace = traces[uid_index_map[child_id]]
+        trace_index = uid_index_map.get(child_id, -1)
+        if trace_index == -1:
+            log.warning(f"The sub-span cannot be found: {child_id}")
+            continue
+        child_trace = traces[trace_index]
         child_self_time = child_trace["end_time_us"] - child_trace[
             "start_time_us"]
         if child_self_time > 0 and child_self_time <= parent_trace["selftime"]:
