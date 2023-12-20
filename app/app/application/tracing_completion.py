@@ -100,8 +100,11 @@ class TracingCompletion(L7FlowTracing):
             filters = []
             new_trace_id_flows = pd.DataFrame()
             new_trace_id_filters = []
+            new_trace_ids = set()
             # 主动注入的追踪信息
             if not allow_multiple_trace_ids_in_tracing_result and not trace_id:
+                if trace_id:
+                    new_trace_ids.add(trace_id)
                 delete_index = []
                 deleted_trace_ids = set()
                 for index in range(len(dataframe_flowmetas.index)):
@@ -113,15 +116,13 @@ class TracingCompletion(L7FlowTracing):
                         deleted_trace_ids.add(flow_trace_id)
                     if not trace_id:
                         trace_id = flow_trace_id
+                        new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
-                    new_trace_id_filters.append(f"trace_id='{trace_id}'")
+                    new_trace_id_filters.append(
+                        f"FastFilter(trace_id)='{trace_id}'")
                     # Trace id query separately
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(new_trace_id_filters))
-                    if type(new_trace_id_flows) != DataFrame:
-                        break
-                    new_trace_id_flows.rename(columns={'_id_str': '_id'},
-                                              inplace=True)
                     query_simple_trace_id = True
                 if delete_index:
                     dataframe_flowmetas = dataframe_flowmetas.drop(
@@ -130,7 +131,6 @@ class TracingCompletion(L7FlowTracing):
                         drop=True)
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
             else:
-                new_trace_ids = set()
                 for index in range(len(dataframe_flowmetas.index)):
                     if dataframe_flowmetas['trace_id'][index] in [0, '']:
                         continue
@@ -139,18 +139,27 @@ class TracingCompletion(L7FlowTracing):
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
-                    trace_ids_set = set([nxrid[1] for nxrid in new_trace_ids])
-                    new_trace_id_filters.append('(' + ' OR '.join([
-                        "trace_id='{tid}'".format(tid=tid)
-                        for tid in trace_ids_set
-                    ]) + ')')
+                    new_trace_id_filters.append(
+                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)})")
                     # Trace id query separately
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(new_trace_id_filters))
-                    if type(new_trace_id_flows) != DataFrame:
-                        break
-                    new_trace_id_flows.rename(columns={'_id_str': '_id'},
-                                              inplace=True)
+
+            if type(new_trace_id_flows) != DataFrame:
+                break
+            # Delete different trace id data
+            new_trace_id_flow_delete_index = []
+            deleted_trace_ids = set()
+            for index in range(len(new_trace_id_flows.index)):
+                flow_trace_id = new_trace_id_flows['trace_id'][index]
+                if flow_trace_id not in new_trace_ids:
+                    new_trace_id_flow_delete_index.append(index)
+                    deleted_trace_ids.add(flow_trace_id)
+            if new_trace_id_flow_delete_index:
+                new_trace_id_flows = new_trace_id_flows.drop(
+                    new_trace_id_flow_delete_index)
+                new_trace_id_flows = new_trace_id_flows.reset_index(drop=True)
+            new_trace_id_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
             # 新的网络追踪信息
             new_network_metas = set()
