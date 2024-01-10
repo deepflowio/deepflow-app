@@ -420,7 +420,7 @@ class L7FlowTracing(Base):
                      dataframe_flowmetas['x_request_id_1'][index]))
             new_x_request_metas -= x_request_metas
             x_request_metas |= new_x_request_metas
-            x_requests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
+            xrequests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
             # x_request_id related query
             x_request_filters = []
             if x_request_id_0s:
