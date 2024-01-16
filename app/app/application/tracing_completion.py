@@ -126,9 +126,7 @@ class TracingCompletion(L7FlowTracing):
                     query_simple_trace_id = True
                 if delete_index:
                     dataframe_flowmetas = dataframe_flowmetas.drop(
-                        delete_index)
-                    dataframe_flowmetas = dataframe_flowmetas.reset_index(
-                        drop=True)
+                        delete_index).reset_index(drop=True)
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
             else:
                 for index in range(len(dataframe_flowmetas.index)):
@@ -157,8 +155,7 @@ class TracingCompletion(L7FlowTracing):
                     deleted_trace_ids.add(flow_trace_id)
             if new_trace_id_flow_delete_index:
                 new_trace_id_flows = new_trace_id_flows.drop(
-                    new_trace_id_flow_delete_index)
-                new_trace_id_flows = new_trace_id_flows.reset_index(drop=True)
+                    new_trace_id_flow_delete_index).reset_index(drop=True)
             new_trace_id_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
             # 新的网络追踪信息
@@ -288,6 +285,16 @@ class TracingCompletion(L7FlowTracing):
                                                        ' OR '.join(filters))
                 if type(new_flows) != DataFrame:
                     break
+                # delete dup _id
+                old_ids = set(dataframe_flowmetas['_id'])
+                dup_id_index = []
+                for index in range(len(new_flows.index)):
+                    _id = new_flows['_id_str'][index]
+                    if _id in old_ids:
+                        dup_id_index.append(index)
+                if dup_id_index:
+                    new_flows = new_flows.drop(dup_id_index).reset_index(
+                        drop=True)
                 new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
                 if xrequests:
@@ -316,10 +323,9 @@ class TracingCompletion(L7FlowTracing):
                     # Delete unrelated data
                     if _id not in related_map:
                         new_flow_delete_index.append(index)
-                        continue
                 if new_flow_delete_index:
-                    new_flows = new_flows.drop(new_flow_delete_index)
-                    new_flows = new_flows.reset_index(drop=True)
+                    new_flows = new_flows.drop(
+                        new_flow_delete_index).reset_index(drop=True)
                 if deleted_trace_ids:
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
             # Merge all flows and check if any new flows are generated
