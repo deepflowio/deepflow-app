@@ -633,16 +633,16 @@ class L7XrequestMeta:
         for i in range(len(df.index)):
             if df._id[i] == self._id:
                 continue
-            if type(self.x_request_id_0) == str and self.x_request_id_0:
-                if self.x_request_id_0 == df.x_request_id_1[i]:
-                    related_map[df._id[i]].append(
-                        str(self._id) + "-xrequestid")
-                    continue
-            if type(self.x_request_id_1) == str and self.x_request_id_1:
-                if self.x_request_id_1 == df.x_request_id_0[i]:
-                    related_map[df._id[i]].append(
-                        str(self._id) + "-xrequestid")
-                    continue
+            if self.x_request_id_0 and self.x_request_id_0 == df.x_request_id_1[
+                    i]:
+                related_map[df._id[i]].append(self._id + "-xrequestid")
+                related_map[self._id].append(df._id[i] + "-xrequestid")
+                continue
+            if self.x_request_id_1 and self.x_request_id_1 == df.x_request_id_0[
+                    i]:
+                related_map[df._id[i]].append(self._id + "-xrequestid")
+                related_map[self._id].append(df._id[i] + "-xrequestid")
+                continue
 
 
 class L7NetworkMeta:
@@ -669,25 +669,24 @@ class L7NetworkMeta:
         for i in range(len(df.index)):
             if df._id[i] == self._id:
                 continue
-            if df.type[i] != L7_FLOW_TYPE_RESPONSE and type(
-                    self.span_id
-            ) == str and self.type != L7_FLOW_TYPE_RESPONSE and type(
-                    df.span_id[i]) == str and df.span_id[i]:
+            if df.type[
+                    i] != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and df.span_id[
+                        i]:
                 if df.span_id[i] != self.span_id:
                     continue
             if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
                 if abs(self.start_time_us -
                        df.start_time_us[i]) <= self.network_delay_us:
                     if self.req_tcp_seq == df.req_tcp_seq[i]:
-                        related_map[df._id[i]].append(
-                            str(self._id) + "-network")
+                        related_map[df._id[i]].append(self._id + "-network")
+                        related_map[self._id].append(df._id[i] + "-network")
                         continue
             if self.type != L7_FLOW_TYPE_REQUEST and self.resp_tcp_seq > 0:
                 if abs(self.end_time_us -
                        df.end_time_us[i]) <= self.network_delay_us:
                     if self.resp_tcp_seq == df.resp_tcp_seq[i]:
-                        related_map[df._id[i]].append(
-                            str(self._id) + "-network")
+                        related_map[df._id[i]].append(self._id + "-network")
+                        related_map[self._id].append(df._id[i] + "-network")
                         continue
 
 
@@ -714,21 +713,21 @@ class L7SyscallMeta:
 
     def set_relate(self, df, related_map):
         for i in range(len(df.index)):
-            if df._id[i] == self._id:
-                continue
-            if self.vtap_id != df.vtap_id[i]:
+            if df._id[i] == self._id or self.vtap_id != df.vtap_id[i]:
                 continue
             if self.syscall_trace_id_request > 0:
                 if self.syscall_trace_id_request == df.syscall_trace_id_request[
                         i] or self.syscall_trace_id_request == df.syscall_trace_id_response[
                             i]:
-                    related_map[df._id[i]].append(str(self._id) + "-syscall")
+                    related_map[df._id[i]].append(self._id + "-syscall")
+                    related_map[self._id].append(df._id[i] + "-syscall")
                     continue
             if self.syscall_trace_id_response > 0:
                 if self.syscall_trace_id_response == df.syscall_trace_id_request[
                         i] or self.syscall_trace_id_response == df.syscall_trace_id_response[
                             i]:
-                    related_map[df._id[i]].append(str(self._id) + "-syscall")
+                    related_map[df._id[i]].append(self._id + "-syscall")
+                    related_map[self._id].append(df._id[i] + "-syscall")
                     continue
 
 

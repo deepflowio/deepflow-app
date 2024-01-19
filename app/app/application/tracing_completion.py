@@ -285,16 +285,17 @@ class TracingCompletion(L7FlowTracing):
                                                        ' OR '.join(filters))
                 if type(new_flows) != DataFrame:
                     break
-                # delete dup _id
-                old_ids = set(dataframe_flowmetas['_id'])
-                dup_id_index = []
-                for index in range(len(new_flows.index)):
-                    _id = new_flows['_id_str'][index]
-                    if _id in old_ids:
-                        dup_id_index.append(index)
-                if dup_id_index:
-                    new_flows = new_flows.drop(dup_id_index).reset_index(
-                        drop=True)
+                if i != 0:
+                    # delete dup _id
+                    old_ids = set(dataframe_flowmetas['_id'])
+                    dup_id_index = []
+                    for index in range(len(new_flows.index)):
+                        _id = new_flows['_id_str'][index]
+                        if _id in old_ids:
+                            dup_id_index.append(index)
+                    if dup_id_index:
+                        new_flows = new_flows.drop(dup_id_index).reset_index(
+                            drop=True)
                 new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
                 if xrequests:
