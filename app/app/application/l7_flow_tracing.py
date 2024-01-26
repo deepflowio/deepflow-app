@@ -152,13 +152,15 @@ class L7FlowTracing(Base):
             self.args._id = _id
         if not _id:
             return self.status, {}, self.failed_regions
+        base_filter = f"_id={_id}"
+        signal_source_filter = ''
         if len(signal_sources) == 1 and 'otel' in signal_sources:
-            base_filter = f"_id={_id} and signal_source={L7_FLOW_TYPE_OTEL}"
+            signal_source_filter = f" and signal_source={L7_FLOW_TYPE_OTEL}"
             max_iteration = 1
-        else:
-            base_filter = f"_id={_id}"
+
         rst = await self.trace_l7_flow(time_filter=time_filter,
                                        base_filter=base_filter,
+                                       signal_source_filter=signal_source_filter,
                                        return_fields=["related_ids"],
                                        max_iteration=max_iteration,
                                        network_delay_us=network_delay_us,
@@ -177,6 +179,7 @@ class L7FlowTracing(Base):
     async def trace_l7_flow(self,
                             time_filter: str,
                             base_filter: str,
+                            signal_source_filter: str,
                             return_fields: list,
                             max_iteration: int = 30,
                             network_delay_us: int = config.network_delay_us,
@@ -188,6 +191,7 @@ class L7FlowTracing(Base):
             当使用四元组进行追踪时，time_filter置为希望搜索的一段时间范围，
             当使用五元组进行追踪时，time_filter置为五元组对应流日志的start_time前后一小段时间，以提升精度
         base_filter: 查询的基础过滤条件，用于限定一个四元组或五元组
+        signal_source_filter: 根据信号源进行过滤，目前只支持过滤otel数据源
         return_fields: 返回l7_flow_log的哪些字段
         max_iteration: 使用Flowmeta信息搜索的次数，每次搜索可认为大约能够扩充一级调用关系
         network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
@@ -202,6 +206,7 @@ class L7FlowTracing(Base):
         related_map = defaultdict(list)
         third_app_spans_all = []
 
+        base_filter += signal_source_filter
         dataframe_flowmetas = await self.query_flowmetas(
             time_filter, base_filter)
         if type(dataframe_flowmetas) != DataFrame:
@@ -242,7 +247,7 @@ class L7FlowTracing(Base):
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'")
+                        f"FastFilter(trace_id)='{trace_id}' {signal_source_filter}")
                     # Trace id query separately
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(new_trace_id_filters))
@@ -572,8 +577,7 @@ class L7FlowTracing(Base):
             x_request_id_0：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
             x_request_id_1：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
         """
-        sql = """
-        SELECT 
+        sql = """SELECT 
         type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
         vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
         trace_id, x_request_id_0, x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
