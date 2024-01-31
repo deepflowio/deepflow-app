@@ -76,7 +76,10 @@
   - `tap_side != system span`时，每条`flow`的`_id`最多只有一来一回两条， 大于等于两条
   - `vtap_id`, `tap_port`, `tap_port_type`, `l7_protocol`, `request_id`, `tap_side`, `flow_id`不同
   - `request`的`start_time`大于`response`的`start_time`
-  - `system span`的`flow`需要`request_flow['syscall_cap_seq_0'] + 1 != response_flow['syscall_cap_seq_1']`
+- 系统Span的`flow`满足以下条件才合并
+  - 应用协议为DNS，request_flow的type==session
+  - response_flow的type==response
+  - request_flow的cap_seq_1+1==response_flow的cap_seq_1
 - 合并字段，被合并的`flow`会将`原始flow`中缺少的字段补充进去
   - `flow['type'] == 0`是，按以下字段合并
   ```
