@@ -131,6 +131,7 @@ MERGE_KEY_REQUEST = [
 ]
 MERGE_KEY_RESPONSE = ['http_proxy_client']
 DATABASE = "flow_log"
+L7_PROTOCOL_DNS = 120
 
 
 class L7FlowTracing(Base):
@@ -952,6 +953,15 @@ def merge_flow(flows: list, flow: dict) -> bool:
     按start_time递增的顺序从前向后扫描，每发现一个请求，都找一个它后面离他最近的响应。
     例如：请求1、请求2、响应1、响应2
     则请求1和响应1配队，请求2和响应2配队
+
+    系统Span的flow合并场景：
+    一次 DNS 请求会触发多次 DNS 应答，其中第一个请求和应答被聚合为一个类型为会话的 Flow，
+    后续的应答被聚合为类型为响应的 Flow，这些 Flow 需要最终被聚合为 Span，
+    合并条件为：会话的cap_seq_1 == 响应的cap_seq_1 + 1
+    System Span's flow merging scenario:
+    One DNS request triggers multiple DNS responses, where the first request and response are aggregated into a flow of type session.
+    Subsequent responses are aggregated into flows of type response, which need to be eventually aggregated into spans.
+    Merge condition: Session cap_seq_1 == Response cap_seq_1 + 1
     """
     if flow['type'] == L7_FLOW_TYPE_SESSION \
         and flow['tap_side'] not in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
@@ -1005,8 +1015,11 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
         ]:
             # 应用span syscall_cap_seq判断合并
-            if request_flow['syscall_cap_seq_0'] + 1 != response_flow[
-                    'syscall_cap_seq_1']:
+            if request_flow['l7_protocol'] != L7_PROTOCOL_DNS or request_flow[
+                    'syscall_cap_seq_1'] + 1 != response_flow[
+                        'syscall_cap_seq_1'] or not (
+                            request_flow['type'] == L7_FLOW_TYPE_SESSION and
+                            response_flow['type'] == L7_FLOW_TYPE_RESPONSE):
                 equal = False
         if equal:  # 合并字段
             # FIXME 确认要合并哪些字段
