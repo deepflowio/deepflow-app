@@ -331,7 +331,7 @@ class L7FlowTracing(Base):
 
             # 只查询otel数据
             new_flows = None
-            if max_iteration != 1:
+            if signal_source_filter == '':
                 # 新的网络追踪信息
                 new_network_metas = set()
                 req_tcp_seqs = set()
