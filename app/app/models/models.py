@@ -31,6 +31,10 @@ class FlowLogL7Tracing(Model):
                            required=False,
                            min_value=1,
                            default=10000)
+    signal_sources = ListType(StringType,
+                              serialized_name="SIGNAL_SOURCES",
+                              min_size=1,
+                              required=False)
 
 
 class AppSpans(Model):
