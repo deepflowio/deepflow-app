@@ -138,7 +138,7 @@ L7_PROTOCOL_DNS = 120
 class L7FlowTracing(Base):
 
     async def query(self):
-        signal_sources = self.args.get("signal_sources")
+        signal_sources = self.args.get("signal_sources", [])
         max_iteration = self.args.get("max_iteration", 30)
         network_delay_us = self.args.get("network_delay_us")
         ntp_delay_us = self.args.get("ntp_delay_us", 10000)
@@ -158,13 +158,14 @@ class L7FlowTracing(Base):
         if len(signal_sources) == 1 and 'otel' in signal_sources:
             signal_source_filter = f" and signal_source={L7_FLOW_TYPE_OTEL}"
             max_iteration = 1
-        rst = await self.trace_l7_flow(time_filter=time_filter,
-                                       base_filter=base_filter,
-                                       signal_source_filter=signal_source_filter,
-                                       return_fields=["related_ids"],
-                                       max_iteration=max_iteration,
-                                       network_delay_us=network_delay_us,
-                                       ntp_delay_us=ntp_delay_us)
+        rst = await self.trace_l7_flow(
+            time_filter=time_filter,
+            base_filter=base_filter,
+            signal_source_filter=signal_source_filter,
+            return_fields=["related_ids"],
+            max_iteration=max_iteration,
+            network_delay_us=network_delay_us,
+            ntp_delay_us=ntp_delay_us)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -247,7 +248,8 @@ class L7FlowTracing(Base):
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}' {signal_source_filter}")
+                        f"FastFilter(trace_id)='{trace_id}' {signal_source_filter}"
+                    )
                     # Trace id query separately
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(new_trace_id_filters))
@@ -309,7 +311,8 @@ class L7FlowTracing(Base):
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)} {signal_source_filter})")
+                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)}) {signal_source_filter}"
+                    )
                     # Trace id query separately
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(new_trace_id_filters))
@@ -399,7 +402,8 @@ class L7FlowTracing(Base):
                         new_syscall_metas.add((
                             dataframe_flowmetas['_id'][index],
                             dataframe_flowmetas['vtap_id'][index],
-                            dataframe_flowmetas['syscall_trace_id_request'][index],
+                            dataframe_flowmetas['syscall_trace_id_request']
+                            [index],
                             dataframe_flowmetas['syscall_trace_id_response']
                             [index],
                             dataframe_flowmetas['tap_side'][index],
@@ -425,8 +429,10 @@ class L7FlowTracing(Base):
                 x_request_id_0s = set()
                 x_request_id_1s = set()
                 for index in range(len(dataframe_flowmetas.index)):
-                    x_request_id_0 = dataframe_flowmetas['x_request_id_0'][index]
-                    x_request_id_1 = dataframe_flowmetas['x_request_id_1'][index]
+                    x_request_id_0 = dataframe_flowmetas['x_request_id_0'][
+                        index]
+                    x_request_id_1 = dataframe_flowmetas['x_request_id_1'][
+                        index]
                     if x_request_id_0 in [0, ''] and x_request_id_1 in [0, '']:
                         continue
                     if x_request_id_0:
@@ -440,7 +446,9 @@ class L7FlowTracing(Base):
                          dataframe_flowmetas['x_request_id_1'][index]))
                 new_x_request_metas -= x_request_metas
                 x_request_metas |= new_x_request_metas
-                xrequests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
+                xrequests = [
+                    L7XrequestMeta(nxr) for nxr in new_x_request_metas
+                ]
                 # x_request_id related query
                 x_request_filters = []
                 if x_request_id_0s:
@@ -455,8 +463,8 @@ class L7FlowTracing(Base):
                 new_flows = pd.DataFrame()
                 if filters:
                     # Non-trace_id relational queries
-                    new_flows = await self.query_flowmetas(time_filter,
-                                                           ' OR '.join(filters))
+                    new_flows = await self.query_flowmetas(
+                        time_filter, ' OR '.join(filters))
                     if type(new_flows) != DataFrame:
                         break
                     # delete dup _id

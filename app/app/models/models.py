@@ -67,3 +67,7 @@ class TracingCompletionByExternalAppSpans(Model):
                                min_value=1,
                                default=config.network_delay_us)
     debug = BooleanType(serialized_name="DEBUG", required=False)
+    signal_sources = ListType(StringType,
+                              serialized_name="SIGNAL_SOURCES",
+                              min_size=1,
+                              required=False)
