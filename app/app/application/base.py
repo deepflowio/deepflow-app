@@ -22,6 +22,7 @@ class Base(object):
         self.headers = headers
         self.status = Status()
         self.region = self.args.get("region", None)
+        self.signal_sources = self.args.get("signal_sources") or []
 
     # Completing application span attribute information
     def complete_app_span(self, app_spans):

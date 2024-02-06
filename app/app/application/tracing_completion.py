@@ -25,7 +25,6 @@ class TracingCompletion(L7FlowTracing):
         self.app_spans_df = pd.DataFrame(self.app_spans)
 
     async def query(self):
-        signal_sources = self.args.get("signal_sources") or []
         max_iteration = self.args.get("max_iteration", 30)
         network_delay_us = self.args.get("network_delay_us")
         ntp_delay_us = self.args.get("ntp_delay_us", 10000)
@@ -33,15 +32,12 @@ class TracingCompletion(L7FlowTracing):
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
         self.has_attributes = self.args.get("has_attributes", 0)
         base_filter = ''
-        signal_source_filter = ''
-        if len(signal_sources) == 1 and 'otel' in signal_sources:
-            signal_source_filter = f"signal_source={L7_FLOW_TYPE_OTEL}"
+        if self.signal_sources == ['otel']:
+            base_filter += f"signal_source={L7_FLOW_TYPE_OTEL}"
             max_iteration = 1
-        base_filter += signal_source_filter
         rst = await self.trace_l7_flow(
             time_filter=time_filter,
             base_filter=base_filter,
-            signal_source_filter=signal_source_filter,
             return_fields=["related_ids"],
             max_iteration=max_iteration,
             network_delay_us=network_delay_us,
@@ -67,7 +63,6 @@ class TracingCompletion(L7FlowTracing):
     async def trace_l7_flow(self,
                             time_filter: str,
                             base_filter: str,
-                            signal_source_filter: str,
                             return_fields: list,
                             max_iteration: int = 30,
                             network_delay_us: int = config.network_delay_us,
@@ -129,11 +124,15 @@ class TracingCompletion(L7FlowTracing):
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}' {signal_source_filter}"
+                        f"FastFilter(trace_id)='{trace_id}'"
                     )
                     # Trace id query separately
+                    query_trace_filters = []
+                    query_trace_filters.append(' OR '.join(new_trace_id_filters))
+                    if self.signal_sources == ['otel']:
+                        query_trace_filters.append(f"signal_source={L7_FLOW_TYPE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
-                        time_filter, ' OR '.join(new_trace_id_filters))
+                        time_filter, ' AND '.join(query_trace_filters))
                     query_simple_trace_id = True
                 if delete_index:
                     dataframe_flowmetas = dataframe_flowmetas.drop(
@@ -149,11 +148,15 @@ class TracingCompletion(L7FlowTracing):
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)}) {signal_source_filter}"
+                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)})"
                     )
                     # Trace id query separately
+                    query_trace_filters = []
+                    query_trace_filters.append(' OR '.join(new_trace_id_filters))
+                    if self.signal_sources == ['otel']:
+                        query_trace_filters.append(f"signal_source={L7_FLOW_TYPE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
-                        time_filter, ' OR '.join(new_trace_id_filters))
+                        time_filter, ' AND '.join(query_trace_filters))
 
             if type(new_trace_id_flows) != DataFrame:
                 break
@@ -170,7 +173,7 @@ class TracingCompletion(L7FlowTracing):
                     new_trace_id_flow_delete_index).reset_index(drop=True)
             new_trace_id_flows.rename(columns={'_id_str': '_id'}, inplace=True)
             new_flows = None
-            if signal_source_filter == '':
+            if self.signal_sources != ['otel']:
                 # 新的网络追踪信息
                 new_network_metas = set()
                 req_tcp_seqs = set()
