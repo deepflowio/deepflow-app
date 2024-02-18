@@ -278,6 +278,25 @@ class TracingCompletion(L7FlowTracing):
             if x_request_filters:
                 filters.append(f"({' OR '.join(x_request_filters)})")
 
+            # app relate
+            new_app_metas = set()
+            for index in range(len(dataframe_flowmetas.index)):
+                if dataframe_flowmetas['tap_side'][index] not in [
+                        TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
+                        TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+                ] or not dataframe_flowmetas['span_id'][index]:
+                    continue
+                if dataframe_flowmetas['span_id'][
+                        index] and dataframe_flowmetas['parent_span_id'][index]:
+                    new_app_metas.add(
+                        (dataframe_flowmetas['_id'][index],
+                         dataframe_flowmetas['tap_side'][index],
+                         dataframe_flowmetas['span_id'][index],
+                         dataframe_flowmetas['parent_span_id'][index]))
+            new_app_metas -= app_metas
+            app_metas |= new_app_metas
+            apps = [L7AppMeta(nam) for nam in new_app_metas]
+
             new_flows = pd.DataFrame()
             if filters:
                 # Non-trace_id relational queries
@@ -328,6 +347,9 @@ class TracingCompletion(L7FlowTracing):
                         new_flow_delete_index).reset_index(drop=True)
                 if deleted_trace_ids:
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
+            if apps:
+                for app in apps:
+                    app.set_relate(new_flows, related_map)
             # Merge all flows and check if any new flows are generated
             old_flows_length = len(dataframe_flowmetas)
             dataframe_flowmetas = pd.concat(

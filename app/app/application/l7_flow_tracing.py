@@ -438,6 +438,25 @@ class L7FlowTracing(Base):
             if x_request_filters:
                 filters.append(f"({' OR '.join(x_request_filters)})")
 
+            # app relate
+            new_app_metas = set()
+            for index in range(len(dataframe_flowmetas.index)):
+                if dataframe_flowmetas['tap_side'][index] not in [
+                        TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
+                        TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+                ] or not dataframe_flowmetas['span_id'][index]:
+                    continue
+                if dataframe_flowmetas['span_id'][
+                        index] and dataframe_flowmetas['parent_span_id'][index]:
+                    new_app_metas.add(
+                        (dataframe_flowmetas['_id'][index],
+                         dataframe_flowmetas['tap_side'][index],
+                         dataframe_flowmetas['span_id'][index],
+                         dataframe_flowmetas['parent_span_id'][index]))
+            new_app_metas -= app_metas
+            app_metas |= new_app_metas
+            apps = [L7AppMeta(nam) for nam in new_app_metas]
+
             new_flows = pd.DataFrame()
             if filters:
                 # Non-trace_id relational queries
@@ -488,6 +507,9 @@ class L7FlowTracing(Base):
                         new_flow_delete_index).reset_index(drop=True)
                 if deleted_trace_ids:
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
+            if apps:
+                for app in apps:
+                    app.set_relate(new_flows, related_map)
             # Merge all flows and check if any new flows are generated
             old_flows_length = len(dataframe_flowmetas)
             dataframe_flowmetas = pd.concat(
@@ -728,6 +750,38 @@ class L7SyscallMeta:
                             i]:
                     related_map[df._id[i]].append(self._id + "-syscall")
                     related_map[self._id].append(df._id[i] + "-syscall")
+                    continue
+
+
+class L7AppMeta:
+    """
+    应用span追踪：
+        span_id, parent_span_id
+    """
+
+    def __init__(self, flow_metas: Tuple):
+        self._id = flow_metas[0]
+        self.tap_side = flow_metas[1]
+        self.span_id = flow_metas[2]
+        self.parent_span_id = flow_metas[3]
+
+    def __eq__(self, rhs):
+        return (self.tap_side == rhs.tap_side and self.span_id == rhs.span_id
+                and self.parent_span_id == rhs.parent_span_id)
+
+    def set_relate(self, df, related_map):
+        for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
+            if type(self.span_id) == str and self.span_id:
+                if self.span_id == df.span_id[
+                        i] or self.span_id == df.parent_span_id[i]:
+                    related_map[df._id[i]].append(str(self._id) + "-app")
+                    continue
+            if type(self.parent_span_id) == str and self.parent_span_id:
+                if self.parent_span_id == df.span_id[
+                        i] or self.parent_span_id == df.parent_span_id[i]:
+                    related_map[df._id[i]].append(str(self._id) + "-app")
                     continue
 
 
