@@ -156,13 +156,12 @@ class L7FlowTracing(Base):
         if self.signal_sources == ['otel']:
             base_filter += f" and signal_source={L7_FLOW_TYPE_OTEL}"
             max_iteration = 1
-        rst = await self.trace_l7_flow(
-            time_filter=time_filter,
-            base_filter=base_filter,
-            return_fields=["related_ids"],
-            max_iteration=max_iteration,
-            network_delay_us=network_delay_us,
-            ntp_delay_us=ntp_delay_us)
+        rst = await self.trace_l7_flow(time_filter=time_filter,
+                                       base_filter=base_filter,
+                                       return_fields=["related_ids"],
+                                       max_iteration=max_iteration,
+                                       network_delay_us=network_delay_us,
+                                       ntp_delay_us=ntp_delay_us)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -242,13 +241,14 @@ class L7FlowTracing(Base):
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'"
-                    )
+                        f"FastFilter(trace_id)='{trace_id}'")
                     # Trace id query separately
                     query_trace_filters = []
-                    query_trace_filters.append(' OR '.join(new_trace_id_filters))
+                    query_trace_filters.append(
+                        ' OR '.join(new_trace_id_filters))
                     if self.signal_sources == ['otel']:
-                        query_trace_filters.append(f"signal_source={L7_FLOW_TYPE_OTEL}")
+                        query_trace_filters.append(
+                            f"signal_source={L7_FLOW_TYPE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
                     query_simple_trace_id = True
@@ -309,13 +309,14 @@ class L7FlowTracing(Base):
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)})"
-                    )
+                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)})")
                     # Trace id query separately
                     query_trace_filters = []
-                    query_trace_filters.append(' OR '.join(new_trace_id_filters))
+                    query_trace_filters.append(
+                        ' OR '.join(new_trace_id_filters))
                     if self.signal_sources == ['otel']:
-                        query_trace_filters.append(f"signal_source={L7_FLOW_TYPE_OTEL}")
+                        query_trace_filters.append(
+                            f"signal_source={L7_FLOW_TYPE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
 
@@ -332,10 +333,20 @@ class L7FlowTracing(Base):
             if new_trace_id_flow_delete_index:
                 new_trace_id_flows = new_trace_id_flows.drop(
                     new_trace_id_flow_delete_index).reset_index(drop=True)
+            # delete dup _id for performance
+            old_ids = set(dataframe_flowmetas['_id'])
+            dup_id_index = []
+            for index in range(len(new_trace_id_flows.index)):
+                _id = new_trace_id_flows['_id_str'][index]
+                if _id in old_ids:
+                    dup_id_index.append(index)
+            if dup_id_index:
+                new_trace_id_flows = new_trace_id_flows.drop(
+                    dup_id_index).reset_index(drop=True)
             new_trace_id_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
             # only otel data
-            new_flows = None
+            new_flows = pd.DataFrame()
             if self.signal_sources != ['otel']:
                 # 新的网络追踪信息
                 new_network_metas = set()
@@ -469,8 +480,7 @@ class L7FlowTracing(Base):
                         time_filter, ' OR '.join(filters))
                     if type(new_flows) != DataFrame:
                         break
-                    # delete dup _id
-                    old_ids = set(dataframe_flowmetas['_id'])
+                    # delete dup _id for performance
                     dup_id_index = []
                     for index in range(len(new_flows.index)):
                         _id = new_flows['_id_str'][index]
@@ -512,6 +522,28 @@ class L7FlowTracing(Base):
                             new_flow_delete_index).reset_index(drop=True)
                     if deleted_trace_ids:
                         log.debug(f"删除的trace id为：{deleted_trace_ids}")
+
+            # app relate
+            new_app_metas = set()
+            for index in range(len(dataframe_flowmetas.index)):
+                if dataframe_flowmetas['tap_side'][index] not in [
+                        TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
+                        TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+                ] or not dataframe_flowmetas['span_id'][index]:
+                    continue
+                if dataframe_flowmetas['span_id'][
+                        index] or dataframe_flowmetas['parent_span_id'][index]:
+                    new_app_metas.add(
+                        (dataframe_flowmetas['_id'][index],
+                         dataframe_flowmetas['tap_side'][index],
+                         dataframe_flowmetas['span_id'][index],
+                         dataframe_flowmetas['parent_span_id'][index]))
+            new_app_metas -= app_metas
+            app_metas |= new_app_metas
+            apps = [L7AppMeta(nam) for nam in new_app_metas]
+            if apps:
+                for app in apps:
+                    app.set_relate(new_trace_id_flows, related_map)
 
             # Merge all flows and check if any new flows are generated
             old_flows_length = len(dataframe_flowmetas)
@@ -752,6 +784,39 @@ class L7SyscallMeta:
                             i]:
                     related_map[df._id[i]].append(self._id + "-syscall")
                     related_map[self._id].append(df._id[i] + "-syscall")
+                    continue
+
+
+class L7AppMeta:
+    """
+    app span trace：
+        span_id, parent_span_id
+    """
+
+    def __init__(self, flow_metas: Tuple):
+        self._id = flow_metas[0]
+        self.tap_side = flow_metas[1]
+        self.span_id = flow_metas[2]
+        self.parent_span_id = flow_metas[3]
+
+    def __eq__(self, rhs):
+        return (self.tap_side == rhs.tap_side and self.span_id == rhs.span_id
+                and self.parent_span_id == rhs.parent_span_id)
+
+    def set_relate(self, df, related_map):
+        for i in range(len(df.index)):
+            if df._id[i] == self._id:
+                continue
+            if self.span_id:
+                if self.span_id == df.span_id[
+                        i] or self.span_id == df.parent_span_id[i]:
+                    related_map[df._id[i]].append(self._id + "-app")
+                    related_map[self._id].append(df._id[i] + "-app")
+                    continue
+            if self.parent_span_id:
+                if self.parent_span_id == df.span_id[i]:
+                    related_map[df._id[i]].append(self._id + "-app")
+                    related_map[self._id].append(df._id[i] + "-app")
                     continue
 
 

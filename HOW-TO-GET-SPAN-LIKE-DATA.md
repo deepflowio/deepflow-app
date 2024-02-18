@@ -34,10 +34,11 @@
   ```
   - [具体代码](https://github.com/deepflowys/deepflow-app/blob/cb291e7da0c5f1239225bbdcd6fa7e76ff1fe476/app/app/application/l7_flow_tracing.py#L630)
 - 获取`app span`数据
-  - 根据`parent_span_id`以及`span_id`关联查询
+  - 根据`trace_id`关联查询
+  - 根据`parent_span_id`或`span_id`标记关联关系
   ```
   parent_span_id={flow.span_id} OR span_id={flow.span_id}
-  span_id={flow.parent_span_id} OR parent_span_id={flow.parent_span_id}
+  span_id={flow.parent_span_id}
   ```
   [具体代码](https://github.com/deepflowys/deepflow-app/blob/cb291e7da0c5f1239225bbdcd6fa7e76ff1fe476/app/app/application/l7_flow_tracing.py#L502)
 - 获取`x_request_id`关联数据
