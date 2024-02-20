@@ -840,6 +840,8 @@ class Networks:
             if self.resp_tcp_seq and flow["type"] != L7_FLOW_TYPE_REQUEST and (
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
                 return False
+            all_empty = True
+            # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
                 if flow["type"] == L7_FLOW_TYPE_RESPONSE or not self.req_tcp_seq:
                     if key in MERGE_KEY_REQUEST:
@@ -849,6 +851,7 @@ class Networks:
                         continue
                 if self.get(key) and flow.get(key) and (self.get(key) !=
                                                         flow.get(key)):
+                    all_empty = False
                     # http2 == grpc
                     if key == 'l7_protocol' and self.get(key) in [
                             21, 41
@@ -859,6 +862,11 @@ class Networks:
                     ] and flow.get(key) in ['HTTP2', 'gRPC']:
                         continue
                     return False
+            # merge key all empty
+            if all_empty and self.req_tcp_seq != flow[
+                    "req_tcp_seq"] and self.resp_tcp_seq != flow[
+                        "resp_tcp_seq"]:
+                return False
             if abs(self.start_time_us -
                    flow["start_time_us"]) > network_delay_us or abs(
                        self.end_time_us -
