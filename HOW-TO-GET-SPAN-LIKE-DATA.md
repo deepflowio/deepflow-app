@@ -22,7 +22,7 @@
   ```
   - [具体代码](https://github.com/deepflowys/deepflow-app/blob/cb291e7da0c5f1239225bbdcd6fa7e76ff1fe476/app/app/application/l7_flow_tracing.py#L550)
 - 根据`syscalltraceid`获取`service内部的system span`数据
-  - `syscall_trace_id_request`以及`syscall_trace_id_request`只要不为0则都会被关联查询
+  - `syscall_trace_id_request`以及`syscall_trace_id_response`只要不为0则都会被关联查询
   ```
   syscall_trace_id_request={flow.syscall_trace_id_request} OR syscall_trace_id_response={flow.syscall_trace_id_request} OR 
   syscall_trace_id_request={flow.syscall_trace_id_response} OR syscall_trace_id_response={flow.syscall_trace_id_response}
