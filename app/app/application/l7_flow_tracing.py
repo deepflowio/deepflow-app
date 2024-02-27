@@ -471,13 +471,13 @@ class L7FlowTracing(Base):
                 new_related_map = defaultdict(list)
                 if xrequests:
                     for x_request in xrequests:
-                        x_request.set_relate(new_flows, related_map)
+                        x_request.set_relate(new_flows, new_related_map)
                 if syscalls:
                     for syscall in syscalls:
-                        syscall.set_relate(new_flows, related_map)
+                        syscall.set_relate(new_flows, new_related_map)
                 if networks:
                     for network in networks:
-                        network.set_relate(new_flows, related_map)
+                        network.set_relate(new_flows, new_related_map)
 
                 new_flow_delete_index = []
                 for index in range(len(new_flows.index)):
@@ -723,13 +723,13 @@ class L7XrequestMeta:
                 related_ids = [(y.split("-")[0], x)
                                for x, y in enumerate(related_map[df._id[i]])]
                 if not related_ids:
-                    related_map[df._id[i]].append(self._id + "-xrequestid")
+                    related_map[df._id[i]].append(f"{self._id}-xrequestid")
                 for relate_id_index in related_ids:
                     if self._id == relate_id_index[0]:
-                        related_map[
-                            df._id[i]][relate_id_index] += ",xrequestid"
+                        related_map[df._id[i]][
+                            relate_id_index[1]] += ",xrequestid"
                     else:
-                        related_map[df._id[i]].append(self._id + "-xrequestid")
+                        related_map[df._id[i]].append(f"{self._id}-xrequestid")
                 continue
             if self.x_request_id_1 and self.x_request_id_1 == df.x_request_id_0[
                     i]:
@@ -737,13 +737,13 @@ class L7XrequestMeta:
                 related_ids = [(y.split("-")[0], x)
                                for x, y in enumerate(related_map[df._id[i]])]
                 if not related_ids:
-                    related_map[df._id[i]].append(self._id + "-xrequestid")
+                    related_map[df._id[i]].append(f"{self._id}-xrequestid")
                 for relate_id_index in related_ids:
                     if self._id == relate_id_index[0]:
-                        related_map[
-                            df._id[i]][relate_id_index] += ",xrequestid"
+                        related_map[df._id[i]][
+                            relate_id_index[1]] += ",xrequestid"
                     else:
-                        related_map[df._id[i]].append(self._id + "-xrequestid")
+                        related_map[df._id[i]].append(f"{self._id}-xrequestid")
                 continue
 
 
@@ -786,15 +786,15 @@ class L7NetworkMeta:
                             for x, y in enumerate(related_map[df._id[i]])
                         ]
                         if not related_ids:
-                            related_map[df._id[i]].append(self._id +
-                                                          "-network")
+                            related_map[df._id[i]].append(
+                                f"{self._id}-network")
                         for relate_id_index in related_ids:
                             if self._id == relate_id_index[0]:
-                                related_map[
-                                    df._id[i]][relate_id_index] += ",network"
+                                related_map[df._id[i]][
+                                    relate_id_index[1]] += ",network"
                             else:
-                                related_map[df._id[i]].append(self._id +
-                                                              "-network")
+                                related_map[df._id[i]].append(
+                                    f"{self._id}-network")
                         continue
             if self.type != L7_FLOW_TYPE_REQUEST and self.resp_tcp_seq > 0:
                 if abs(self.end_time_us -
@@ -806,15 +806,15 @@ class L7NetworkMeta:
                             for x, y in enumerate(related_map[df._id[i]])
                         ]
                         if not related_ids:
-                            related_map[df._id[i]].append(self._id +
-                                                          "-network")
+                            related_map[df._id[i]].append(
+                                f"{self._id}-network")
                         for relate_id_index in related_ids:
                             if self._id == relate_id_index[0]:
-                                related_map[
-                                    df._id[i]][relate_id_index] += ",network"
+                                related_map[df._id[i]][
+                                    relate_id_index[1]] += ",network"
                             else:
-                                related_map[df._id[i]].append(self._id +
-                                                              "-network")
+                                related_map[df._id[i]].append(
+                                    f"{self._id}-network")
                         continue
 
 
@@ -853,14 +853,14 @@ class L7SyscallMeta:
                         for x, y in enumerate(related_map[df._id[i]])
                     ]
                     if not related_ids:
-                        related_map[df._id[i]].append(self._id + "-syscall")
+                        related_map[df._id[i]].append(f"{self._id}-syscall")
                     for relate_id_index in related_ids:
                         if self._id == relate_id_index[0]:
-                            related_map[
-                                df._id[i]][relate_id_index] += ",syscall"
+                            related_map[df._id[i]][
+                                relate_id_index[1]] += ",syscall"
                         else:
-                            related_map[df._id[i]].append(self._id +
-                                                          "-syscall")
+                            related_map[df._id[i]].append(
+                                f"{self._id}-syscall")
                     continue
             if self.syscall_trace_id_response > 0:
                 if self.syscall_trace_id_response == df.syscall_trace_id_request[
@@ -872,14 +872,14 @@ class L7SyscallMeta:
                         for x, y in enumerate(related_map[df._id[i]])
                     ]
                     if not related_ids:
-                        related_map[df._id[i]].append(self._id + "-syscall")
+                        related_map[df._id[i]].append(f"{self._id}-syscall")
                     for relate_id_index in related_ids:
                         if self._id == relate_id_index[0]:
-                            related_map[
-                                df._id[i]][relate_id_index] += ",syscall"
+                            related_map[df._id[i]][
+                                relate_id_index[1]] += ",syscall"
                         else:
-                            related_map[df._id[i]].append(self._id +
-                                                          "-syscall")
+                            related_map[df._id[i]].append(
+                                f"{self._id}-syscall")
                     continue
 
 
@@ -912,12 +912,13 @@ class L7AppMeta:
                         for x, y in enumerate(related_map[df._id[i]])
                     ]
                     if not related_ids:
-                        related_map[df._id[i]].append(self._id + "-app")
+                        related_map[df._id[i]].append(f"{self._id}-app")
                     for relate_id_index in related_ids:
                         if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][relate_id_index] += ",app"
+                            related_map[df._id[i]][
+                                relate_id_index[1]] += ",app"
                         else:
-                            related_map[df._id[i]].append(self._id + "-app")
+                            related_map[df._id[i]].append(f"{self._id}-app")
                     continue
             if self.parent_span_id:
                 if self.parent_span_id == df.span_id[i]:
@@ -927,12 +928,13 @@ class L7AppMeta:
                         for x, y in enumerate(related_map[df._id[i]])
                     ]
                     if not related_ids:
-                        related_map[df._id[i]].append(self._id + "-app")
+                        related_map[df._id[i]].append(f"{self._id}-app")
                     for relate_id_index in related_ids:
                         if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][relate_id_index] += ",app"
+                            related_map[df._id[i]][
+                                relate_id_index[1]] += ",app"
                         else:
-                            related_map[df._id[i]].append(self._id + "-app")
+                            related_map[df._id[i]].append(f"{self._id}-app")
                     continue
 
 
