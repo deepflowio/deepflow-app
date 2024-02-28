@@ -147,8 +147,11 @@ class TracingCompletion(L7FlowTracing):
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
+                    new_trace_ids_set = set(
+                        [f"'{nxrid[1]}'" for nxrid in new_trace_ids])
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids)})")
+                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids_set)})"
+                    )
                     # Trace id query separately
                     query_trace_filters = []
                     query_trace_filters.append(
@@ -334,7 +337,7 @@ class TracingCompletion(L7FlowTracing):
                     if deleted_trace_ids:
                         log.debug(f"删除的trace id为：{deleted_trace_ids}")
                     new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
-                    
+
                     new_related_map = defaultdict(list)
                     if xrequests:
                         for x_request in xrequests:
