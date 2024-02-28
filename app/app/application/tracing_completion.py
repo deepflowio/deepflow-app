@@ -310,15 +310,15 @@ class TracingCompletion(L7FlowTracing):
                 new_related_map = defaultdict(list)
                 if xrequests:
                     for x_request in xrequests:
-                        x_request.set_relate(new_flows, related_map)
+                        x_request.set_relate(new_flows, new_related_map)
 
                 if syscalls:
                     for syscall in syscalls:
-                        syscall.set_relate(new_flows, related_map)
+                        syscall.set_relate(new_flows, new_related_map)
 
                 if networks:
                     for network in networks:
-                        network.set_relate(new_flows, related_map)
+                        network.set_relate(new_flows, new_related_map)
 
                 new_flow_delete_index = []
                 for index in range(len(new_flows.index)):
