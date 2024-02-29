@@ -84,7 +84,7 @@ class TracingCompletion(L7FlowTracing):
         x_request_metas = set()
         l7_flow_ids = set()
         xrequests = []
-        related_map = defaultdict(list)
+        related_map = defaultdict(dict)
         query_simple_trace_id = False
         dataframe_flowmetas = self.app_spans_df
         if dataframe_flowmetas.empty:
@@ -93,8 +93,9 @@ class TracingCompletion(L7FlowTracing):
             for j in range(len(self.app_spans)):
                 if i == j:
                     continue
-                related_map[dataframe_flowmetas['_id'][i]].append(
-                    str(dataframe_flowmetas['_id'][j]) + "-app")
+                related_map[dataframe_flowmetas['_id'][i]] = {
+                    str(dataframe_flowmetas['_id'][j]): {'app'}
+                }
 
         trace_id = ''
         allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
@@ -319,9 +320,44 @@ class TracingCompletion(L7FlowTracing):
                     new_flow_delete_index = []
                     deleted_trace_ids = set()
                     old_ids = set(dataframe_flowmetas['_id'])
-                    for index in range(len(new_flows.index)):
-                        _id = new_flows['_id_str'][index]
-                        flow_trace_id = new_flows['trace_id'][index]
+                    id_to_related_tag = dict()
+                    for index in new_flows.index:
+                        _id = new_flows.at[index, '_id_str']
+                        vtap_id = new_flows.at[index, 'vtap_id']
+                        req_tcp_seq = new_flows.at[index, 'req_tcp_seq']
+                        resp_tcp_seq = new_flows.at[index, 'resp_tcp_seq']
+                        tap_side = new_flows.at[index, 'tap_side']
+                        _type = new_flows.at[index, 'type']
+                        start_time_us = new_flows.at[index, 'start_time_us']
+                        end_time_us = new_flows.at[index, 'end_time_us']
+                        span_id = new_flows.at[index, 'span_id']
+                        parent_span_id = new_flows.at[index, 'parent_span_id']
+                        x_request_id_0 = new_flows.at[index, 'x_request_id_0']
+                        x_request_id_1 = new_flows.at[index, 'x_request_id_1']
+                        syscall_trace_id_request = new_flows.at[
+                            index, 'syscall_trace_id_request']
+                        syscall_trace_id_response = new_flows.at[
+                            index, 'syscall_trace_id_response']
+                        flow_trace_id = new_flows.at[index, 'trace_id']
+
+                        id_to_related_tag[_id] = {
+                            '_id': _id,
+                            'vtap_id': vtap_id,
+                            'req_tcp_seq': req_tcp_seq,
+                            'resp_tcp_seq': resp_tcp_seq,
+                            'tap_side': tap_side,
+                            'type': _type,
+                            'start_time_us': start_time_us,
+                            'end_time_us': end_time_us,
+                            'span_id': span_id,
+                            'parent_span_id': parent_span_id,
+                            'x_request_id_0': x_request_id_0,
+                            'x_request_id_1': x_request_id_1,
+                            'syscall_trace_id_request':
+                            syscall_trace_id_request,
+                            'syscall_trace_id_response':
+                            syscall_trace_id_response
+                        }
                         # Delete different trace id data
                         if not allow_multiple_trace_ids_in_tracing_result:
                             if trace_id and flow_trace_id and trace_id != flow_trace_id:
@@ -338,18 +374,22 @@ class TracingCompletion(L7FlowTracing):
                         log.debug(f"删除的trace id为：{deleted_trace_ids}")
                     new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
-                    new_related_map = defaultdict(list)
+                    new_related_map = defaultdict(dict)
+                    new_flow_ids = set(new_flows['_id'])
                     if xrequests:
                         for x_request in xrequests:
-                            x_request.set_relate(new_flows, new_related_map)
+                            x_request.set_relate(new_flow_ids, new_related_map,
+                                                 id_to_related_tag)
 
                     if syscalls:
                         for syscall in syscalls:
-                            syscall.set_relate(new_flows, new_related_map)
+                            syscall.set_relate(new_flow_ids, new_related_map,
+                                               id_to_related_tag)
 
                     if networks:
                         for network in networks:
-                            network.set_relate(new_flows, new_related_map)
+                            network.set_relate(new_flow_ids, new_related_map,
+                                               id_to_related_tag)
 
                     new_flow_delete_index = []
                     for index in range(len(new_flows.index)):
@@ -393,8 +433,9 @@ class TracingCompletion(L7FlowTracing):
                              ignore_index=True).reset_index(drop=True)
         l7_flows.insert(0, "related_ids", "")
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
-        for index in range(len(l7_flows.index)):
-            l7_flows["related_ids"][index] = related_map[l7_flows._id[index]]
+        for index in l7_flows.index:
+            l7_flows.at[index, 'related_ids'] = related_map[l7_flows.at[index,
+                                                                        '_id']]
         # 对所有应用流日志排序
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
