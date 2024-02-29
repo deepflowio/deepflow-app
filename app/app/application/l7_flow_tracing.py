@@ -194,7 +194,7 @@ class L7FlowTracing(Base):
         x_request_metas = set()
         l7_flow_ids = set()
         xrequests = []
-        related_map = defaultdict(list)
+        related_map = defaultdict(dict)
         third_app_spans_all = []
 
         dataframe_flowmetas = await self.query_flowmetas(
@@ -202,9 +202,9 @@ class L7FlowTracing(Base):
         if type(dataframe_flowmetas) != DataFrame:
             return {}
         dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
-        related_map[dataframe_flowmetas['_id'][0]] = [
-            f"{dataframe_flowmetas['_id'][0]}-base"
-        ]
+        related_map[dataframe_flowmetas['_id'][0]] = {
+            dataframe_flowmetas['_id'][0]: {'base'}
+        }
         # tempo api
         trace_id = self.args.get("trace_id") if self.args.get(
             "trace_id") else ''
@@ -449,9 +449,42 @@ class L7FlowTracing(Base):
                 new_flow_delete_index = []
                 deleted_trace_ids = set()
                 old_ids = set(dataframe_flowmetas['_id'])
-                for index in range(len(new_flows.index)):
-                    _id = new_flows['_id_str'][index]
-                    flow_trace_id = new_flows['trace_id'][index]
+                id_to_related_tag = dict()
+                for index in new_flows.index:
+                    _id = new_flows.at[index, '_id_str']
+                    vtap_id = new_flows.at[index, 'vtap_id']
+                    req_tcp_seq = new_flows.at[index, 'req_tcp_seq']
+                    resp_tcp_seq = new_flows.at[index, 'resp_tcp_seq']
+                    tap_side = new_flows.at[index, 'tap_side']
+                    _type = new_flows.at[index, 'type']
+                    start_time_us = new_flows.at[index, 'start_time_us']
+                    end_time_us = new_flows.at[index, 'end_time_us']
+                    span_id = new_flows.at[index, 'span_id']
+                    parent_span_id = new_flows.at[index, 'parent_span_id']
+                    x_request_id_0 = new_flows.at[index, 'x_request_id_0']
+                    x_request_id_1 = new_flows.at[index, 'x_request_id_1']
+                    syscall_trace_id_request = new_flows.at[
+                        index, 'syscall_trace_id_request']
+                    syscall_trace_id_response = new_flows.at[
+                        index, 'syscall_trace_id_response']
+                    flow_trace_id = new_flows.at[index, 'trace_id']
+
+                    id_to_related_tag[_id] = {
+                        '_id': _id,
+                        'vtap_id': vtap_id,
+                        'req_tcp_seq': req_tcp_seq,
+                        'resp_tcp_seq': resp_tcp_seq,
+                        'tap_side': tap_side,
+                        'type': _type,
+                        'start_time_us': start_time_us,
+                        'end_time_us': end_time_us,
+                        'span_id': span_id,
+                        'parent_span_id': parent_span_id,
+                        'x_request_id_0': x_request_id_0,
+                        'x_request_id_1': x_request_id_1,
+                        'syscall_trace_id_request': syscall_trace_id_request,
+                        'syscall_trace_id_response': syscall_trace_id_response
+                    }
                     # Delete different trace id data
                     if not allow_multiple_trace_ids_in_tracing_result:
                         if trace_id and flow_trace_id and trace_id != flow_trace_id:
@@ -468,16 +501,20 @@ class L7FlowTracing(Base):
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
                 new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
-                new_related_map = defaultdict(list)
+                new_related_map = defaultdict(dict)
+                new_flow_ids = set(new_flows['_id'])
                 if xrequests:
                     for x_request in xrequests:
-                        x_request.set_relate(new_flows, new_related_map)
+                        x_request.set_relate(new_flow_ids, new_related_map,
+                                             id_to_related_tag)
                 if syscalls:
                     for syscall in syscalls:
-                        syscall.set_relate(new_flows, new_related_map)
+                        syscall.set_relate(new_flow_ids, new_related_map,
+                                           id_to_related_tag)
                 if networks:
                     for network in networks:
-                        network.set_relate(new_flows, new_related_map)
+                        network.set_relate(new_flow_ids, new_related_map,
+                                           id_to_related_tag)
 
                 new_flow_delete_index = []
                 for index in range(len(new_flows.index)):
@@ -521,8 +558,9 @@ class L7FlowTracing(Base):
             ignore_index=True).drop_duplicates(["_id"]).reset_index(drop=True)
         l7_flows.insert(0, "related_ids", "")
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
-        for index in range(len(l7_flows.index)):
-            l7_flows["related_ids"][index] = related_map[l7_flows._id[index]]
+        for index in l7_flows.index:
+            l7_flows.at[index, 'related_ids'] = related_map[l7_flows.at[index,
+                                                                        '_id']]
         # 对所有应用流日志排序
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
@@ -622,81 +660,155 @@ def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
     new_syscall_metas = set()
     new_x_request_metas = set()
     new_app_metas = set()
-    for index in range(len(dataframe_flowmetas.index)):
-        req_tcp_seq = dataframe_flowmetas['req_tcp_seq'][index]
-        resp_tcp_seq = dataframe_flowmetas['resp_tcp_seq'][index]
-        tap_side = dataframe_flowmetas['tap_side'][index]
+    req_tcp_seq_to_ids = defaultdict(set)
+    resp_tcp_seq_to_ids = defaultdict(set)
+    syscall_req_to_ids = defaultdict(set)
+    syscall_resp_to_ids = defaultdict(set)
+    span_id_to_ids = defaultdict(set)
+    parent_span_id_to_ids = defaultdict(set)
+    x_req_0_to_ids = defaultdict(set)
+    x_req_1_to_ids = defaultdict(set)
+    id_to_related_tag = defaultdict(dict)
+
+    for index in dataframe_flowmetas.index:
+        req_tcp_seq = dataframe_flowmetas.at[index, 'req_tcp_seq']
+        resp_tcp_seq = dataframe_flowmetas.at[index, 'resp_tcp_seq']
+        tap_side = dataframe_flowmetas.at[index, 'tap_side']
+        _id = dataframe_flowmetas.at[index, '_id']
+        vtap_id = dataframe_flowmetas.at[index, 'vtap_id']
+        _type = dataframe_flowmetas.at[index, 'type']
+        start_time_us = dataframe_flowmetas.at[index, 'start_time_us']
+        end_time_us = dataframe_flowmetas.at[index, 'end_time_us']
+        span_id = dataframe_flowmetas.at[index, 'span_id']
+        parent_span_id = dataframe_flowmetas.at[index, 'parent_span_id']
+        x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
+        x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
+        syscall_trace_id_request = dataframe_flowmetas.at[
+            index, 'syscall_trace_id_request']
+        syscall_trace_id_response = dataframe_flowmetas.at[
+            index, 'syscall_trace_id_response']
+        flow_trace_id = dataframe_flowmetas.at[index, 'trace_id']
+
+        id_to_related_tag[_id] = {
+            '_id': _id,
+            'vtap_id': vtap_id,
+            'req_tcp_seq': req_tcp_seq,
+            'resp_tcp_seq': resp_tcp_seq,
+            'tap_side': tap_side,
+            'type': _type,
+            'start_time_us': start_time_us,
+            'end_time_us': end_time_us,
+            'span_id': span_id,
+            'parent_span_id': parent_span_id,
+            'x_request_id_0': x_request_id_0,
+            'x_request_id_1': x_request_id_1,
+            'syscall_trace_id_request': syscall_trace_id_request,
+            'syscall_trace_id_response': syscall_trace_id_response
+        }
+
         if req_tcp_seq == 0 and resp_tcp_seq == 0:
             continue
         if tap_side not in [TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS
                             ] and tap_side not in const.TAP_SIDE_RANKS:
             continue
-        new_network_metas.add((
-            dataframe_flowmetas['_id'][index],
-            dataframe_flowmetas['type'][index],
-            dataframe_flowmetas['req_tcp_seq'][index],
-            dataframe_flowmetas['resp_tcp_seq'][index],
-            dataframe_flowmetas['start_time_us'][index],
-            dataframe_flowmetas['end_time_us'][index],
-            dataframe_flowmetas['span_id'][index],
-            dataframe_flowmetas['x_request_id_0'][index],
-            dataframe_flowmetas['x_request_id_1'][index],
-        ))
-    for index in range(len(dataframe_flowmetas.index)):
-        syscall_trace_id_request = dataframe_flowmetas[
-            'syscall_trace_id_request'][index]
-        syscall_trace_id_response = dataframe_flowmetas[
-            'syscall_trace_id_response'][index]
+        new_network_metas.add((_id, _type, req_tcp_seq, resp_tcp_seq,
+                               start_time_us, end_time_us, span_id))
+
+        if req_tcp_seq:
+            req_tcp_seq_to_ids[req_tcp_seq].add(_id)
+        if resp_tcp_seq:
+            resp_tcp_seq_to_ids[resp_tcp_seq].add(_id)
+
+    for index in dataframe_flowmetas.index:
+        syscall_trace_id_request = dataframe_flowmetas.at[
+            index, 'syscall_trace_id_request']
+        syscall_trace_id_response = dataframe_flowmetas.at[
+            index, 'syscall_trace_id_response']
+        _id = dataframe_flowmetas.at[index, '_id']
+        vtap_id = dataframe_flowmetas.at[index, 'vtap_id']
         if syscall_trace_id_request > 0 or syscall_trace_id_response > 0:
-            new_syscall_metas.add((
-                dataframe_flowmetas['_id'][index],
-                dataframe_flowmetas['vtap_id'][index],
-                dataframe_flowmetas['syscall_trace_id_request'][index],
-                dataframe_flowmetas['syscall_trace_id_response'][index],
-                dataframe_flowmetas['tap_side'][index],
-                dataframe_flowmetas['start_time_us'][index],
-                dataframe_flowmetas['end_time_us'][index],
-            ))
-    for index in range(len(dataframe_flowmetas.index)):
-        x_request_id_0 = dataframe_flowmetas['x_request_id_0'][index]
-        x_request_id_1 = dataframe_flowmetas['x_request_id_1'][index]
+            new_syscall_metas.add((_id, vtap_id, syscall_trace_id_request,
+                                   syscall_trace_id_response))
+            if syscall_trace_id_request:
+                syscall_req_to_ids[syscall_trace_id_request].add(_id)
+            if syscall_trace_id_response:
+                resp_tcp_seq_to_ids[syscall_trace_id_response].add(_id)
+
+    for index in dataframe_flowmetas.index:
+        x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
+        x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
+        _id = dataframe_flowmetas.at[index, '_id']
         if x_request_id_0 in [0, ''] and x_request_id_1 in [0, '']:
             continue
-        new_x_request_metas.add((dataframe_flowmetas['_id'][index],
-                                 dataframe_flowmetas['x_request_id_0'][index],
-                                 dataframe_flowmetas['x_request_id_1'][index]))
-    for index in range(len(dataframe_flowmetas.index)):
-        if dataframe_flowmetas['tap_side'][index] not in [
+        new_x_request_metas.add((_id, x_request_id_0, x_request_id_1))
+        if x_request_id_0:
+            x_req_0_to_ids[x_request_id_0].add(_id)
+        if x_request_id_1:
+            x_req_1_to_ids[x_request_id_1].add(_id)
+    for index in dataframe_flowmetas.index:
+        span_id = dataframe_flowmetas.at[index, 'span_id']
+        parent_span_id = dataframe_flowmetas.at[index, 'parent_span_id']
+        tap_side = dataframe_flowmetas.at[index, 'tap_side']
+        _id = dataframe_flowmetas.at[index, '_id']
+        if tap_side not in [
                 TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
                 TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
-        ] or not dataframe_flowmetas['span_id'][index]:
+        ] or not span_id:
             continue
-        if dataframe_flowmetas['span_id'][index] or dataframe_flowmetas[
-                'parent_span_id'][index]:
-            new_app_metas.add((dataframe_flowmetas['_id'][index],
-                               dataframe_flowmetas['tap_side'][index],
-                               dataframe_flowmetas['span_id'][index],
-                               dataframe_flowmetas['parent_span_id'][index]))
-
+        if span_id or parent_span_id:
+            new_app_metas.add((_id, tap_side, span_id, parent_span_id))
+            if span_id:
+                span_id_to_ids[span_id].add(_id)
+            if parent_span_id:
+                parent_span_id_to_ids[parent_span_id].add(_id)
     networks = [
         L7NetworkMeta(nnm, network_delay_us) for nnm in new_network_metas
     ]
     syscalls = [L7SyscallMeta(nsm) for nsm in new_syscall_metas]
     xrequests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
     apps = [L7AppMeta(nam) for nam in new_app_metas]
-
     if xrequests:
         for x_request in xrequests:
-            x_request.set_relate(dataframe_flowmetas, related_map)
+            if x_request.x_request_id_0:
+                x_req_ids = x_req_1_to_ids[x_request.x_request_id_0]
+                x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
+            if x_request.x_request_id_1:
+                x_req_ids = x_req_0_to_ids[x_request.x_request_id_1]
+                x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
     if syscalls:
         for syscall in syscalls:
-            syscall.set_relate(dataframe_flowmetas, related_map)
+            if syscall.syscall_trace_id_request:
+                syscall_req_ids = syscall_req_to_ids[
+                    syscall.syscall_trace_id_request]
+                syscall_resp_ids = syscall_resp_to_ids[
+                    syscall.syscall_trace_id_request]
+                syscall_ids = syscall_req_ids | syscall_resp_ids
+                syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
+            if syscall.syscall_trace_id_response:
+                syscall_req_ids = syscall_req_to_ids[
+                    syscall.syscall_trace_id_response]
+                syscall_resp_ids = syscall_resp_to_ids[
+                    syscall.syscall_trace_id_response]
+                syscall_ids = syscall_req_ids | syscall_resp_ids
+                syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
     if networks:
         for network in networks:
-            network.set_relate(dataframe_flowmetas, related_map)
+            if network.req_tcp_seq:
+                network_ids = req_tcp_seq_to_ids[network.req_tcp_seq]
+                network.set_relate(network_ids, related_map, id_to_related_tag)
+            if network.resp_tcp_seq:
+                network_ids = resp_tcp_seq_to_ids[network.resp_tcp_seq]
+                network.set_relate(network_ids, related_map, id_to_related_tag)
     if apps:
         for app in apps:
-            app.set_relate(dataframe_flowmetas, related_map)
+            if app.span_id:
+                span_id_ids = span_id_to_ids[app.span_id]
+                parent_span_id_ids = parent_span_id_to_ids[app.parent_span_id]
+                span_ids = span_id_ids | parent_span_id_ids
+                app.set_relate(span_ids, related_map, id_to_related_tag)
+            if app.parent_span_id:
+                span_ids = span_id_to_ids[app.parent_span_id]
+                app.set_relate(span_ids, related_map, id_to_related_tag)
 
 
 class L7XrequestMeta:
@@ -713,38 +825,22 @@ class L7XrequestMeta:
         return (self.x_request_id_0 == rhs.x_request_id_0
                 and self.x_request_id_1 == rhs.x_request_id_1)
 
-    def set_relate(self, df, related_map):
-        for i in range(len(df.index)):
-            if df._id[i] == self._id:
+    def set_relate(self, _ids, related_map, id_to_related_tag):
+        for _id in _ids:
+            _id_df = id_to_related_tag[_id]['_id']
+            x_request_id_0_df = id_to_related_tag[_id]['x_request_id_0']
+            x_request_id_1_df = id_to_related_tag[_id]['x_request_id_1']
+            if _id_df == self._id:
                 continue
-            if self.x_request_id_0 and self.x_request_id_0 == df.x_request_id_1[
-                    i]:
-                # Deduplicate
-                related_ids = [(y.split("-")[0], x)
-                               for x, y in enumerate(related_map[df._id[i]])]
-                if not related_ids:
-                    related_map[df._id[i]].append(f"{self._id}-xrequestid")
-                for relate_id_index in related_ids:
-                    if self._id == relate_id_index[0]:
-                        related_map[df._id[i]][
-                            relate_id_index[1]] += ",xrequestid"
-                    else:
-                        related_map[df._id[i]].append(f"{self._id}-xrequestid")
-                continue
+            if self.x_request_id_0 and self.x_request_id_0 == x_request_id_0_df:
+                related_map[_id_df][self._id] = related_map[_id_df].get(
+                    self._id, set())
+                related_map[_id_df][self._id].add('xrequestid')
             if self.x_request_id_1 and self.x_request_id_1 == df.x_request_id_0[
                     i]:
-                # Deduplicate
-                related_ids = [(y.split("-")[0], x)
-                               for x, y in enumerate(related_map[df._id[i]])]
-                if not related_ids:
-                    related_map[df._id[i]].append(f"{self._id}-xrequestid")
-                for relate_id_index in related_ids:
-                    if self._id == relate_id_index[0]:
-                        related_map[df._id[i]][
-                            relate_id_index[1]] += ",xrequestid"
-                    else:
-                        related_map[df._id[i]].append(f"{self._id}-xrequestid")
-                continue
+                related_map[_id_df][self._id] = related_map[_id_df].get(
+                    self._id, set())
+                related_map[_id_df][self._id].add('xrequestid')
 
 
 class L7NetworkMeta:
@@ -767,55 +863,36 @@ class L7NetworkMeta:
         return (self.type == rhs.type and self.req_tcp_seq == rhs.req_tcp_seq
                 and self.resp_tcp_seq == rhs.resp_tcp_seq)
 
-    def set_relate(self, df, related_map):
-        for i in range(len(df.index)):
-            if df._id[i] == self._id:
+    def set_relate(self, _ids, related_map, id_to_related_tag):
+        for _id in _ids:
+            _id_df = id_to_related_tag[_id]['_id']
+            type_df = id_to_related_tag[_id]['type']
+            span_id_df = id_to_related_tag[_id]['span_id']
+            start_time_us_df = id_to_related_tag[_id]['start_time_us']
+            end_time_us_df = id_to_related_tag[_id]['end_time_us']
+            req_tcp_seq_df = id_to_related_tag[_id]['req_tcp_seq']
+            resp_tcp_seq_df = id_to_related_tag[_id]['resp_tcp_seq']
+            if _id_df == self._id:
                 continue
-            if df.type[
-                    i] != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and df.span_id[
-                        i]:
-                if df.span_id[i] != self.span_id:
+            if type_df != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and span_id_df:
+                if span_id_df != self.span_id:
                     continue
             if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
                 if abs(self.start_time_us -
-                       df.start_time_us[i]) <= self.network_delay_us:
-                    if self.req_tcp_seq == df.req_tcp_seq[i]:
-                        # Deduplicate
-                        related_ids = [
-                            (y.split("-")[0], x)
-                            for x, y in enumerate(related_map[df._id[i]])
-                        ]
-                        if not related_ids:
-                            related_map[df._id[i]].append(
-                                f"{self._id}-network")
-                        for relate_id_index in related_ids:
-                            if self._id == relate_id_index[0]:
-                                related_map[df._id[i]][
-                                    relate_id_index[1]] += ",network"
-                            else:
-                                related_map[df._id[i]].append(
-                                    f"{self._id}-network")
-                        continue
+                       start_time_us_df) <= self.network_delay_us:
+                    if self.req_tcp_seq == req_tcp_seq_df:
+                        related_map[_id_df][
+                            self._id] = related_map[_id_df].get(
+                                self._id, set())
+                        related_map[_id_df][self._id].add('network')
             if self.type != L7_FLOW_TYPE_REQUEST and self.resp_tcp_seq > 0:
                 if abs(self.end_time_us -
-                       df.end_time_us[i]) <= self.network_delay_us:
-                    if self.resp_tcp_seq == df.resp_tcp_seq[i]:
-                        # Deduplicate
-                        related_ids = [
-                            (y.split("-")[0], x)
-                            for x, y in enumerate(related_map[df._id[i]])
-                        ]
-                        if not related_ids:
-                            related_map[df._id[i]].append(
-                                f"{self._id}-network")
-                        for relate_id_index in related_ids:
-                            if self._id == relate_id_index[0]:
-                                related_map[df._id[i]][
-                                    relate_id_index[1]] += ",network"
-                            else:
-                                related_map[df._id[i]].append(
-                                    f"{self._id}-network")
-                        continue
+                       end_time_us_df) <= self.network_delay_us:
+                    if self.resp_tcp_seq == resp_tcp_seq_df:
+                        related_map[_id_df][
+                            self._id] = related_map[_id_df].get(
+                                self._id, set())
+                        related_map[_id_df][self._id].add('network')
 
 
 class L7SyscallMeta:
@@ -829,9 +906,6 @@ class L7SyscallMeta:
         self.vtap_id = flow_metas[1]
         self.syscall_trace_id_request = flow_metas[2]
         self.syscall_trace_id_response = flow_metas[3]
-        self.tap_side = flow_metas[4]
-        self.start_time_us = flow_metas[5]
-        self.end_time_us = flow_metas[6]
 
     def __eq__(self, rhs):
         return (self.vtap_id == rhs.vtap_id and self.syscall_trace_id_request
@@ -839,48 +913,26 @@ class L7SyscallMeta:
                 and self.syscall_trace_id_response
                 == rhs.syscall_trace_id_response)
 
-    def set_relate(self, df, related_map):
-        for i in range(len(df.index)):
-            if df._id[i] == self._id or self.vtap_id != df.vtap_id[i]:
+    def set_relate(self, _ids, related_map, id_to_related_tag):
+        for _id in _ids:
+            _id_df = id_to_related_tag[_id]['_id']
+            vtap_id_df = id_to_related_tag[_id]['vtap_id']
+            syscall_trace_id_request_df = id_to_related_tag[_id][
+                'syscall_trace_id_request']
+            syscall_trace_id_response_df = id_to_related_tag[_id][
+                'syscall_trace_id_response']
+            if _id_df == self._id or self.vtap_id != vtap_id_df:
                 continue
             if self.syscall_trace_id_request > 0:
-                if self.syscall_trace_id_request == df.syscall_trace_id_request[
-                        i] or self.syscall_trace_id_request == df.syscall_trace_id_response[
-                            i]:
-                    # Deduplicate
-                    related_ids = [
-                        (y.split("-")[0], x)
-                        for x, y in enumerate(related_map[df._id[i]])
-                    ]
-                    if not related_ids:
-                        related_map[df._id[i]].append(f"{self._id}-syscall")
-                    for relate_id_index in related_ids:
-                        if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][
-                                relate_id_index[1]] += ",syscall"
-                        else:
-                            related_map[df._id[i]].append(
-                                f"{self._id}-syscall")
-                    continue
+                if self.syscall_trace_id_request == syscall_trace_id_request_df or self.syscall_trace_id_request == syscall_trace_id_response_df:
+                    related_map[_id_df][self._id] = related_map[_id_df].get(
+                        self._id, set())
+                    related_map[_id_df][self._id].add('syscall')
             if self.syscall_trace_id_response > 0:
-                if self.syscall_trace_id_response == df.syscall_trace_id_request[
-                        i] or self.syscall_trace_id_response == df.syscall_trace_id_response[
-                            i]:
-                    # Deduplicate
-                    related_ids = [
-                        (y.split("-")[0], x)
-                        for x, y in enumerate(related_map[df._id[i]])
-                    ]
-                    if not related_ids:
-                        related_map[df._id[i]].append(f"{self._id}-syscall")
-                    for relate_id_index in related_ids:
-                        if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][
-                                relate_id_index[1]] += ",syscall"
-                        else:
-                            related_map[df._id[i]].append(
-                                f"{self._id}-syscall")
-                    continue
+                if self.syscall_trace_id_response == syscall_trace_id_request_df or self.syscall_trace_id_response == syscall_trace_id_response_df:
+                    related_map[_id_df][self._id] = related_map[_id_df].get(
+                        self._id, set())
+                    related_map[_id_df][self._id].add('syscall')
 
 
 class L7AppMeta:
@@ -899,43 +951,23 @@ class L7AppMeta:
         return (self.tap_side == rhs.tap_side and self.span_id == rhs.span_id
                 and self.parent_span_id == rhs.parent_span_id)
 
-    def set_relate(self, df, related_map):
-        for i in range(len(df.index)):
-            if df._id[i] == self._id:
+    def set_relate(self, _ids, related_map, id_to_related_tag):
+        for _id in _ids:
+            _id_df = id_to_related_tag[_id]['_id']
+            span_id_df = id_to_related_tag[_id]['span_id']
+            parent_span_id_df = id_to_related_tag[_id]['parent_span_id']
+            if _id_df == self._id:
                 continue
             if self.span_id:
-                if self.span_id == df.span_id[
-                        i] or self.span_id == df.parent_span_id[i]:
-                    # Deduplicate
-                    related_ids = [
-                        (y.split("-")[0], x)
-                        for x, y in enumerate(related_map[df._id[i]])
-                    ]
-                    if not related_ids:
-                        related_map[df._id[i]].append(f"{self._id}-app")
-                    for relate_id_index in related_ids:
-                        if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][
-                                relate_id_index[1]] += ",app"
-                        else:
-                            related_map[df._id[i]].append(f"{self._id}-app")
-                    continue
+                if self.span_id == span_id_df or self.span_id == parent_span_id_df:
+                    related_map[_id_df][self._id] = related_map[_id_df].get(
+                        self._id, set())
+                    related_map[_id_df][self._id].add('app')
             if self.parent_span_id:
-                if self.parent_span_id == df.span_id[i]:
-                    # Deduplicate
-                    related_ids = [
-                        (y.split("-")[0], x)
-                        for x, y in enumerate(related_map[df._id[i]])
-                    ]
-                    if not related_ids:
-                        related_map[df._id[i]].append(f"{self._id}-app")
-                    for relate_id_index in related_ids:
-                        if self._id == relate_id_index[0]:
-                            related_map[df._id[i]][
-                                relate_id_index[1]] += ",app"
-                        else:
-                            related_map[df._id[i]].append(f"{self._id}-app")
-                    continue
+                if self.parent_span_id == span_id_df:
+                    related_map[_id_df][self._id] = related_map[_id_df].get(
+                        self._id, set())
+                    related_map[_id_df][self._id].add('app')
 
 
 class Networks:
@@ -1353,15 +1385,14 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         ]:
             app_flows.append(flow)
     for flow in flows:
-        related_ids = []
-        for related_id in flow["related_ids"]:
-            related_id = related_id.split("-")
-            if related_id[0] in flow["_id"]:
+        related_ids = set()
+        for _id, related_types in flow["related_ids"].items():
+            if _id in flow['_id']:
                 continue
-            if id_map.get(related_id[0], None) is not None:
-                related_ids.append(
-                    f"{id_map[related_id[0]]}-{related_id[1]}-{related_id[0]}")
-        flow["related_ids"] = related_ids
+            if id_map.get(_id, None) is not None:
+                related_ids.add(
+                    f"{id_map[_id]}-{','.join(related_types)}-{_id}")
+        flow["related_ids"] = list(related_ids)
 
     # 从Flow中提取Service：一个<vtap_id, local_process_id>二元组认为是一个Service。
     service_map = defaultdict(Service)
