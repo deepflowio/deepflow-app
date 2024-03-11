@@ -867,12 +867,11 @@ class L7XrequestMeta:
             x_request_id_1_df = id_to_related_tag[_id]['x_request_id_1']
             if _id_df == self._id:
                 continue
-            if self.x_request_id_0 and self.x_request_id_0 == x_request_id_0_df:
+            if self.x_request_id_0 and self.x_request_id_0 == x_request_id_1_df:
                 related_map[_id_df][self._id] = related_map[_id_df].get(
                     self._id, set())
                 related_map[_id_df][self._id].add('xrequestid')
-            if self.x_request_id_1 and self.x_request_id_1 == df.x_request_id_0[
-                    i]:
+            if self.x_request_id_1 and self.x_request_id_1 == x_request_id_0_df:
                 related_map[_id_df][self._id] = related_map[_id_df].get(
                     self._id, set())
                 related_map[_id_df][self._id].add('xrequestid')
