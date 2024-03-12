@@ -240,7 +240,7 @@ class TracingCompletion(L7FlowTracing):
                     if syscall_trace_id_request > 0 or syscall_trace_id_response > 0:
                         new_syscall_metas.add((
                             dataframe_flowmetas['_id'][index],
-                            dataframe_flowmetas['vtap_id'][index],
+                            dataframe_flowmetas['agent_id'][index],
                             dataframe_flowmetas['syscall_trace_id_request']
                             [index],
                             dataframe_flowmetas['syscall_trace_id_response']
@@ -323,7 +323,7 @@ class TracingCompletion(L7FlowTracing):
                     id_to_related_tag = dict()
                     for index in new_flows.index:
                         _id = new_flows.at[index, '_id_str']
-                        vtap_id = new_flows.at[index, 'vtap_id']
+                        agent_id = new_flows.at[index, 'agent_id']
                         req_tcp_seq = new_flows.at[index, 'req_tcp_seq']
                         resp_tcp_seq = new_flows.at[index, 'resp_tcp_seq']
                         tap_side = new_flows.at[index, 'tap_side']
@@ -342,7 +342,7 @@ class TracingCompletion(L7FlowTracing):
 
                         id_to_related_tag[_id] = {
                             '_id': _id,
-                            'vtap_id': vtap_id,
+                            'agent_id': agent_id,
                             'req_tcp_seq': req_tcp_seq,
                             'resp_tcp_seq': resp_tcp_seq,
                             'tap_side': tap_side,
