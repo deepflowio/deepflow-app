@@ -732,8 +732,8 @@ def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
             if syscall_trace_id_request:
                 syscall_req_to_ids[syscall_trace_id_request].add(_id)
             if syscall_trace_id_response:
-                resp_tcp_seq_to_ids[syscall_trace_id_response].add(_id)
-
+                syscall_resp_to_ids[syscall_trace_id_response].add(_id)
+    
     for index in dataframe_flowmetas.index:
         x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
         x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
@@ -767,48 +767,48 @@ def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
     syscalls = [L7SyscallMeta(nsm) for nsm in new_syscall_metas]
     xrequests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
     apps = [L7AppMeta(nam) for nam in new_app_metas]
-    if xrequests:
-        for x_request in xrequests:
-            if x_request.x_request_id_0:
-                x_req_ids = x_req_1_to_ids[x_request.x_request_id_0]
-                x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
-            if x_request.x_request_id_1:
-                x_req_ids = x_req_0_to_ids[x_request.x_request_id_1]
-                x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
-    if syscalls:
-        for syscall in syscalls:
-            if syscall.syscall_trace_id_request:
-                syscall_req_ids = syscall_req_to_ids[
-                    syscall.syscall_trace_id_request]
-                syscall_resp_ids = syscall_resp_to_ids[
-                    syscall.syscall_trace_id_request]
-                syscall_ids = syscall_req_ids | syscall_resp_ids
-                syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
-            if syscall.syscall_trace_id_response:
-                syscall_req_ids = syscall_req_to_ids[
-                    syscall.syscall_trace_id_response]
-                syscall_resp_ids = syscall_resp_to_ids[
-                    syscall.syscall_trace_id_response]
-                syscall_ids = syscall_req_ids | syscall_resp_ids
-                syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
-    if networks:
-        for network in networks:
-            if network.req_tcp_seq:
-                network_ids = req_tcp_seq_to_ids[network.req_tcp_seq]
-                network.set_relate(network_ids, related_map, id_to_related_tag)
-            if network.resp_tcp_seq:
-                network_ids = resp_tcp_seq_to_ids[network.resp_tcp_seq]
-                network.set_relate(network_ids, related_map, id_to_related_tag)
-    if apps:
-        for app in apps:
-            if app.span_id:
-                span_id_ids = span_id_to_ids[app.span_id]
-                parent_span_id_ids = parent_span_id_to_ids[app.parent_span_id]
-                span_ids = span_id_ids | parent_span_id_ids
-                app.set_relate(span_ids, related_map, id_to_related_tag)
-            if app.parent_span_id:
-                span_ids = span_id_to_ids[app.parent_span_id]
-                app.set_relate(span_ids, related_map, id_to_related_tag)
+
+    for x_request in xrequests:
+        if x_request.x_request_id_0:
+            x_req_ids = x_req_1_to_ids[x_request.x_request_id_0]
+            x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
+        if x_request.x_request_id_1:
+            x_req_ids = x_req_0_to_ids[x_request.x_request_id_1]
+            x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
+
+    for syscall in syscalls:
+        if syscall.syscall_trace_id_request:
+            syscall_req_ids = syscall_req_to_ids[
+                syscall.syscall_trace_id_request]
+            syscall_resp_ids = syscall_resp_to_ids[
+                syscall.syscall_trace_id_request]
+            syscall_ids = syscall_req_ids | syscall_resp_ids
+            syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
+        if syscall.syscall_trace_id_response:
+            syscall_req_ids = syscall_req_to_ids[
+                syscall.syscall_trace_id_response]
+            syscall_resp_ids = syscall_resp_to_ids.get(
+                syscall.syscall_trace_id_response)
+            syscall_ids = syscall_req_ids | syscall_resp_ids
+            syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
+
+    for network in networks:
+        if network.req_tcp_seq:
+            network_ids = req_tcp_seq_to_ids[network.req_tcp_seq]
+            network.set_relate(network_ids, related_map, id_to_related_tag)
+        if network.resp_tcp_seq:
+            network_ids = resp_tcp_seq_to_ids[network.resp_tcp_seq]
+            network.set_relate(network_ids, related_map, id_to_related_tag)
+
+    for app in apps:
+        if app.span_id:
+            span_id_ids = span_id_to_ids[app.span_id]
+            parent_span_id_ids = parent_span_id_to_ids[app.parent_span_id]
+            span_ids = span_id_ids | parent_span_id_ids
+            app.set_relate(span_ids, related_map, id_to_related_tag)
+        if app.parent_span_id:
+            span_ids = span_id_to_ids[app.parent_span_id]
+            app.set_relate(span_ids, related_map, id_to_related_tag)
 
 
 class L7XrequestMeta:
