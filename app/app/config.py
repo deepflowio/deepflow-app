@@ -15,6 +15,7 @@ class Config(object):
     def parse_spec(self, cfg):
         spec = cfg.get('spec')
         self.l7_tracing_limit = spec.get('l7_tracing_limit', 100)
+        self.max_iteration = spec.get('max_iteration', 30)
         self.network_delay_us = spec.get('network_delay_us', 1000000)
         self.allow_multiple_trace_ids_in_tracing_result = spec.get(
             'allow_multiple_trace_ids_in_tracing_result', False)
