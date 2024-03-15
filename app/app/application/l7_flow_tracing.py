@@ -177,7 +177,7 @@ class L7FlowTracing(Base):
                             time_filter: str,
                             base_filter: str,
                             return_fields: list,
-                            max_iteration: int = 30,
+                            max_iteration: int = config.max_iteration,
                             network_delay_us: int = config.network_delay_us,
                             ntp_delay_us: int = 10000) -> list:
         """L7 FlowLog 追踪入口
