@@ -138,7 +138,7 @@ L7_PROTOCOL_DNS = 120
 class L7FlowTracing(Base):
 
     async def query(self):
-        max_iteration = self.args.get("max_iteration", 30)
+        max_iteration = self.args.get("max_iteration", config.max_iteration)
         network_delay_us = self.args.get("network_delay_us")
         ntp_delay_us = self.args.get("ntp_delay_us", 10000)
         self.failed_regions = set()
