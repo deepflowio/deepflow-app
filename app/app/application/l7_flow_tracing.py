@@ -768,7 +768,7 @@ def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
                 syscall_req_to_ids[syscall_trace_id_request].add(_id)
             if syscall_trace_id_response:
                 syscall_resp_to_ids[syscall_trace_id_response].add(_id)
-    
+
     for index in dataframe_flowmetas.index:
         x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
         x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
@@ -838,7 +838,7 @@ def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
     for app in apps:
         if app.span_id:
             span_id_ids = span_id_to_ids[app.span_id]
-            parent_span_id_ids = parent_span_id_to_ids[app.parent_span_id]
+            parent_span_id_ids = parent_span_id_to_ids[app.span_id]
             span_ids = span_id_ids | parent_span_id_ids
             app.set_relate(span_ids, related_map, id_to_related_tag)
         if app.parent_span_id:
@@ -1713,36 +1713,35 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
             return
 
 
-def pruning_trace(response, _id, network_delay_us):
-    tree = []
+# Obtain traces after pruning
+def get_tree(_id, remain_trees, network_delay_us):
+    trees = []
+    tree_ids = []
+    new_remain_trees = []
     root_start_time_us = 0
     root_end_time_us = 0
-    tree_ids = set()
-    for i, trace in enumerate(response.get('tracing', [])):
+    for trace in remain_trees:
         trace_start_time_us = trace.get('start_time_us', 0)
         trace_end_time_us = trace.get('end_time_us', 0)
-        _ids = trace.get('_ids')
-        if not tree:
-            tree.append(trace)
+        if not root_start_time_us:
             root_start_time_us = trace_start_time_us
+        if not root_end_time_us:
             root_end_time_us = trace_end_time_us
-            tree_ids |= set(_ids)
-            continue
+        _ids = trace.get('_ids', [])
         if trace_start_time_us - network_delay_us <= root_end_time_us and trace_end_time_us + network_delay_us >= root_start_time_us:
-            tree.append(trace)
-            tree_ids |= set(_ids)
+            trees.append(trace)
+            tree_ids.extend(_ids)
         else:
-            if _id in tree_ids:
-                response['tracing'] = tree
-                break
-            else:
-                tree = [trace]
-                tree_ids = set()
-                tree_ids |= set(_ids)
-                root_start_time_us = trace_start_time_us
-                root_end_time_us = trace_end_time_us
-        if i == len(response['tracing']) - 1:
-            response['tracing'] = tree
+            new_remain_trees.append(trace)
+    if _id not in tree_ids and new_remain_trees:
+        return get_tree(_id, new_remain_trees, network_delay_us)
+    else:
+        return trees
+
+
+def pruning_trace(response, _id, network_delay_us):
+    traces = response.get('tracing', [])
+    response['tracing'] = get_tree(_id, traces, network_delay_us)
 
 
 def merge_service(services, app_flows, response):
