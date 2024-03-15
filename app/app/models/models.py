@@ -22,7 +22,7 @@ class FlowLogL7Tracing(Model):
     max_iteration = IntType(serialized_name="MAX_ITERATION",
                             required=False,
                             min_value=1,
-                            default=30)
+                            default=config.max_iteration)
     network_delay_us = IntType(serialized_name="NETWORK_DELAY_US",
                                required=False,
                                min_value=1,
