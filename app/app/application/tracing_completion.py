@@ -413,7 +413,7 @@ class TracingCompletion(L7FlowTracing):
             new_flows_length = len(dataframe_flowmetas)
             if old_flows_length == new_flows_length:
                 break
-        set_all_relate(dataframe_flowmetas, related_map, network_delay_us)
+        # set_all_relate(dataframe_flowmetas, related_map, network_delay_us)
         # 获取追踪到的所有应用流日志
         return_fields += RETURN_FIELDS
         flow_fields = list(RETURN_FIELDS)

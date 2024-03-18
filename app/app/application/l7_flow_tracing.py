@@ -574,7 +574,7 @@ class L7FlowTracing(Base):
             new_flows_length = len(dataframe_flowmetas)
             if old_flows_length == new_flows_length:
                 break
-        set_all_relate(dataframe_flowmetas, related_map, network_delay_us)
+        # set_all_relate(dataframe_flowmetas, related_map, network_delay_us)
         if not l7_flow_ids:
             return {}
         # 获取追踪到的所有应用流日志
