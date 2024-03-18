@@ -50,7 +50,7 @@ def main():
     except OSError:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(('', config.listen_port))
-    server.server.run(workers=WORKER_NUMBER,
+    server.server.run(workers=1,
                       sock=sock,
                       protocol=sanic_logger.DFHttpProtocol)
 
