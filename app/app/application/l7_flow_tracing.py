@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 log = logger.getLogger(__name__)
 
+# 网络位置排序优先级，当采集到这些位置的 span 时固定按此位置排序
 NET_SPAN_TAP_SIDE_PRIORITY = {
     item: i
     for i, item in enumerate(['c', 'c-nd', 's-nd', 's'])
@@ -121,6 +122,7 @@ FIELDS_MAP = {
     "icon_id(auto_instance_1) as auto_instance_1_icon_id",
     "_id": "toString(_id) as `_id_str`"
 }
+# 请求-响应合并的 key，当找到未合并的请求-响应时如果这些 key 相同，将合并为一个 span，标记为会话
 MERGE_KEYS = [
     'l7_protocol', 'protocol', 'version', 'request_id', 'http_proxy_client',
     'trace_id', 'span_id', 'x_request_id_0', 'x_request_id_1',
@@ -146,6 +148,7 @@ class L7FlowTracing(Base):
         _id = self.args.get("_id")
         self.has_attributes = self.args.get("has_attributes", 0)
         if not _id:
+            # tempo 查询入口，先根据 trace_id 获取到任意一个 _id
             trace_id = self.args.get("trace_id")
             _id = await self.get_id_by_trace_id(trace_id, time_filter)
             _id = str(_id)
@@ -201,21 +204,26 @@ class L7FlowTracing(Base):
         related_map = defaultdict(dict)
         third_app_spans_all = []
 
+        # Q1: 先获取 _id 对应的数据
         dataframe_flowmetas = await self.query_flowmetas(
             time_filter, base_filter)
         if type(dataframe_flowmetas) != DataFrame:
             return {}
         dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
+        # 先确定以此 _id 对应的行数据作为 root 
         related_map[dataframe_flowmetas['_id'][0]] = {
             dataframe_flowmetas['_id'][0]: {'base'}
         }
         # tempo api
         trace_id = self.args.get("trace_id") if self.args.get(
             "trace_id") else ''
+        # 是否允许多个 trace_id 被串联到一个追踪中
         allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
+        # 调用外部 apm api 补充 trace 数据
         call_apm_api_to_supplement_trace = config.call_apm_api_to_supplement_trace
         multi_trace_ids = set()
         query_simple_trace_id = False
+        # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break
@@ -225,6 +233,7 @@ class L7FlowTracing(Base):
             new_trace_ids = set()
             # 主动注入的追踪信息
             if not allow_multiple_trace_ids_in_tracing_result:
+                # 1. 基于 trace_id 获取所有相关数据
                 if trace_id:
                     new_trace_ids.add(trace_id)
                 delete_index = []
@@ -233,15 +242,17 @@ class L7FlowTracing(Base):
                     flow_trace_id = dataframe_flowmetas['trace_id'][index]
                     if flow_trace_id in [0, '']:
                         continue
+                    # C1: 如果 Q1 初次查询的数据包含 trace_id，但与查询参数的 trace_id 不同，说明查出来的数据是被误关联的，需要清理掉
                     if trace_id and trace_id != flow_trace_id:
                         delete_index.append(index)
                         deleted_trace_ids.add(flow_trace_id)
+                    # C1: 以 Q1 初次查询获取到的 trace_id 作为查询条件
                     if not trace_id:
                         trace_id = flow_trace_id
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'")
+                        f"FastFilter(trace_id)='{trace_id}'") # 构建 trace_id 作为第二次查询迭代的条件
                     # Trace id query separately
                     query_trace_filters = []
                     query_trace_filters.append(
@@ -249,6 +260,7 @@ class L7FlowTracing(Base):
                     if self.signal_sources == ['otel']:
                         query_trace_filters.append(
                             f"signal_source={L7_FLOW_TYPE_OTEL}")
+                    # Q2: 获取 trace_id 相关数据，第一层迭代
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
                     query_simple_trace_id = True
@@ -257,6 +269,7 @@ class L7FlowTracing(Base):
                         delete_index).reset_index(drop=True)
                     log.debug(f"删除的trace id为：{deleted_trace_ids}")
                 if call_apm_api_to_supplement_trace and trace_id not in multi_trace_ids:
+                    # 获取外部 apm 存储的 app-span
                     get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
                     app_spans_res, app_spans_code = await curl_perform(
                         'get', get_third_app_span_url)
@@ -276,6 +289,7 @@ class L7FlowTracing(Base):
                             ignore_index=True).drop_duplicates(
                                 ["_id"]).reset_index(drop=True)
             else:
+                # 在允许多个 trace_id 的情况下，补充这一部分 trace_id 并尝试从外部 apm 补充 app-span
                 third_app_spans = []
                 for index in range(len(dataframe_flowmetas.index)):
                     if dataframe_flowmetas['trace_id'][index] in [0, '']:
@@ -304,7 +318,7 @@ class L7FlowTracing(Base):
                         join="outer",
                         ignore_index=True).drop_duplicates(
                             ["_id"]).reset_index(drop=True)
-
+                # 多个 trace_id 取唯一值
                 new_trace_ids -= trace_ids
                 trace_ids |= new_trace_ids
                 if new_trace_ids:
@@ -320,6 +334,7 @@ class L7FlowTracing(Base):
                     if self.signal_sources == ['otel']:
                         query_trace_filters.append(
                             f"signal_source={L7_FLOW_TYPE_OTEL}")
+                    # Q3: <=> Q2 基于 trace_id 获取相关数据，第一层迭代
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
 
@@ -345,6 +360,7 @@ class L7FlowTracing(Base):
                 new_network_metas = set()
                 req_tcp_seqs = set()
                 resp_tcp_seqs = set()
+                # net-span 追踪: 基于 req_tcp_seq/resp_tcp_seq 获取所有关联的有意义的 flow
                 for index in range(len(dataframe_flowmetas.index)):
                     req_tcp_seq = dataframe_flowmetas['req_tcp_seq'][index]
                     resp_tcp_seq = dataframe_flowmetas['resp_tcp_seq'][index]
@@ -380,6 +396,7 @@ class L7FlowTracing(Base):
                     if resp_tcp_seq:
                         resp_tcp_seqs.add(str(resp_tcp_seq))
                 # Network span relational query
+                # C2: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
                 network_filters = []
                 if req_tcp_seqs:
                     network_filters.append(
@@ -424,6 +441,7 @@ class L7FlowTracing(Base):
                         syscall_trace_id_responses.add(
                             str(syscall_trace_id_response))
                 # System span relational query
+                # C3: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
                 syscall_filters = []
                 if syscall_trace_id_requests or syscall_trace_id_responses:
                     syscall_filters.append(
@@ -463,6 +481,8 @@ class L7FlowTracing(Base):
                         x_request_id_1s.add(f"'{x_request_id_1}'")
 
                 # x_request_id related query
+                # 根据 x_request_id 构建查询条件关联 flow
+                # 当启用了 x_request_id 时，可关联穿越 nginx 类网关的 flow
                 x_request_filters = []
                 if x_request_id_0s:
                     x_request_filters.append(
@@ -476,6 +496,7 @@ class L7FlowTracing(Base):
                 new_flows = pd.DataFrame()
                 if filters:
                     # Non-trace_id relational queries
+                    # Q4: 查询上述基于 Cx 构建出的条件，即与【第一层迭代】关联的所有 flow，此为【第二层迭代
                     new_flows = await self.query_flowmetas(
                         time_filter, ' OR '.join(filters))
                     if type(new_flows) != DataFrame:
@@ -537,6 +558,8 @@ class L7FlowTracing(Base):
                         log.debug(f"删除的trace id为：{deleted_trace_ids}")
                     new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
+                    # 先标记可能存在的关联关系，在 new_related_map 中通过多次迭代标记上有关联的 _id
+                    # 如果一个 _id 没有标记到 new_related_map 中，flow 会被删掉，后续逻辑不再处理
                     new_related_map = defaultdict(dict)
                     new_flow_ids = set(new_flows['_id'])
                     if xrequests:
@@ -551,7 +574,12 @@ class L7FlowTracing(Base):
                         for network in networks:
                             network.set_relate(new_flow_ids, new_related_map,
                                                id_to_related_tag)
-
+                            
+                    # 注意上面的 new_flow_delete_index append 了多次，此处可能去掉的数据有:
+                    # 1. _id 已经存在的重复数据
+                    # 2. 通过 trace_id 关联，在不允许多 trace_id 的情况下查出了非本次追踪的 trace_id 的数据
+                    # 3. 通过 tcp_seq / syscall_trace_id / x_request_id 关联不上任何关系的数据
+                    # 4. 虽然关联上了，但是 network_delay_us 没有落在范围内被丢弃的数据(注意这是否应该修改为判断 min(start_time) 与 max(end_time))?
                     new_flow_delete_index = []
                     for index in range(len(new_flows.index)):
                         _id = new_flows['_id'][index]
@@ -583,6 +611,7 @@ class L7FlowTracing(Base):
         if self.has_attributes:
             return_fields.append("attribute")
             flow_fields.append("attribute")
+        # 此处查询会获取这些 _id 对应的完整 Application Metadata
         l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
                                               flow_fields)
         if type(l7_flows) != DataFrame:
@@ -861,6 +890,16 @@ class L7XrequestMeta:
                 and self.x_request_id_1 == rhs.x_request_id_1)
 
     def set_relate(self, _ids, related_map, id_to_related_tag):
+        """
+        当请求穿越网关(可能是 ingress 或云托管 LB)，网关内部生成 x_request_id 标记同一个请求
+        因为 nginx 类网关是通过多 worker 进程实现的，所以需要依赖于 x_request_id 来关联
+                                     x_request_id_0            x_request_id_1
+        frontend --------------> LB ----------------> ingress ----------------> backend
+                  x_request_id_0     x_request_id_1
+                <--------------- LB <---------------- ingress
+        当网关内部或有多 worker 工作线程场景: eBPF 无法关联出入请求与出请求
+        当网关使用云 LB 时无法部署 agent: 无法获取到任何网关内信息
+        """
         for _id in _ids:
             _id_df = id_to_related_tag[_id]['_id']
             x_request_id_0_df = id_to_related_tag[_id]['x_request_id_0']
@@ -880,7 +919,17 @@ class L7XrequestMeta:
 class L7NetworkMeta:
     """
     网络流量追踪信息:
-        req_tcp_seq, resp_tcp_seq, start_time_us, end_time_us
+        按索引访问值:
+        {
+            0: _id,
+            1: type, 
+            2: req_tcp_seq, 
+            3: resp_tcp_seq, 
+            4: start_time_us, 
+            5: end_time_us, 
+            6: span_id, 
+            7: network_delay_us
+        }
     """
 
     def __init__(self, flow_metas: Tuple, network_delay_us: int):
@@ -898,6 +947,14 @@ class L7NetworkMeta:
                 and self.resp_tcp_seq == rhs.resp_tcp_seq)
 
     def set_relate(self, _ids, related_map, id_to_related_tag):
+        """
+        使用 tcp_seq 标记穿越不同网元的关联关系
+             req_tcp_seq_1 ┌──────┐req_tcp_seq_1 ┌─────┐
+             ─────────────>│      │─────────────>│     │
+        user               │ Node │              │ Pod │
+             <─────────────│      │<─────────────│     │
+            resp_tcp_seq_2 └──────┘resp_tcp_seq_2└─────┘
+        """
         for _id in _ids:
             _id_df = id_to_related_tag[_id]['_id']
             type_df = id_to_related_tag[_id]['type']
@@ -911,6 +968,8 @@ class L7NetworkMeta:
             if type_df != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and span_id_df:
                 if span_id_df != self.span_id:
                     continue
+            # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃
+            # 这里的判断是 self._time_us 与 related_id.time_us 判断？是否应改为 min(start_time) 与 max(end_time)
             if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
                 if abs(self.start_time_us -
                        start_time_us_df) <= self.network_delay_us:
@@ -948,6 +1007,14 @@ class L7SyscallMeta:
                 == rhs.syscall_trace_id_response)
 
     def set_relate(self, _ids, related_map, id_to_related_tag):
+        """
+        syscall_trace_id_x 关联关系连接同一个线程内出入请求
+        ┌─────┐ syscall_trace_id_request  ┌─────────┐ syscall_trace_id_request  ┌──────┐
+        │     │ ──────────────────────────│─>1   1─>│───────────────────────────│->2   │
+        │ Req │                           │   Pod   |                           │  Pod │
+        │     │ <─────────────────────────│<─3   3<─│───────────────────────────│<─2   │
+        └─────┘ syscall_trace_id_response └─────────┘ syscall_trace_id_response └──────┘
+        """
         for _id in _ids:
             _id_df = id_to_related_tag[_id]['_id']
             vtap_id_df = id_to_related_tag[_id]['vtap_id']
