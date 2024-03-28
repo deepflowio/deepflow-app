@@ -222,18 +222,18 @@ class L7FlowTracing(Base):
         # 调用外部 apm api 补充 trace 数据
         call_apm_api_to_supplement_trace = config.call_apm_api_to_supplement_trace
         multi_trace_ids = set()
-        query_simple_trace_id = False
+        query_simple_trace_id = False # 真实语义为：在单 trace_id 场景下对同一个 trace_id 只需要查询一次，避免重复查询
         # 进行迭代查询，上限为 config.spec.max_iteration
         # 除了 max_iteration 之外，跳出条件为：
-        # 1. 通过 trace_id 无法再获取到新的数据
-        # 2. 通过 trace_id 所属的数据关联的 tcp_seq / syscall_trace_id / x_request_id 无法关联到新的数据
-        # 3. 获取到新的数据之后 DataFrame 合并，当合并前后的数据量相等，说明没有新的数据，可直接跳出循环（避免循环里多次加载合并同一份数据）
+        # 1. 通过 trace_id 与 tcp_seq / syscall_trace_id / x_request_id 无法关联到新的数据
+        # 2. 获取到新的数据之后 DataFrame 合并，当合并前后的数据量相等，说明没有新的数据，可直接跳出循环（避免循环里多次加载合并同一份数据）
         for i in range(max_iteration):
             if type(dataframe_flowmetas) != DataFrame:
                 break
             filters = []
-            # new_trace_id_flows 的优先级最高，除了禁止多 trace_id 场景下会移除 trace_id 不同的数据外，没有移除逻辑
-            # 也即只要 trace_id 相同，都会被合并到数据集中进行排序
+            # 对 new_trace_id_flows 集合：
+            # 单 trace_id：移除 trace_id 不同的数据
+            # 多 trace_id：允许通过 tcp_seq/syscall/x_request_id 查询出的 trace_id，需要移除通过 FastFilter IN 逻辑查出的不在上述集合内的 trace_id
             new_trace_id_flows = pd.DataFrame()
             new_trace_id_filters = []
             new_trace_ids = set()
@@ -257,8 +257,11 @@ class L7FlowTracing(Base):
                         trace_id = flow_trace_id
                         new_trace_ids.add(trace_id)
                 if trace_id and not query_simple_trace_id:
+                    # 构建 trace_id 作为第二次查询迭代的条件
+                    # 注意 FastFilter 是一个特殊的 feature，见 #deepflow-server:/querier/engine/clickhouse/filter.go
+                    # 当启用了 #deepflow-server:/config.trace-id-with-index 时，FastFilter 会转换成对 trace_id_index 的查询
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'") # 构建 trace_id 作为第二次查询迭代的条件
+                        f"FastFilter(trace_id)='{trace_id}'") 
                     # Trace id query separately
                     query_trace_filters = []
                     query_trace_filters.append(
@@ -331,6 +334,9 @@ class L7FlowTracing(Base):
                 if new_trace_ids:
                     new_trace_ids_set = set(
                         [f"'{nxrid[1]}'" for nxrid in new_trace_ids])
+                    # 如果启用了多 trace_id 与 #deepflow-server:/config.trace-id-with-index
+                    # 由于 trace_id_index 是 hash，所以这里的 IN 查询后可能获取到相同的 trace_id_index 但实际上是不同的 trace_id
+                    # 此时仍然要去掉非 new_trace_ids_set 中的 trace_id，避免查出不相关的数据
                     new_trace_id_filters.append(
                         f"FastFilter(trace_id) IN ({','.join(new_trace_ids_set)})"
                     )
@@ -587,6 +593,7 @@ class L7FlowTracing(Base):
                     # 2. 通过 trace_id 关联，在不允许多 trace_id 的情况下查出了非本次追踪的 trace_id 的数据
                     # 3. 通过 tcp_seq / syscall_trace_id / x_request_id 关联不上任何关系的数据
                     # 4. 虽然关联上了，但是 network_delay_us 没有落在范围内被丢弃的数据
+                    # 此处为第一次筛选，在后面的关联合并排序中仍然会去掉无关联数据
                     new_flow_delete_index = []
                     for index in range(len(new_flows.index)):
                         _id = new_flows['_id'][index]
@@ -1095,36 +1102,50 @@ class L7AppMeta:
 class Networks:
 
     def __init__(self):
+        # 标识 tcp_seq 用于匹配 sys-span 与 net-span
         self.req_tcp_seq = None
         self.resp_tcp_seq = None
+        # 标识 span_id 用于匹配 app-span
         self.span_id = None
+        # 标识是否已找到了 sys-span，如果有则不需要关联 app-span，优先设置为 sys-span 的 parent/child
         self.has_syscall = False
+        # 存储所有 MERGE_KEYS 数据，用于匹配另一个 flow 是否完全一致
         self.metas = {}
+        # 分组聚合所有 tcp_seq 相同的 flow
         self.flows = []
+        # time_us 用于判断合并的流是否超出流时差
         self.start_time_us = None
         self.end_time_us = None
 
     def add_flow(self, flow, network_delay_us):
+        """
+        将 net-span 与 sys-span 按 tcp_seq 分组
+        """
         if self.flows:
             if self.req_tcp_seq and flow["type"] != L7_FLOW_TYPE_RESPONSE and (
                     self.req_tcp_seq != flow["req_tcp_seq"]):
+                # 如果 req_tcp_seq 不相等，只允许【flow 是响应，且没有合并请求的 tcp_seq】这种场景，否则返回
                 return False
             if self.resp_tcp_seq and flow["type"] != L7_FLOW_TYPE_REQUEST and (
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
+                # 如果 resp_tcp_seq 不相等，只允许【flow 是请求，且没有合并响应的 tcp_seq】这种场景
                 return False
-            all_empty = True
+            all_empty = True # 真实语义是 all_equal，标识合并进来的 flow 与 `self` 的 `MERGE_KEYS` 是否完全一致
             # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
                 if flow["type"] == L7_FLOW_TYPE_RESPONSE or not self.req_tcp_seq:
                     if key in MERGE_KEY_REQUEST:
+                        # 对 response, 只校验 response key
                         continue
                 if flow["type"] == L7_FLOW_TYPE_REQUEST or not self.resp_tcp_seq:
                     if key in MERGE_KEY_RESPONSE:
+                        # 对 request, 只校验 request key
                         continue
                 if self.get(key) and flow.get(key) and (self.get(key) !=
                                                         flow.get(key)):
                     all_empty = False
-                    # http2 == grpc
+                    # agent 有可能协议识别有误，没将 http2 识别为 grpc，此处忽略这个差异，不要返回
+                    # 虽然 http2 不仅仅只有 grpc 一种实现，但如果两个流只有 l7_protocol 协议不一致而其他值都一致，则仍然认为是同一个流
                     # l7_protocol [21: HTTP2, 41: gRPC]
                     if key == 'l7_protocol' and self.get(key) in [
                             21, 41
@@ -1136,10 +1157,15 @@ class Networks:
                         continue
                     return False
             # merge key all empty
+            # 如果 all_empty(all_equal) 但 tcp_seq 不一致，说明不是纯粹跨越 L2-L4 网元
+            # 可能是跨越了 L7 网关，或者根本就是两个毫无关系的请求
             if all_empty and self.req_tcp_seq != flow[
                     "req_tcp_seq"] and self.resp_tcp_seq != flow[
                         "resp_tcp_seq"]:
                 return False
+            # 如果超出流时差，暂时判断为无关系，可能有以下原因:
+            # 可能是 tcp_seq 重复
+            # 可能是 L4 网关与应用所在宿主机时间差异太大，明明是同一个请求但采集时间相差过远
             if abs(self.start_time_us -
                    flow["start_time_us"]) > network_delay_us or abs(
                        self.end_time_us -
@@ -1162,7 +1188,10 @@ class Networks:
         if flow["tap_side"] in [
                 TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
         ]:
+            # 标识 self 根据 tcp_seq 找到了对应的 sys-span
+            # 对 s/s-nd，需要找 s-p，对 c/c-nd 需要找 c-p
             self.has_syscall = True
+            # self 不一定是 net-span? 外层的调用是 net-span + sys-span 组成的列表
             flow["networks"] = self
         return True
 
@@ -1207,7 +1236,7 @@ class Service:
         self.app_flow_of_direct_flows = sorted(
             self.app_flow_of_direct_flows,
             key=lambda x: x.get("start_time_us"))
-        # 有s-p
+        # 如果有s-p，s-p 不需要找父级 span，且所有找不到父级 span 的 c-p 都要挂靠到 s-p 下
         if self.direct_flows[0]['tap_side'] == TAP_SIDE_SERVER_PROCESS:
             for i, direct_flow in enumerate(self.direct_flows[1:]):
                 if not direct_flow.get('parent_id'):
@@ -1218,12 +1247,14 @@ class Service:
                                     "c-p mounted on parent_app_flow")
                     else:
                         # 2. 所属service中存在应用span，将该系统span的arent设置为service中最后一条应用span
+                        # 对应顺序：[app, c-app] <- c-p
                         if self.app_flow_of_direct_flows:
                             _set_parent(direct_flow,
                                         self.app_flow_of_direct_flows[-1],
                                         "c-p mounted on latest app_flow")
                         else:
-                            # 3. 存在syscalltraceid相同且tap_side=s的系统span，该系统span的parent设置为该flow(syscalltraceid相同且tap_side=s)
+                            # 3. 存在syscalltraceid相同且tap_side=s的系统span【<- 240328: 存疑】，该系统span的parent设置为该flow(syscalltraceid相同且tap_side=s)
+                            # 这里只是把找不到上级 net-span/app-span 的 c-p 挂靠到 s-p 下
                             _set_parent(direct_flow, self.direct_flows[0],
                                         "c-p mounted on s-p")
             if self.direct_flows[0].get('parent_id', -1) < 0:
@@ -1305,8 +1336,11 @@ class Service:
                     'span_id'] and self.direct_flows[0][
                         'tap_side'] == TAP_SIDE_SERVER_PROCESS:
             # x-app的parent是c-p时，一定不属于同一个service
+            # 逻辑顺序是：[s-nd, s, s-p s-app, app, c-app, c-p, c, c-nd]，所以 x-app 的 parent 不会是 c-p，一定跨了 Service
+            # 如果能找到这种关系说明可能 s-nd/s/s-p 少了
             for client_process_flow in self.direct_flows[1:]:
                 if flow['parent_span_id'] == client_process_flow['span_id']:
+                    # 标记一下关系，但不要 append 到 service 中
                     flow["parent_syscall_flow"] = client_process_flow
                     return False
             flow["parent_syscall_flow"] = self.direct_flows[0]
@@ -1578,6 +1612,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         service.add_direct_flow(flow)
 
     # 网络span及系统span按照tcp_seq进行分组
+    # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
     networks = []
     network_flows = sorted(network_flows + syscall_flows,
                            key=lambda x: x.get("type"),
@@ -1630,6 +1665,10 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 
 
 def app_flow_set_service(array):
+    """
+    将 app-span 挂到 Service 下
+    FIXME: 240328: 这里相同的逻辑执行了两次，需要找到原因修正
+    """
     for flow_0 in array:
         if flow_0.get('parent_id', -1) >= 0:
             continue
@@ -1669,6 +1708,9 @@ def app_flow_set_service(array):
 
 
 def networks_set_to_app_fow(array, network_flows):
+    """
+    设置 net-span 与 app-span 的层级关系
+    """
     array.reverse()
     for flow in array:
         # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
@@ -2172,12 +2214,14 @@ def network_flow_sort(traces):
             else:
                 sorted_traces.append(sys_trace)
         return sorted_traces
+    # 对非 local/rest 的 span 按 tap_side rank 排序
     sorted_traces = sorted(
         sorted_traces + sys_traces,
         key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
     if not sorted_traces:
         sorted_traces += local_rest_traces
     else:
+        # 对 local/rest 位置的 span 排到 start_time 最接近的 span 位置
         for trace in local_rest_traces:
             vtap_index = -1
             for i, sorted_trace in enumerate(sorted_traces):
