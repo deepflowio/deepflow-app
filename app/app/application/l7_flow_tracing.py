@@ -1293,13 +1293,12 @@ def merge_flow(flows: list, flow: dict) -> bool:
             equal = False
         if request_flow['tap_side'] in [
                 TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ]:
+        ] and request_flow['l7_protocol'] == L7_PROTOCOL_DNS:
             # 应用span syscall_cap_seq判断合并
-            if request_flow['l7_protocol'] != L7_PROTOCOL_DNS or request_flow[
-                    'syscall_cap_seq_1'] + 1 != response_flow[
-                        'syscall_cap_seq_1'] or not (
-                            request_flow['type'] == L7_FLOW_TYPE_SESSION and
-                            response_flow['type'] == L7_FLOW_TYPE_RESPONSE):
+            if request_flow['syscall_cap_seq_1'] + 1 != response_flow[
+                    'syscall_cap_seq_1'] or not (
+                        request_flow['type'] == L7_FLOW_TYPE_SESSION
+                        and response_flow['type'] == L7_FLOW_TYPE_RESPONSE):
                 equal = False
         if equal:  # 合并字段
             # FIXME 确认要合并哪些字段
