@@ -20,6 +20,6 @@ So, here is to convert the existing Flow Log Event into Span-like data, that is:
 - Sort the merged data and build Span-like data that conforms to the call stack.
 
 ## Others
-For details, please refer to [here](https://github.com/deepflowio/deepflow-app/blob/feature-edit-desc/HOW-TO-GET-SPAN-LIKE-DATA.md)
+For details, please refer to [here](https://github.com/deepflowio/deepflow-app/blob/v6.4/HOW-TO-GET-SPAN-LIKE-DATA.md)
 
 
