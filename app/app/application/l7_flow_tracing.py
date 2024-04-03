@@ -138,7 +138,6 @@ L7_PROTOCOL_DNS = 120
 
 
 class L7FlowTracing(Base):
-
     async def query(self):
         max_iteration = self.args.get("max_iteration", config.max_iteration)
         network_delay_us = self.args.get("network_delay_us")
@@ -184,7 +183,7 @@ class L7FlowTracing(Base):
                             network_delay_us: int = config.network_delay_us,
                             ntp_delay_us: int = 10000) -> list:
         """L7 FlowLog 追踪入口
-    
+
         参数说明：
         time_filter: 查询的时间范围过滤条件，SQL表达式
             当使用四元组进行追踪时，time_filter置为希望搜索的一段时间范围，
@@ -201,7 +200,7 @@ class L7FlowTracing(Base):
         x_request_metas = set()
         l7_flow_ids = set()
         xrequests = []
-        related_map = defaultdict(dict) # 标记 span 之间的关系
+        related_map = defaultdict(dict)  # 标记 span 之间的关系
         third_app_spans_all = []
 
         # Q1: 先获取 _id 对应的数据
@@ -222,7 +221,7 @@ class L7FlowTracing(Base):
         # 调用外部 apm api 补充 trace 数据
         call_apm_api_to_supplement_trace = config.call_apm_api_to_supplement_trace
         multi_trace_ids = set()
-        query_simple_trace_id = False # 真实语义为：在单 trace_id 场景下对同一个 trace_id 只需要查询一次，避免重复查询
+        query_simple_trace_id = False  # 真实语义为：在单 trace_id 场景下对同一个 trace_id 只需要查询一次，避免重复查询
         # 进行迭代查询，上限为 config.spec.max_iteration
         # 除了 max_iteration 之外，跳出条件为：
         # 1. 通过 trace_id 与 tcp_seq / syscall_trace_id / x_request_id 无法关联到新的数据
@@ -261,7 +260,7 @@ class L7FlowTracing(Base):
                     # 注意 FastFilter 是一个特殊的 feature，见 #deepflow-server:/querier/engine/clickhouse/filter.go
                     # 当启用了 #deepflow-server:/config.trace-id-with-index 时，FastFilter 会转换成对 trace_id_index 的查询
                     new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'") 
+                        f"FastFilter(trace_id)='{trace_id}'")
                     # Trace id query separately
                     query_trace_filters = []
                     query_trace_filters.append(
@@ -588,7 +587,7 @@ class L7FlowTracing(Base):
                         for network in networks:
                             network.set_relate(new_flow_ids, new_related_map,
                                                id_to_related_tag)
-                            
+
                     # 注意上面的 new_flow_delete_index append 了多次，此处可能去掉的数据有:
                     # 1. _id 已经存在的重复数据
                     # 2. 通过 trace_id 关联，在不允许多 trace_id 的情况下查出了非本次追踪的 trace_id 的数据
@@ -673,25 +672,25 @@ class L7FlowTracing(Base):
     async def query_flowmetas(self, time_filter: str,
                               base_filter: str) -> list:
         """找到base_filter对应的L7 Flowmeta
-    
+
         网络流量追踪信息：
             type, req_tcp_seq, resp_tcp_seq, start_time_us, end_time_us
             通过tcp_seq及流日志的时间追踪
-    
+
         系统调用追踪信息：
             vtap_id, syscall_trace_id_request, syscall_trace_id_response
             通过eBPF获取到的coroutine_trace_id追踪
-    
+
         主动注入的追踪信息：
             trace_id：通过Tracing SDK主动注入的trace_id追踪
             x_request_id_0：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
             x_request_id_1：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
         """
-        sql = """SELECT 
-        type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us, 
-        vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol, 
+        sql = """SELECT
+        type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us,
+        vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol,
         trace_id, x_request_id_0, x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
-        FROM `l7_flow_log` 
+        FROM `l7_flow_log`
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
                    base_filter=base_filter,
@@ -905,7 +904,6 @@ class L7XrequestMeta:
     """
     x_request_id追踪：
     """
-
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.x_request_id_0 = flow_metas[1]
@@ -948,10 +946,9 @@ class L7XrequestMeta:
 
 class L7NetworkMeta:
     """
-    网络流量追踪信息: 
+    网络流量追踪信息:
     { _id, type, req_tcp_seq, resp_tcp_seq, start_time_us, end_time_us, span_id, network_delay_us }
     """
-
     def __init__(self, flow_metas: Tuple, network_delay_us: int):
         self._id = flow_metas[0]
         self.type = flow_metas[1]
@@ -989,7 +986,19 @@ class L7NetworkMeta:
                 if span_id_df != self.span_id:
                     continue
             # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃
-            if self.type != L7_FLOW_TYPE_RESPONSE and self.req_tcp_seq > 0:
+            # 当两个 Span 两侧的 TCP Seq 都有值时，他们必须同时相等
+            # 当某个 Span 只有一侧 TCP Seq 有值时，只要求一侧相等
+            if self.req_tcp_seq and self.resp_tcp_seq and req_tcp_seq_df and resp_tcp_seq_df:
+                if abs(self.start_time_us -
+                       start_time_us_df) <= self.network_delay_us and abs(
+                           self.end_time_us -
+                           end_time_us_df) <= self.network_delay_us:
+                    if self.req_tcp_seq == req_tcp_seq_df and self.resp_tcp_seq == resp_tcp_seq_df:
+                        related_map[_id_df][
+                            self._id] = related_map[_id_df].get(
+                                self._id, set())
+                        related_map[_id_df][self._id].add('network')
+            elif self.req_tcp_seq and req_tcp_seq_df:
                 if abs(self.start_time_us -
                        start_time_us_df) <= self.network_delay_us:
                     if self.req_tcp_seq == req_tcp_seq_df:
@@ -997,7 +1006,7 @@ class L7NetworkMeta:
                             self._id] = related_map[_id_df].get(
                                 self._id, set())
                         related_map[_id_df][self._id].add('network')
-            if self.type != L7_FLOW_TYPE_REQUEST and self.resp_tcp_seq > 0:
+            elif self.resp_tcp_seq and resp_tcp_seq_df:
                 if abs(self.end_time_us -
                        end_time_us_df) <= self.network_delay_us:
                     if self.resp_tcp_seq == resp_tcp_seq_df:
@@ -1012,7 +1021,6 @@ class L7SyscallMeta:
     系统调用追踪信息:
     { vtap_id, syscall_trace_id_request, syscall_trace_id_response, tap_side, start_time_us, end_time_us }
     """
-
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.vtap_id = flow_metas[1]
@@ -1065,7 +1073,6 @@ class L7AppMeta:
     应用插桩的追踪信息:
     { span_id, parent_span_id }
     """
-
     def __init__(self, flow_metas: Tuple):
         self._id = flow_metas[0]
         self.tap_side = flow_metas[1]
@@ -1104,7 +1111,6 @@ class L7AppMeta:
 
 
 class Networks:
-
     def __init__(self):
         # 标识 tcp_seq 用于匹配 sys-span 与 net-span
         self.req_tcp_seq = None
@@ -1134,7 +1140,7 @@ class Networks:
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
                 # 如果 resp_tcp_seq 不相等，只允许【flow 是请求，且没有合并响应的 tcp_seq】这种场景
                 return False
-            all_empty = True # 作用是标识是否所有 merge_keys 都为空
+            all_empty = True  # 作用是标识是否所有 merge_keys 都为空
             # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
                 if flow["type"] == L7_FLOW_TYPE_RESPONSE or not self.req_tcp_seq:
@@ -1220,7 +1226,6 @@ class Networks:
 
 
 class Service:
-
     def __init__(self, vtap_id: int, process_id: int):
         self.vtap_id = vtap_id
         self.process_id = process_id
@@ -1479,7 +1484,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
                 flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
             # request response合并后type改为session
-            if flow['type'] + flows[i]['type'] == 1: # L7_FLOW_TYPE_REQUEST(0) + L7_FLOW_TYPE_RESPONSE(1) = 1
+            if flow['type'] + flows[i][
+                    'type'] == 1:  # L7_FLOW_TYPE_REQUEST(0) + L7_FLOW_TYPE_RESPONSE(1) = 1
                 flows[i]['type'] = 2
             flows[i]['type'] = max(flows[i]['type'], flow['type'])
             return True
@@ -1605,7 +1611,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         local_process_id = flow['process_id_0']
         vtap_id = flow['vtap_id']
         index = 0
-        max_start_time_service = None # 没有任何地方用到，仅仅用于 continue 循环或 debug
+        max_start_time_service = None  # 没有任何地方用到，仅仅用于 continue 循环或 debug
         if (vtap_id, local_process_id, 0) in service_map:
             for key, service in service_map.items():
                 if key[0] == vtap_id and key[1] == local_process_id:
@@ -2052,7 +2058,6 @@ def format(services, networks, app_flows, _id, network_delay_us):
 
 
 class TraceSort:
-
     def __init__(self, traces):
         self.traces = traces
         self.sorted_indexs = []
@@ -2245,7 +2250,7 @@ def network_flow_sort(traces):
                 const.TAP_SIDE_CLIENT_GATEWAY, const.TAP_SIDE_SERVER_GATEWAY,
                 const.TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR,
                 const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR
-        ] or trace['tap'] != "虚拟网络": # FIXME: 确认虚拟网络是否已改名，以及这里要兼容多版本、多语言
+        ] or trace['tap'] != "虚拟网络":  # FIXME: 确认虚拟网络是否已改名，以及这里要兼容多版本、多语言
             response_duration_sort = True
         if trace['tap_side'] in [const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST]:
             local_rest_traces.append(trace)
