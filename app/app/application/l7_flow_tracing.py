@@ -134,7 +134,10 @@ MERGE_KEY_REQUEST = [
 ]
 MERGE_KEY_RESPONSE = ['http_proxy_client']
 DATABASE = "flow_log"
+
 L7_PROTOCOL_DNS = 120
+L7_PROTOCOL_HTTP2 = 21
+L7_PROTOCOL_GRPC = 41
 
 
 class L7FlowTracing(Base):
@@ -1132,50 +1135,34 @@ class Networks:
         将 net-span 与 sys-span 按 tcp_seq 分组
         """
         if self.flows:
-            if self.req_tcp_seq and flow["type"] != L7_FLOW_TYPE_RESPONSE and (
+            if self.req_tcp_seq and flow["req_tcp_seq"] and (
                     self.req_tcp_seq != flow["req_tcp_seq"]):
                 # 如果 req_tcp_seq 不相等，只允许【flow 是响应，且没有合并请求的 tcp_seq】这种场景，否则返回
                 return False
-            if self.resp_tcp_seq and flow["type"] != L7_FLOW_TYPE_REQUEST and (
+            if self.resp_tcp_seq and flow["resp_tcp_seq"] and (
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
                 # 如果 resp_tcp_seq 不相等，只允许【flow 是请求，且没有合并响应的 tcp_seq】这种场景
                 return False
-            all_empty = True  # 作用是标识是否所有 merge_keys 都为空
+
             # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
-                if flow["type"] == L7_FLOW_TYPE_RESPONSE or not self.req_tcp_seq:
-                    if key in MERGE_KEY_REQUEST:
-                        # 对 response, 只校验 response key
+                if not flow["req_tcp_seq"] or not self.req_tcp_seq: # no request in self.flows or flow
+                    if key in MERGE_KEY_REQUEST:  # skip keys only for requsest
                         continue
-                if flow["type"] == L7_FLOW_TYPE_REQUEST or not self.resp_tcp_seq:
-                    if key in MERGE_KEY_RESPONSE:
-                        # 对 request, 只校验 request key
+                if not flow["resp_tcp_seq"] or not self.resp_tcp_seq:  # no response in self.flows or flow
+                    if key in MERGE_KEY_RESPONSE:  # skip keys only for response
                         continue
-                if self.get(key) and flow.get(key) and (self.get(key) !=
-                                                        flow.get(key)):
-                    # FIXME: 这里 if 应该拆开，all_empty 只需要第一个 and 条件即可
-                    # 否则可能存在：self/flow 都有值且完全相等的情况，all_empty 就不会被修改
-                    all_empty = False
+                if self.get(key) and flow.get(key):
                     # agent 有可能协议识别有误，没将 http2 识别为 grpc，此处忽略这个差异，不要返回
                     # 虽然 http2 不仅仅只有 grpc 一种实现，但如果两个流只有 l7_protocol 协议不一致而其他值都一致，则仍然认为是同一个流
-                    # l7_protocol [21: HTTP2, 41: gRPC]
                     if key == 'l7_protocol' and self.get(key) in [
-                            21, 41
-                    ] and flow.get(key) in [21, 41]:
-                        continue
-                    elif key == 'l7_protocol_str' and self.get(key) in [
-                            'HTTP2', 'gRPC'
-                    ] and flow.get(key) in ['HTTP2', 'gRPC']:
+                            L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
+                    ] and flow.get(key) in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC]:
                         continue
                     # 如果 self/flow 的 merge_keys 任意一个不相等，应直接返回
-                    return False
-            # merge key all empty
-            # 如果 all_empty(all_equal) 但 tcp_seq 不一致，说明不是纯粹跨越 L2-L4 网元
-            # 可能是跨越了 L7 网关，或者根本就是两个毫无关系的请求
-            if all_empty and self.req_tcp_seq != flow[
-                    "req_tcp_seq"] and self.resp_tcp_seq != flow[
-                        "resp_tcp_seq"]:
-                return False
+                    if self.get(key) != flow.get(key):
+                        return False
+
             # 如果超出流时差，暂时判断为无关系，可能有以下原因:
             # 可能是 tcp_seq 重复
             # 可能是 L4 网关与应用所在宿主机时间差异太大，明明是同一个请求但采集时间相差过远
@@ -1418,7 +1405,7 @@ def merge_flow(flows: list, flow: dict) -> bool:
         elif flows[i]['type'] == L7_FLOW_TYPE_RESPONSE:
             request_flow = flow
             response_flow = flows[i]
-        else:
+        else:  # for DNS sys span
             if flow['type'] == L7_FLOW_TYPE_REQUEST:
                 request_flow = flow
                 response_flow = flows[i]
@@ -1429,6 +1416,7 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 continue
         if not request_flow or not response_flow:
             continue
+
         for key in [
                 'vtap_id', 'tap_port', 'tap_port_type', 'l7_protocol',
                 'request_id', 'tap_side'
@@ -1438,7 +1426,6 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 # 不合并1: 上述 key 不一致，说明不是一个会话内
                 equal = False
                 break
-
         if request_flow['start_time_us'] > response_flow['end_time_us']:
             # 不合并2: 请求的时间比响应的时间大，说明响应不对应此请求
             equal = False
@@ -1451,8 +1438,10 @@ def merge_flow(flows: list, flow: dict) -> bool:
                         request_flow['type'] == L7_FLOW_TYPE_SESSION
                         and response_flow['type'] == L7_FLOW_TYPE_RESPONSE):
                 # 不合并3: 对 sys-span 当协议为 dns 协议且当 request_flow 是会话时，response_flow 只合并响应
-                # syscall_cap_seq 会在 agent 标记正确的请求-响应顺序，cap_seq+1 可找到“后续”的一条流，如果 request_flow 的 cap_seq_1+1 不匹配 response_flow 的 cap_seq_1，说明响应不对应此请求
+                # syscall_cap_seq 会在 agent 标记正确的请求-响应顺序，cap_seq+1 可找到“后续”的一条流，
+                # 如果 request_flow 的 cap_seq_1+1 不匹配 response_flow 的 cap_seq_1，说明响应不对应此请求
                 equal = False
+
         if equal:  # 合并字段
             # FIXME 确认要合并哪些字段
 
@@ -1463,39 +1452,37 @@ def merge_flow(flows: list, flow: dict) -> bool:
             flows[i]['auto_service_1'] = flow['auto_service_1']
             for key in MERGE_KEYS:
                 if key in MERGE_KEY_REQUEST:
-                    if flow['type'] in [
-                            L7_FLOW_TYPE_REQUEST, L7_FLOW_TYPE_SESSION
-                    ]:
+                    if flow['req_tcp_seq']:  # flow has request
                         flows[i][key] = flow[key]
                 elif key in MERGE_KEY_RESPONSE:
-                    if flow['type'] in [
-                            L7_FLOW_TYPE_RESPONSE, L7_FLOW_TYPE_SESSION
-                    ]:
+                    if flow['resp_tcp_seq']:  # flow has response
                         flows[i][key] = flow[key]
                 else:
                     if not flows[i][key]:
                         flows[i][key] = flow[key]
-            if flow['type'] == L7_FLOW_TYPE_REQUEST:
-                if flow['start_time_us'] < flows[i]['start_time_us']:
+            if flow['req_tcp_seq']:  # flow is request or session
+                # flows[i] has no request
+                if not flows[i]['req_tcp_seq']:
                     flows[i]['start_time_us'] = flow['start_time_us']
-                else:
-                    if flows[i]['req_tcp_seq'] in [0, '']:
-                        flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
-                flows[i]['syscall_cap_seq_0'] = flow['syscall_cap_seq_0']
-            else:
-                if flow['end_time_us'] > flows[i]['end_time_us']:
+                    flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
+                    flows[i]['syscall_cap_seq_0'] = flow['syscall_cap_seq_0']
+            if flow['resp_tcp_seq']:  # flow is response or session
+                # case #1: flows[i] has no response
+                # case #2: for DNS sys span, a session (flows[i]) can be merged with a consequence response (flow)
+                # Note: We could omit the judgment condition for #1, since it is covered by the condition for #2.
+                #       However, we have kept all the conditions for the sake of clarity.
+                if not flows[i]['resp_tcp_seq'] or flows[i]['end_time_us'] < flow['end_time_us']:
                     flows[i]['end_time_us'] = flow['end_time_us']
-                    if flows[i]['resp_tcp_seq'] in [0, '']:
-                        flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
-                flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
-            if flow['type'] == L7_FLOW_TYPE_SESSION:
-                flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
-                flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+                    flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+                    flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
+
             # request response合并后type改为session
-            if flow['type'] + flows[i][
-                    'type'] == 1:  # L7_FLOW_TYPE_REQUEST(0) + L7_FLOW_TYPE_RESPONSE(1) = 1
-                flows[i]['type'] = 2
-            flows[i]['type'] = max(flows[i]['type'], flow['type'])
+            if flow['type'] + flows[i]['type'] == 1:
+                # L7_FLOW_TYPE_REQUEST(0) + L7_FLOW_TYPE_RESPONSE(1) = 1
+                flows[i]['type'] = L7_FLOW_TYPE_SESSION
+            else:
+                flows[i]['type'] = max(flows[i]['type'], flow['type'])
+
             return True
 
     return False
