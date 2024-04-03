@@ -1220,6 +1220,14 @@ class Networks:
         for i, _ in enumerate(self.flows):
             if i + 1 >= len(self.flows):
                 break
+            # 某些情况下，可能会有两个 SYS Span 拥有同样的 TCP Seq，此类情况一般是由于 eBPF 内核适配不完善导致。
+            # 例如：self.flows 数组中可能包含两个 c-p Span（拥有同样的 TCP Seq）、多个 net Span、一个 s-p Span，开头两个 c-p Span 实际上没有父子关系。
+            # 这里做一个简单的处理，当相邻两个 Span 都是 SYS Span 时不要按照 TCP Seq 来设置他们的 Parent 关系。
+            if self.flows[i]["tap_side"] in [
+                    TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
+                    ] and self.flows[i + 1]["tap_side"] in [
+                            TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
+                continue
             _set_parent(self.flows[i], self.flows[i + 1],
                         "trace mounted due to tcp_seq")
         self.flows.reverse()
@@ -2252,6 +2260,7 @@ def network_flow_sort(traces):
                 const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR
         ] or trace['tap'] != "虚拟网络":  # FIXME: 确认虚拟网络是否已改名，以及这里要兼容多版本、多语言
             response_duration_sort = True
+
         if trace['tap_side'] in [const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST]:
             local_rest_traces.append(trace)
         elif trace['tap_side'] in [
@@ -2260,6 +2269,7 @@ def network_flow_sort(traces):
             sys_traces.append(trace)
         else:
             sorted_traces.append(trace)
+
     # 对非虚拟网络的 flow 按响应时延排序（认为火焰图应是倒三角结构）
     if response_duration_sort:
         sorted_traces = sorted(
@@ -2273,6 +2283,7 @@ def network_flow_sort(traces):
             else:
                 sorted_traces.append(sys_trace)
         return sorted_traces
+
     # 对非 local/rest 的 span 按 tap_side rank 排序
     sorted_traces = sorted(
         sorted_traces + sys_traces,
