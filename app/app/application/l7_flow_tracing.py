@@ -988,10 +988,12 @@ class L7NetworkMeta:
             if type_df != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and span_id_df:
                 if span_id_df != self.span_id:
                     continue
-            # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃
-            # 当两个 Span 两侧的 TCP Seq 都有值时，他们必须同时相等
-            # 当某个 Span 只有一侧 TCP Seq 有值时，只要求一侧相等
-            if self.req_tcp_seq and self.resp_tcp_seq and req_tcp_seq_df and resp_tcp_seq_df:
+            # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，
+            # 否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃。
+            # 注意：两个 Span 都是会话时，要求两侧 TCP Seq 必须都相等，即使有一侧 TCP Seq 为 0，
+            #       例如 MySQL Close、RabbitMQ Connection.Blocked 等单向 SESSION 的场景。
+            #       否则，只需要一侧 TCP Seq 相等即可。
+            if self.type == type_df == L7_FLOW_TYPE_SESSION:
                 if abs(self.start_time_us -
                        start_time_us_df) <= self.network_delay_us and abs(
                            self.end_time_us -
@@ -1001,7 +1003,7 @@ class L7NetworkMeta:
                             self._id] = related_map[_id_df].get(
                                 self._id, set())
                         related_map[_id_df][self._id].add('network')
-            elif self.req_tcp_seq and req_tcp_seq_df:
+            elif self.type != L7_FLOW_TYPE_RESPONSE and type_df != L7_FLOW_TYPE_RESPONSE:
                 if abs(self.start_time_us -
                        start_time_us_df) <= self.network_delay_us:
                     if self.req_tcp_seq == req_tcp_seq_df:
@@ -1009,7 +1011,7 @@ class L7NetworkMeta:
                             self._id] = related_map[_id_df].get(
                                 self._id, set())
                         related_map[_id_df][self._id].add('network')
-            elif self.resp_tcp_seq and resp_tcp_seq_df:
+            elif self.type != L7_FLOW_TYPE_REQUEST and type_df != L7_FLOW_TYPE_REQUEST:
                 if abs(self.end_time_us -
                        end_time_us_df) <= self.network_delay_us:
                     if self.resp_tcp_seq == resp_tcp_seq_df:
@@ -1116,8 +1118,8 @@ class L7AppMeta:
 class Networks:
     def __init__(self):
         # 标识 tcp_seq 用于匹配 sys-span 与 net-span
-        self.req_tcp_seq = None
-        self.resp_tcp_seq = None
+        self.req_tcp_seq = None  # not None（包括 0）表示有效
+        self.resp_tcp_seq = None  # not None（包括 0）表示有效
         # 标识 span_id 用于匹配 app-span
         self.span_id = None
         # 标识是否已找到了 sys-span，如果有则不需要关联 app-span，优先设置为 sys-span 的 parent/child
@@ -1135,21 +1137,24 @@ class Networks:
         将 net-span 与 sys-span 按 tcp_seq 分组
         """
         if self.flows:
-            if self.req_tcp_seq and flow["req_tcp_seq"] and (
+            # 当 self.flows 和 flow 的某一侧 TCP Seq 同时有效时，这一侧的 TCP Seq 必须相等
+            # 注意：我们使用 flow['type'] 来判断 TCP Seq 的有效性。
+            #       这是因为存在一类单向的、type = SESSION 的调用日志，例如 MySQL Close、RabbitMQ Connection.Blocked，
+            #       由于他们永远不会有 Response（或 Request），Agent 会将它的 type 强制置为 SESSION。
+            #       当 type = SESSION 时，即使某个方向的 TCP Seq 为 0，也意味着它需要进行比较。
+            if self.req_tcp_seq is not None and flow['type'] != L7_FLOW_TYPE_RESPONSE and (
                     self.req_tcp_seq != flow["req_tcp_seq"]):
-                # 如果 req_tcp_seq 不相等，只允许【flow 是响应，且没有合并请求的 tcp_seq】这种场景，否则返回
                 return False
-            if self.resp_tcp_seq and flow["resp_tcp_seq"] and (
+            if self.resp_tcp_seq is not None and flow['type'] != L7_FLOW_TYPE_REQUEST and (
                     self.resp_tcp_seq != flow["resp_tcp_seq"]):
-                # 如果 resp_tcp_seq 不相等，只允许【flow 是请求，且没有合并响应的 tcp_seq】这种场景
                 return False
 
             # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
-                if not flow["req_tcp_seq"] or not self.req_tcp_seq: # no request in self.flows or flow
+                if not self.req_tcp_seq or not flow['req_tcp_seq']: # no request in self.flows or flow
                     if key in MERGE_KEY_REQUEST:  # skip keys only for requsest
                         continue
-                if not flow["resp_tcp_seq"] or not self.resp_tcp_seq:  # no response in self.flows or flow
+                if not self.resp_tcp_seq or not flow['resp_tcp_seq']:  # no response in self.flows or flow
                     if key in MERGE_KEY_RESPONSE:  # skip keys only for response
                         continue
                 if self.get(key) and flow.get(key):
@@ -1171,10 +1176,16 @@ class Networks:
                        self.end_time_us -
                        flow["end_time_us"]) > network_delay_us:
                 return False
-        if not self.req_tcp_seq and flow["req_tcp_seq"]:
+
+        # 为 req_tcp_seq 和 resp_tcp_seq 赋值
+        # 当 self.flows 的 req_tcp_seq/resp_tcp_seq 无效、且 flow 的 req_tcp_seq/resp_tcp_seq 有效时进行赋值
+        # 注意：我们使用 flow['type'] 来判断 TCP Seq 的有效性。
+        if self.req_tcp_seq is None and flow['type'] != L7_FLOW_TYPE_RESPONSE:
             self.req_tcp_seq = flow["req_tcp_seq"]
-        if not self.resp_tcp_seq and flow["resp_tcp_seq"]:
+        if self.resp_tcp_seq is None and flow['type'] != L7_FLOW_TYPE_REQUEST:
             self.resp_tcp_seq = flow["resp_tcp_seq"]
+
+        # 为其他字段赋值
         for key in MERGE_KEYS:
             if not self.get(key) and flow.get(key):
                 self.metas[key] = flow[key]
@@ -1460,13 +1471,13 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 else:
                     if not flows[i][key]:
                         flows[i][key] = flow[key]
-            if flow['req_tcp_seq']:  # flow is request or session
+            if flow['req_tcp_seq']:  # flow has request
                 # flows[i] has no request
                 if not flows[i]['req_tcp_seq']:
                     flows[i]['start_time_us'] = flow['start_time_us']
                     flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
                     flows[i]['syscall_cap_seq_0'] = flow['syscall_cap_seq_0']
-            if flow['resp_tcp_seq']:  # flow is response or session
+            if flow['resp_tcp_seq']:  # flow has response
                 # case #1: flows[i] has no response
                 # case #2: for DNS sys span, a session (flows[i]) can be merged with a consequence response (flow)
                 # Note: We could omit the judgment condition for #1, since it is covered by the condition for #2.
