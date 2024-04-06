@@ -1212,7 +1212,7 @@ class Networks:
             flow["networks"] = self
         return True
 
-    def get(self, key):
+    def get(self, key):  # XXX: 待删除，nan 在最源头进行处理
         if type(self.metas.get(key, None)) == float:
             if math.isnan(self.metas[key]):
                 return None
@@ -1379,130 +1379,80 @@ class Service:
 
 def merge_flow(flows: list, flow: dict) -> bool:
     """
-    只有一个请求和一个响应能合并，不能合并多个请求或多个响应；
     按如下策略合并：
-    按start_time递增的顺序从前向后扫描，每发现一个请求，都找一个它后面离他最近的响应。
-    例如：请求1、请求2、响应1、响应2
-    则请求1和响应1配对，请求2和响应2配对
+    按 start_time 递增的顺序从前向后扫描，每发现一个响应，都找一个它前面的请求。
+    合并逻辑暂不考虑 HTTP 1.1 中的 Pipeline 机制（发送一系列请求后依次接收响应）。
 
-    对 net-span: 合并未被 agent 合并的请求-响应
-    对 sys-span: 同上，外加会话+响应可能会合并为一个 span，原因：
-    系统Span的flow合并场景：
-    一次 DNS 请求会触发多次 DNS 应答，其中第一个请求和应答被聚合为一个类型为会话的 Flow，
-    后续的应答被聚合为类型为响应的 Flow，这些 Flow 需要最终被聚合为 Span，
-    合并条件为：会话的cap_seq_1 == 响应的cap_seq_1 + 1
-    System Span's flow merging scenario:
-    One DNS request triggers multiple DNS responses, where the first request and response are aggregated into a flow of type session.
-    Subsequent responses are aggregated into flows of type response, which need to be eventually aggregated into spans.
-    Merge condition: Session cap_seq_1 == Response cap_seq_1 + 1
+    DNS sys span 的特殊场景：
+    一次 DNS 请求会触发多次 DNS 应答的系统调用，因此这个 DNS 请求需要和后续多个 DNS 响应合并到一起。
+    合并条件为：请求的 cap_seq_0 或会话的 cap_seq_1 == 响应的cap_seq_1 - 1
     """
-    if flow['type'] == L7_FLOW_TYPE_SESSION \
-        and flow['tap_side'] not in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
+    # flows 是按照时间顺序从小到大插入的，因此合并过程中只可能出现 RESPONSE 合并到 REQUEST 或 SESSION 中的情况，
+    # 而且其中 RESPONSE 合并到 SESSION 的情况只出现在 is_dns_sys_span 的场景。
+    if flow['type'] != L7_FLOW_TYPE_RESPONSE:
         return False
-    # vtap_id, l7_protocol, flow_id, request_id
-    for i in range(len(flows)):
-        if flow['_id'] == flows[i]['_id']:
-            continue
-        if flow['flow_id'] != flows[i]['flow_id']:
-            continue
-        if flows[i]['tap_side'] not in [
-                TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ]:
-            if flows[i]['type'] == L7_FLOW_TYPE_SESSION:
-                continue
-            # 每条flow的_id最多只有一来一回两条
-            # 当 len(flows[i]['_id']) > 1 表明可能已被合并
-            if len(flows[i]['_id']) > 1 or flow["type"] == flows[i]["type"]:
-                continue
-        equal = True
-        request_flow = None
-        response_flow = None
-        if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
-            request_flow = flows[i]
-            response_flow = flow
-        elif flows[i]['type'] == L7_FLOW_TYPE_RESPONSE:
-            request_flow = flow
-            response_flow = flows[i]
-        else:  # for DNS sys span
-            if flow['type'] == L7_FLOW_TYPE_REQUEST:
-                request_flow = flow
-                response_flow = flows[i]
-            elif flow['type'] == L7_FLOW_TYPE_RESPONSE:
-                request_flow = flows[i]
-                response_flow = flow
-            else:
-                continue
-        if not request_flow or not response_flow:
-            continue
 
-        for key in [
-                'vtap_id', 'tap_port', 'tap_port_type', 'l7_protocol',
-                'request_id', 'tap_side'
-        ]:
-            if _get_df_key(request_flow, key) != _get_df_key(
-                    response_flow, key):
-                # 不合并1: 上述 key 不一致，说明不是一个会话内
-                equal = False
+    # for special case: DNS sys span
+    is_sys_span = flow['tap_side'] in [
+        TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
+    ]
+    is_dns_sys_span = flow['l7_protocol'] == L7_PROTOCOL_DNS and is_sys_span
+    no_request_id = not flow['request_id']
+
+    for i in range(len(flows) - 1, -1, -1):
+        # vtap_id + flow_id：唯一确定一条 L4 Flow
+        # request_id：用于并发请求的场景
+        important_field_not_match = False
+        for key in ['vtap_id', 'flow_id', 'request_id']:
+            if flow[key] != flows[i][key]:
+                important_field_not_match = True
                 break
-        if request_flow['start_time_us'] > response_flow['end_time_us']:
-            # 不合并2: 请求的时间比响应的时间大，说明响应不对应此请求
-            equal = False
-        if request_flow['tap_side'] in [
-                TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ] and request_flow['l7_protocol'] == L7_PROTOCOL_DNS:
-            # 应用span syscall_cap_seq判断合并
-            if request_flow['syscall_cap_seq_1'] + 1 != response_flow[
-                    'syscall_cap_seq_1'] or not (
-                        request_flow['type'] == L7_FLOW_TYPE_SESSION
-                        and response_flow['type'] == L7_FLOW_TYPE_RESPONSE):
-                # 不合并3: 对 sys-span 当协议为 dns 协议且当 request_flow 是会话时，response_flow 只合并响应
-                # syscall_cap_seq 会在 agent 标记正确的请求-响应顺序，cap_seq+1 可找到“后续”的一条流，
-                # 如果 request_flow 的 cap_seq_1+1 不匹配 response_flow 的 cap_seq_1，说明响应不对应此请求
-                equal = False
+        if important_field_not_match:
+            continue
 
-        if equal:  # 合并字段
-            # FIXME 确认要合并哪些字段
+        if flows[i]['l7_protocol'] != flow['l7_protocol']:
+            # 一个 L4 Flow 中的前序 flow 是异种协议时，停止合并，避免误匹配
+            # 例如：TLS 和应用协议、Service Mesh Sidecar 处理的多种协议
+            return False
 
-            flows[i]['_id'].extend(flow['_id'])
-            flows[i]['auto_instance_0'] = flow['auto_instance_0']
-            flows[i]['auto_instance_1'] = flow['auto_instance_1']
-            flows[i]['auto_service_0'] = flow['auto_service_0']
-            flows[i]['auto_service_1'] = flow['auto_service_1']
-            for key in MERGE_KEYS:
-                if key in MERGE_KEY_REQUEST:
-                    if flow['req_tcp_seq']:  # flow has request
-                        flows[i][key] = flow[key]
-                elif key in MERGE_KEY_RESPONSE:
-                    if flow['resp_tcp_seq']:  # flow has response
-                        flows[i][key] = flow[key]
+        if no_request_id:
+            if is_dns_sys_span:
+                # DNS sys span，要求 cap_seq 一定要连续才能合并
+                if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
+                    if flows[i]['syscall_cap_seq_0'] + 1 != flow[
+                            'syscall_cap_seq_1']:
+                        continue
                 else:
-                    if not flows[i][key]:
-                        flows[i][key] = flow[key]
-            if flow['req_tcp_seq']:  # flow has request
-                # flows[i] has no request
-                if not flows[i]['req_tcp_seq']:
-                    flows[i]['start_time_us'] = flow['start_time_us']
-                    flows[i]['req_tcp_seq'] = flow['req_tcp_seq']
-                    flows[i]['syscall_cap_seq_0'] = flow['syscall_cap_seq_0']
-            if flow['resp_tcp_seq']:  # flow has response
-                # case #1: flows[i] has no response
-                # case #2: for DNS sys span, a session (flows[i]) can be merged with a consequence response (flow)
-                # Note: We could omit the judgment condition for #1, since it is covered by the condition for #2.
-                #       However, we have kept all the conditions for the sake of clarity.
-                if not flows[i]['resp_tcp_seq'] or flows[i][
-                        'end_time_us'] < flow['end_time_us']:
-                    flows[i]['end_time_us'] = flow['end_time_us']
-                    flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
-                    flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
-
-            # request response合并后type改为session
-            if flow['type'] + flows[i]['type'] == 1:
-                # L7_FLOW_TYPE_REQUEST(0) + L7_FLOW_TYPE_RESPONSE(1) = 1
-                flows[i]['type'] = L7_FLOW_TYPE_SESSION
+                    if flows[i]['syscall_cap_seq_1'] + 1 != flow[
+                            'syscall_cap_seq_1']:
+                        continue
             else:
-                flows[i]['type'] = max(flows[i]['type'], flow['type'])
+                if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                    # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
+                    return False
+                if is_sys_span and (flows[i]['syscall_cap_seq_0'] + 1 !=
+                                    flow['syscall_cap_seq_1']):
+                    # 对于 sys span，要求 cap_seq 一定要连续
+                    continue
+        else:  # 并发请求
+            # request_id 匹配成功即可合并，下面主要排除一些（不可能发生）的异常场景
+            if not is_dns_sys_span and flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
+                return False
 
-            return True
+        # merge flow
+        for key in flow.keys():
+            if key == '_id':
+                flows[i][key].extend(flow[key])
+            elif not flows[i].get(key):
+                flows[i][key] = flow[key]
+        flows[i]['end_time_us'] = flow['end_time_us']
+        flows[i]['duration'] = flows[i]['end_time_us'] - flows[i]['start_time_us']
+        flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+        flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
+        if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
+            flows[i]['type'] = L7_FLOW_TYPE_SESSION
+        return True
 
     return False
 
@@ -1542,25 +1492,23 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         flow = {}
         for key in return_fields:
             key = key.strip("'")
+            value = dict_flows[key][index]
             if key == '_id':  # 流合并后会对应多条记录
-                flow[key] = [dict_flows[key][index]]
+                flow[key] = [value]
+            elif isinstance(value, float) and math.isnan(value):
+                # ClickHouse 中的 Nullable(int) 字段在无值时会返回为 dataframe 中的 float(nan)
+                # 在 Python 中 float(nan) != float(nan)，因此将其转为 None 方便比较
+                # request_id 就是一个 Nullable(uint64) 字段
+                flow[key] = None
             else:
-                flow[key] = dict_flows[key][index]
+                flow[key] = value
         if merge_flow(flows, flow):  # 合并单向Flow为会话
             continue
         # assert '_uid' not in flow
         flow['_uid'] = index
         flows.append(flow)
     flowcount = len(flows)
-    # FIXME: 此处暂时不清楚场景，先别去掉
-    for i, flow in enumerate(reversed(flows)):
-        # 单向的c-p和s-p进行第二轮merge
-        if len(flow['_id']) > 1 or flow['tap_side'] not in [
-                TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ]:
-            continue
-        if merge_flow(flows, flow):
-            del flows[flowcount - i - 1]
+
     network_flows = []
     app_flows = []
     syscall_flows = []
@@ -2129,6 +2077,8 @@ def _get_flow_dict(flow: DataFrame):
     flow_dict = {
         "_ids":
         list(map(str, flow["_id"])),
+        "type":
+        flow["type"],
         "related_ids":
         flow["related_ids"],
         "start_time_us":
@@ -2227,7 +2177,7 @@ def _get_flow_dict(flow: DataFrame):
     return flow_dict
 
 
-def _get_df_key(df: DataFrame, key: str):
+def _get_df_key(df: DataFrame, key: str):  # XXX: 待删除，nan 在最源头进行处理
     if type(df[key]) == float:
         if math.isnan(df[key]):
             return None
