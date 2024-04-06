@@ -7,7 +7,7 @@ from .l7_flow_tracing import (TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
                               TAP_SIDE_APP, RETURN_FIELDS, L7_FLOW_TYPE_OTEL)
 from .l7_flow_tracing import (L7FlowTracing, L7NetworkMeta, L7SyscallMeta,
                               L7XrequestMeta)
-from .l7_flow_tracing import sort_all_flows, format, set_all_relate
+from .l7_flow_tracing import sort_all_flows, format_final_result, set_all_relate
 from common import const
 from config import config
 from models.models import AppSpans
