@@ -4,13 +4,22 @@ class DisjointSet:
 
     def put(self, index: int, parent_index: int):
         if index >= len(self.disjoint_set):
-            self.disjoint_set.extend([None] *
+            self.disjoint_set.extend([-1] *
                                      (index + 1 - len(self.disjoint_set)))
         self.disjoint_set[index] = parent_index
 
-    def get(self, index: int) -> int:
-        if self.disjoint_set[index] == -1:
-            return index
-        root_index = self.get(self.disjoint_set[index])
+    def _get(self, index: int, start_index: int) -> int:
+        # use start_index avoid loop
+
+        if self.disjoint_set[index] in [-1, index, start_index]:
+            if self.disjoint_set[index] > 0:
+                return self.disjoint_set[index]
+            else:
+                return index
+
+        root_index = self._get(self.disjoint_set[index], start_index)
         self.disjoint_set[index] = root_index
         return root_index
+
+    def get(self, index: int) -> int:
+        return self._get(index, index)
