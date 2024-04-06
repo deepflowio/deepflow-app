@@ -1,6 +1,7 @@
 import json
 import aiohttp
 
+from collections import defaultdict
 from sanic.response import json as sanic_json
 from functools import wraps
 from schematics.exceptions import ModelConversionError, ModelValidationError
@@ -134,3 +135,7 @@ def app_exception(function):
         return sanic_json(response, content_type=const.JSON_TYPE, status=code)
 
     return wrapper
+
+
+def inner_defaultdict_set():
+    return defaultdict(set)
