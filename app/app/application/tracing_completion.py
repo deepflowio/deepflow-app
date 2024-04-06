@@ -4,7 +4,7 @@ from pandas import DataFrame
 
 from .l7_flow_tracing import (TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
                               TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP,
-                              TAP_SIDE_APP, RETURN_FIELDS, L7_FLOW_TYPE_OTEL)
+                              TAP_SIDE_APP, RETURN_FIELDS, L7_FLOW_SIGNAL_SOURCE_OTEL)
 from .l7_flow_tracing import (L7FlowTracing, L7NetworkMeta, L7SyscallMeta,
                               L7XrequestMeta)
 from .l7_flow_tracing import sort_all_flows, format_final_result, set_all_relate
@@ -33,7 +33,7 @@ class TracingCompletion(L7FlowTracing):
         self.has_attributes = self.args.get("has_attributes", 0)
         base_filter = ''
         if self.signal_sources == ['otel']:
-            base_filter += f"signal_source={L7_FLOW_TYPE_OTEL}"
+            base_filter += f"signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}"
             max_iteration = 1
         rst = await self.trace_l7_flow(time_filter=time_filter,
                                        base_filter=base_filter,
@@ -131,7 +131,7 @@ class TracingCompletion(L7FlowTracing):
                         ' OR '.join(new_trace_id_filters))
                     if self.signal_sources == ['otel']:
                         query_trace_filters.append(
-                            f"signal_source={L7_FLOW_TYPE_OTEL}")
+                            f"signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
                     query_simple_trace_id = True
@@ -159,7 +159,7 @@ class TracingCompletion(L7FlowTracing):
                         ' OR '.join(new_trace_id_filters))
                     if self.signal_sources == ['otel']:
                         query_trace_filters.append(
-                            f"signal_source={L7_FLOW_TYPE_OTEL}")
+                            f"signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}")
                     new_trace_id_flows = await self.query_flowmetas(
                         time_filter, ' AND '.join(query_trace_filters))
 

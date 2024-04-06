@@ -9,7 +9,7 @@ from data.querier_client import Querier
 from config import config
 from .base import Base
 from common import const
-from common.utils import curl_perform
+from common.utils import curl_perform, inner_defaultdict_set
 from common.const import HTTP_OK
 from common.disjoint_set import DisjointSet
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
@@ -24,7 +24,11 @@ NET_SPAN_TAP_SIDE_PRIORITY = {
 L7_FLOW_TYPE_REQUEST = 0
 L7_FLOW_TYPE_RESPONSE = 1
 L7_FLOW_TYPE_SESSION = 2
-L7_FLOW_TYPE_OTEL = 4
+
+L7_FLOW_SIGNAL_SOURCE_PACKET = 0
+L7_FLOW_SIGNAL_SOURCE_EBPF = 3
+L7_FLOW_SIGNAL_SOURCE_OTEL = 4
+
 TAP_SIDE_CLIENT_PROCESS = 'c-p'
 TAP_SIDE_SERVER_PROCESS = 's-p'
 TAP_SIDE_CLIENT_APP = 'c-app'
@@ -36,9 +40,16 @@ TAP_SIDE_SPAN_ID_RANKS = {
     TAP_SIDE_CLIENT_PROCESS: 3,
     TAP_SIDE_SERVER_PROCESS: 4,
 }
+
+L7_FLOW_RELATIONSHIP_TCP_SEQ = 'network'
+L7_FLOW_RELATIONSHIP_X_REQUEST_ID = 'xrequestid'
+L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID = 'syscall'
+L7_FLOW_RELATIONSHIP_SPAN_ID = 'app'
+
 RETURN_FIELDS = list(
     set([
         # 追踪Meta信息
+        "signal_source",
         "l7_protocol",
         "l7_protocol_str",
         "type",
@@ -136,9 +147,10 @@ MERGE_KEY_REQUEST = [
 MERGE_KEY_RESPONSE = ['http_proxy_client']
 DATABASE = "flow_log"
 
-L7_PROTOCOL_DNS = 120
 L7_PROTOCOL_HTTP2 = 21
 L7_PROTOCOL_GRPC = 41
+L7_PROTOCOL_MYSQL = 60
+L7_PROTOCOL_DNS = 120
 
 
 class L7FlowTracing(Base):
@@ -160,11 +172,10 @@ class L7FlowTracing(Base):
             return self.status, {}, self.failed_regions
         base_filter = f"_id={_id}"
         if self.signal_sources == ['otel']:
-            base_filter += f" and signal_source={L7_FLOW_TYPE_OTEL}"
+            base_filter += f" and signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}"
             max_iteration = 1
         rst = await self.trace_l7_flow(time_filter=time_filter,
                                        base_filter=base_filter,
-                                       return_fields=["related_ids"],
                                        max_iteration=max_iteration,
                                        network_delay_us=network_delay_us,
                                        ntp_delay_us=ntp_delay_us)
@@ -179,13 +190,279 @@ class L7FlowTracing(Base):
             return ""
         return data["_id"][0]
 
+    def concat_l7_flow_log_dataframe(self, dataframes: list):
+        return pd.concat(dataframes, join="outer",
+                         ignore_index=True).drop_duplicates(
+                             ["_id"]).reset_index(drop=True)
+
+    async def query_and_trace_flowmetas(
+            self,
+            time_filter: str,
+            base_filter: str,
+            max_iteration: int = config.max_iteration,
+            network_delay_us: int = config.network_delay_us,
+            ntp_delay_us: int = 10000) -> Tuple(list, list):
+        """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
+        参数说明：
+        time_filter: 查询的时间范围过滤条件，SQL表达式
+            当使用四元组进行追踪时，time_filter置为希望搜索的一段时间范围，
+            当使用五元组进行追踪时，time_filter置为五元组对应流日志的start_time前后一小段时间，以提升精度
+        base_filter: 查询的基础过滤条件，用于限定一个四元组或五元组
+        max_iteration: 使用Flowmeta信息搜索的次数，每次搜索可认为大约能够扩充一级调用关系
+        network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
+        """
+        only_query_app_spans = self.signal_sources == ['otel']
+
+        req_tcp_seqs = set()  # set(str(req_tcp_seq))
+        resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
+        syscall_trace_ids = set()  # set(str(syscall_trace_id))
+        x_request_ids = set()  # set(x_request_id)
+        allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
+        app_spans_from_apm = []
+
+        new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
+
+        # Q1: 先获取 _id 对应的数据
+        dataframe_flowmetas = await self.query_flowmetas(
+            time_filter, base_filter)
+        if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
+            return [], []
+        dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
+        l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
+
+        # 用于下一轮迭代，记录元信息
+        new_trace_infos = TraceInfo.construct_from_dataframe(
+            dataframe_flowmetas)
+
+        # remember the initial trace_id
+        initial_trace_id = self.args.get("trace_id")  # For Tempo API
+        if not initial_trace_id:  # For normal query using _id
+            initial_trace_id = dataframe_flowmetas.at[0, 'trace_id']
+        if initial_trace_id:
+            allowed_trace_ids.add(initial_trace_id)
+            new_trace_ids_in_prev_iteration.add(initial_trace_id)
+
+        # 进行迭代查询，上限为 config.spec.max_iteration
+        for i in range(max_iteration):
+            # 1. 使用 trace_id 查询
+            if new_trace_ids_in_prev_iteration:
+                # 1.1. Call external APM API
+                if config.call_apm_api_to_supplement_trace:
+                    new_app_spans_from_apm = []
+                    for trace_id in new_trace_ids_in_prev_iteration:
+                        app_spans = await self.query_apm_for_app_span_completion(
+                            trace_id)
+                        new_app_spans_from_apm.extend(app_spans)
+                    # 此处不需要将 new_app_spans_from_apm 合入 dataframe_flowmetas
+                    # app_flow 对迭代查询过程没有更多的帮助
+                    app_spans_from_apm.extend(new_app_spans_from_apm)
+
+                # 1.2. Query database by trace_id
+                new_trace_ids_str = set(
+                    [f"'{nti}'" for nti in new_trace_ids_in_prev_iteration])
+                query_trace_filters = [
+                    f"FastFilter(trace_id) IN ({','.join(new_trace_ids_str)})"
+                ]
+                if only_query_app_spans:
+                    query_trace_filters.append(
+                        f"signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}")
+                # Q3: <=> Q2 基于 trace_id 获取相关数据，第一层迭代
+                new_trace_id_flows = pd.DataFrame()
+                new_trace_id_flows = await self.query_flowmetas(
+                    time_filter, ' AND '.join(query_trace_filters))
+                if type(new_trace_id_flows
+                        ) == DataFrame and not new_trace_id_flows.empty:
+                    new_trace_id_flows.rename(columns={'_id_str': '_id'},
+                                              inplace=True)
+
+                    # remove duplicate or trace_id conflict flows
+                    new_trace_id_flow_delete_index = []
+                    deleted_trace_ids = set()  # XXX: for debug only
+                    for index in range(len(new_trace_id_flows.index)):
+                        # delete dup _id
+                        _id = new_trace_id_flows.at[index, '_id']
+                        if _id in l7_flow_ids:
+                            new_trace_id_flow_delete_index.append(index)
+                            continue
+                        # remove conflict trace_id data, since FastFilter(trace_id) has false positives
+                        # 若启用 #deepflow-server:/config.trace-id-with-index，仅会使用 trace_id 的哈希进行过滤，
+                        # 因此要去掉不在 new_trace_ids_in_prev_iteration 中的 trace_id，否则会有误报。
+                        new_trace_id = new_trace_id_flows.at[index, 'trace_id']
+                        if new_trace_id not in new_trace_ids_in_prev_iteration:
+                            new_trace_id_flow_delete_index.append(index)
+                            deleted_trace_ids.add(new_trace_id)
+                            continue
+                    if new_trace_id_flow_delete_index:
+                        new_trace_id_flows = new_trace_id_flows.drop(
+                            new_trace_id_flow_delete_index).reset_index(
+                                drop=True)
+                    if deleted_trace_ids:
+                        log.debug(f"删除的 trace_id 为：{deleted_trace_ids}")
+
+                    # update dataframe_flowmetas and l7_flow_ids
+                    dataframe_flowmetas = self.concat_l7_flow_log_dataframe(
+                        [dataframe_flowmetas, new_trace_id_flows])
+                    l7_flow_ids = set(dataframe_flowmetas['_id'])
+                    new_trace_infos += TraceInfo.construct_from_dataframe(
+                        new_trace_id_flows)
+
+                # remove used trace_ids
+                new_trace_ids_in_prev_iteration = set()
+
+            else:  # no new_trace_ids_in_prev_iteration
+                pass
+
+            if only_query_app_spans:  # no more iterations needed
+                break
+
+            # 2. Query by tcp_seq / syscall_trace_id / x_request_id
+            new_filters = []
+            # 2.1. new tcp_seqs
+            new_req_tcp_seqs = set()  # set(str(req_tcp_seq))
+            new_resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
+            for nti in new_trace_infos:
+                if nti.req_tcp_seq and nti.req_tcp_seq not in req_tcp_seqs:
+                    req_tcp_seqs.add(nti.req_tcp_seq)
+                    new_req_tcp_seqs.add(str(nti.req_tcp_seq))
+                if nti.resp_tcp_seq and nti.resp_tcp_seq not in resp_tcp_seqs:
+                    resp_tcp_seqs.add(nti.resp_tcp_seq)
+                    new_resp_tcp_seqs.add(str(nti.resp_tcp_seq))
+            # 2.1. C2: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
+            tcp_seq_filters = []
+            if new_req_tcp_seqs:
+                tcp_seq_filters.append(
+                    f"req_tcp_seq IN ({','.join(new_req_tcp_seqs)})")
+            if new_resp_tcp_seqs:
+                tcp_seq_filters.append(
+                    f"resp_tcp_seq IN ({','.join(new_resp_tcp_seqs)})")
+            if tcp_seq_filters:
+                new_filters.append(f"({' OR '.join(tcp_seq_filters)})")
+            # 2.2. new syscall_trace_ids
+            new_syscall_trace_ids = set()  # set(str(syscall_trace_id))
+            for nti in new_trace_infos:
+                if nti.syscall_trace_id_request and nti.syscall_trace_id_request not in syscall_trace_ids:
+                    syscall_trace_ids.add(nti.syscall_trace_id_request)
+                    new_syscall_trace_ids.add(str(
+                        nti.syscall_trace_id_request))
+                if nti.syscall_trace_id_response and nti.syscall_trace_id_response not in syscall_trace_ids:
+                    syscall_trace_ids.add(nti.syscall_trace_id_response)
+                    new_syscall_trace_ids.add(
+                        str(nti.syscall_trace_id_response))
+            # 2.2. C3: 以 syscall_trace_id_request & syscall_trace_id_response 作为条件查询关联 flow
+            syscall_trace_id_filters = []
+            if new_syscall_trace_ids:
+                syscall_trace_id_filters.append(
+                    f"syscall_trace_id_request IN ({','.join(new_syscall_trace_ids)})"
+                )
+                syscall_trace_id_filters.append(
+                    f"syscall_trace_id_response IN ({','.join(new_syscall_trace_ids)})"
+                )
+                new_filters.append(
+                    f"({' OR '.join(syscall_trace_id_filters)})")
+            # 2.3. new x_request_ids
+            new_x_request_ids = set()  # set(x_request_id)
+            for nti in new_trace_infos:
+                if nti.x_request_id_0 and nti.x_request_id_0 not in x_request_ids:
+                    x_request_ids.add(nti.x_request_id_0)
+                    new_x_request_ids.add(nti.x_request_id_0)
+                if nti.x_request_id_1 and nti.x_request_id_1 not in x_request_ids:
+                    x_request_ids.add(nti.x_request_id_1)
+                    new_x_request_ids.add(nti.x_request_id_1)
+            # 2.3. C3: 以 x_request_id_0 & x_request_id_1 作为条件查询关联 flow
+            x_request_id_filters = []
+            if new_x_request_ids:
+                new_x_request_ids_str = [
+                    f"'{xri}'" for xri in new_x_request_ids
+                ]
+                x_request_id_filters.append(
+                    f"x_request_id_0 IN ({','.join(new_x_request_ids_str)})")
+                x_request_id_filters.append(
+                    f"x_request_id_1 IN ({','.join(new_x_request_ids_str)})")
+                new_filters.append(f"({' OR '.join(x_request_id_filters)})")
+
+            if not new_filters:  # no more iterations needed
+                break
+
+            # Q4: 查询上述基于 C[1234] 构建出的条件，即与【第一层迭代】关联的所有 flow，构建【第二层迭代】做查询
+            new_flows = pd.DataFrame()
+            new_flows = await self.query_flowmetas(time_filter,
+                                                   ' OR '.join(new_filters))
+            if type(new_flows
+                    ) != DataFrame or new_flows.empty:  # no more new flows
+                break
+            new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
+
+            # remove duplicate or trace_id conflict flows
+            new_flow_remove_indices = []
+            deleted_trace_ids = set()  # XXX: for debug only
+            for index in new_flows.index:
+                # delete dup _id
+                _id = new_flows.at[index, '_id']
+                if _id in l7_flow_ids:
+                    new_flow_remove_indices.append(index)
+                    continue
+                # delete different trace id data
+                new_trace_id = new_flows.at[index, 'trace_id']
+                if new_trace_id and new_trace_id not in allowed_trace_ids:
+                    if not allowed_trace_ids or config.allow_multiple_trace_ids_in_tracing_result:
+                        allowed_trace_ids.add(new_trace_id)
+                        new_trace_ids_in_prev_iteration.add(new_trace_id)
+                    else:  # remove conflict trace_id data
+                        new_flow_remove_indices.append(index)
+                        deleted_trace_ids.add(new_trace_id)
+                        continue
+            if new_flow_remove_indices:
+                new_flows = new_flows.drop(
+                    new_flow_remove_indices).reset_index(drop=True)
+            if deleted_trace_ids:
+                log.debug(f"删除的 trace_id 为：{deleted_trace_ids}")
+
+            # check relationship, and remove unrelated data
+            # 先标记可能存在的关联关系，在 related_flow_id_map 中通过多次迭代标记上有关联的 _id
+            # 如果一个 _id 没有标记到 related_flow_id_map 中，flow 会被删掉，后续逻辑不再处理
+            related_flow_id_map = defaultdict(inner_defaultdict_set)
+            trace_infos = TraceInfo.construct_from_dataframe(
+                dataframe_flowmetas) + TraceInfo.construct_from_dataframe(
+                    new_flows)
+            set_all_relate(trace_infos,
+                           related_flow_id_map,
+                           network_delay_us,
+                           fast_check=True,
+                           skip_first_n_trace_infos=len(dataframe_flowmetas))
+            # 注意上面的 new_flow_remove_indices append 了多次，此处可能去掉的数据有:
+            # 通过 tcp_seq / syscall_trace_id / x_request_id / span_id 关联不上任何关系的数据。
+            new_flow_remove_indices = []
+            for index in range(len(new_flows.index)):
+                _id = new_flows.at[index, '_id']
+                # Delete unrelated data
+                if _id not in related_flow_id_map:
+                    new_flow_remove_indices.append(index)
+            if new_flow_remove_indices:
+                new_flows = new_flows.drop(
+                    new_flow_remove_indices).reset_index(drop=True)
+
+            if type(new_flows) == DataFrame and not new_flows.empty:
+                # update dataframe_flowmetas and l7_flow_ids
+                dataframe_flowmetas = self.concat_l7_flow_log_dataframe(
+                    [dataframe_flowmetas, new_flows])
+                l7_flow_ids = set(dataframe_flowmetas['_id'])
+
+                # reset new_trace_infos
+                new_trace_infos = TraceInfo.construct_from_dataframe(new_flows)
+
+            else:  # no new_flows, no more iterations needed
+                break
+
+            # end of `for i in range(max_iteration)`
+
+        return l7_flow_ids, app_spans_from_apm
+
     async def trace_l7_flow(self,
                             time_filter: str,
                             base_filter: str,
-                            return_fields: list,
                             max_iteration: int = config.max_iteration,
                             network_delay_us: int = config.network_delay_us,
-                            ntp_delay_us: int = 10000) -> list:
+                            ntp_delay_us: int = 10000) -> dict:
         """L7 FlowLog 追踪入口
 
         参数说明：
@@ -193,467 +470,41 @@ class L7FlowTracing(Base):
             当使用四元组进行追踪时，time_filter置为希望搜索的一段时间范围，
             当使用五元组进行追踪时，time_filter置为五元组对应流日志的start_time前后一小段时间，以提升精度
         base_filter: 查询的基础过滤条件，用于限定一个四元组或五元组
-        return_fields: 返回l7_flow_log的哪些字段
         max_iteration: 使用Flowmeta信息搜索的次数，每次搜索可认为大约能够扩充一级调用关系
         network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
         """
-        network_metas = set()
-        syscall_metas = set()
-        trace_ids = set()
-        app_metas = set()
-        x_request_metas = set()
-        l7_flow_ids = set()
-        xrequests = []
-        related_map = defaultdict(dict)  # 标记 span 之间的关系
-        third_app_spans_all = []
+        # 多次迭代，查询到所有相关的 l7_flow_log 摘要
+        l7_flow_ids, app_spans_from_apm = await self.query_and_trace_flowmetas(
+            time_filter, base_filter, max_iteration, network_delay_us,
+            ntp_delay_us)
 
-        # Q1: 先获取 _id 对应的数据
-        dataframe_flowmetas = await self.query_flowmetas(
-            time_filter, base_filter)
-        if type(dataframe_flowmetas) != DataFrame:
-            return {}
-        dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
-        # 先确定以此 _id 对应的行数据作为 root（不一定是 root span，仅标记为追踪起点）
-        related_map[dataframe_flowmetas['_id'][0]] = {
-            dataframe_flowmetas['_id'][0]: {'base'}
-        }
-        # tempo api
-        trace_id = self.args.get("trace_id") if self.args.get(
-            "trace_id") else ''
-        # 是否允许多个 trace_id 被串联到一个追踪中
-        allow_multiple_trace_ids_in_tracing_result = config.allow_multiple_trace_ids_in_tracing_result
-        # 调用外部 apm api 补充 trace 数据
-        call_apm_api_to_supplement_trace = config.call_apm_api_to_supplement_trace
-        multi_trace_ids = set()
-        query_simple_trace_id = False  # 真实语义为：在单 trace_id 场景下对同一个 trace_id 只需要查询一次，避免重复查询
-        # 进行迭代查询，上限为 config.spec.max_iteration
-        # 除了 max_iteration 之外，跳出条件为：
-        # 1. 通过 trace_id 与 tcp_seq / syscall_trace_id / x_request_id 无法关联到新的数据
-        # 2. 获取到新的数据之后 DataFrame 合并，当合并前后的数据量相等，说明没有新的数据，可直接跳出循环（避免循环里多次加载合并同一份数据）
-        for i in range(max_iteration):
-            if type(dataframe_flowmetas) != DataFrame:
-                break
-            filters = []
-            # 对 new_trace_id_flows 集合：
-            # 单 trace_id：移除 trace_id 不同的数据
-            # 多 trace_id：允许通过 tcp_seq/syscall/x_request_id 查询出的 trace_id，需要移除通过 FastFilter IN 逻辑查出的不在上述集合内的 trace_id
-            new_trace_id_flows = pd.DataFrame()
-            new_trace_id_filters = []
-            new_trace_ids = set()
-            # 主动注入的追踪信息
-            if not allow_multiple_trace_ids_in_tracing_result:
-                # 1. 基于 trace_id 获取所有相关数据
-                if trace_id:
-                    new_trace_ids.add(trace_id)
-                delete_index = []
-                deleted_trace_ids = set()
-                for index in range(len(dataframe_flowmetas.index)):
-                    flow_trace_id = dataframe_flowmetas['trace_id'][index]
-                    if flow_trace_id in [0, '']:
-                        continue
-                    # C1: 如果 Q1 初次查询的数据包含 trace_id，但与查询参数的 trace_id 不同，说明查出来的数据是被误关联的，需要清理掉
-                    if trace_id and trace_id != flow_trace_id:
-                        delete_index.append(index)
-                        deleted_trace_ids.add(flow_trace_id)
-                    # C1: 以 Q1 初次查询获取到的 trace_id 作为查询条件
-                    if not trace_id:
-                        trace_id = flow_trace_id
-                        new_trace_ids.add(trace_id)
-                if trace_id and not query_simple_trace_id:
-                    # 构建 trace_id 作为第二次查询迭代的条件
-                    # 注意 FastFilter 是一个特殊的 feature，见 #deepflow-server:/querier/engine/clickhouse/filter.go
-                    # 当启用了 #deepflow-server:/config.trace-id-with-index 时，FastFilter 会转换成对 trace_id_index 的查询
-                    new_trace_id_filters.append(
-                        f"FastFilter(trace_id)='{trace_id}'")
-                    # Trace id query separately
-                    query_trace_filters = []
-                    query_trace_filters.append(
-                        ' OR '.join(new_trace_id_filters))
-                    if self.signal_sources == ['otel']:
-                        query_trace_filters.append(
-                            f"signal_source={L7_FLOW_TYPE_OTEL}")
-                    # Q2: 获取 trace_id 相关数据，第一层迭代
-                    new_trace_id_flows = await self.query_flowmetas(
-                        time_filter, ' AND '.join(query_trace_filters))
-                    query_simple_trace_id = True
-                if delete_index:
-                    dataframe_flowmetas = dataframe_flowmetas.drop(
-                        delete_index).reset_index(drop=True)
-                    log.debug(f"删除的trace id为：{deleted_trace_ids}")
-                if call_apm_api_to_supplement_trace and trace_id not in multi_trace_ids:
-                    # 获取外部 apm 存储的 app-span
-                    get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
-                    app_spans_res, app_spans_code = await curl_perform(
-                        'get', get_third_app_span_url)
-                    if app_spans_code != HTTP_OK:
-                        log.warning(
-                            f"Get app spans failed! url: {get_third_app_span_url}"
-                        )
-                    app_spans = app_spans_res.get('data', {}).get('spans', [])
-                    self.complete_app_span(app_spans)
-                    third_app_spans_all.extend(app_spans)
-                    multi_trace_ids.add(trace_id)
-                    if app_spans:
-                        dataframe_flowmetas = pd.concat(
-                            [dataframe_flowmetas,
-                             pd.DataFrame(app_spans)],
-                            join="outer",
-                            ignore_index=True).drop_duplicates(
-                                ["_id"]).reset_index(drop=True)
-            else:
-                # 在允许多个 trace_id 的情况下，补充这一部分 trace_id 并尝试从外部 apm 补充 app-span
-                third_app_spans = []
-                for index in range(len(dataframe_flowmetas.index)):
-                    if dataframe_flowmetas['trace_id'][index] in [0, '']:
-                        continue
-                    apm_trace_id = dataframe_flowmetas['trace_id'][index]
-                    # 这里 dataframe_flowmetas 在多次迭代中可能会获取到与入参 flow 不相等的 trace_id，当允许多个 trace_id 时在此处合并到完整的 new_trace_ids 列表且不被移除
-                    new_trace_ids.add(
-                        (dataframe_flowmetas['_id'][index], apm_trace_id))
-                    if call_apm_api_to_supplement_trace and apm_trace_id not in multi_trace_ids:
-                        get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={apm_trace_id}"
-                        app_spans_res, app_spans_code = await curl_perform(
-                            'get', get_third_app_span_url)
-                        if app_spans_code != HTTP_OK:
-                            log.warning(
-                                f"Get app spans failed! url: {get_third_app_span_url}"
-                            )
-                        app_spans = app_spans_res.get('data',
-                                                      {}).get('spans', [])
-                        third_app_spans.extend(app_spans)
-                        multi_trace_ids.add(apm_trace_id)
-                self.complete_app_span(third_app_spans)
-                third_app_spans_all.extend(third_app_spans)
-                if third_app_spans:
-                    dataframe_flowmetas = pd.concat(
-                        [dataframe_flowmetas,
-                         pd.DataFrame(third_app_spans)],
-                        join="outer",
-                        ignore_index=True).drop_duplicates(
-                            ["_id"]).reset_index(drop=True)
-                # 以 `trace_ids` 记录所有被迭代过的 `trace_id`，在每次迭代中去掉上一次迭代的 trace_id，避免重复查询
-                new_trace_ids -= trace_ids
-                trace_ids |= new_trace_ids
-                if new_trace_ids:
-                    new_trace_ids_set = set(
-                        [f"'{nxrid[1]}'" for nxrid in new_trace_ids])
-                    # 如果启用了多 trace_id 与 #deepflow-server:/config.trace-id-with-index
-                    # 由于 trace_id_index 是 hash，所以这里的 IN 查询后可能获取到相同的 trace_id_index 但实际上是不同的 trace_id
-                    # 此时仍然要去掉非 new_trace_ids_set 中的 trace_id，避免查出不相关的数据
-                    new_trace_id_filters.append(
-                        f"FastFilter(trace_id) IN ({','.join(new_trace_ids_set)})"
-                    )
-                    # Trace id query separately
-                    query_trace_filters = []
-                    query_trace_filters.append(
-                        ' OR '.join(new_trace_id_filters))
-                    if self.signal_sources == ['otel']:
-                        query_trace_filters.append(
-                            f"signal_source={L7_FLOW_TYPE_OTEL}")
-                    # Q3: <=> Q2 基于 trace_id 获取相关数据，第一层迭代
-                    new_trace_id_flows = await self.query_flowmetas(
-                        time_filter, ' AND '.join(query_trace_filters))
-
-            if type(new_trace_id_flows) != DataFrame:
-                break
-            # Delete different trace id data
-            new_trace_id_flow_delete_index = []
-            deleted_trace_ids = set()
-            for index in range(len(new_trace_id_flows.index)):
-                flow_trace_id = new_trace_id_flows['trace_id'][index]
-                if flow_trace_id not in new_trace_ids:
-                    new_trace_id_flow_delete_index.append(index)
-                    deleted_trace_ids.add(flow_trace_id)
-            if new_trace_id_flow_delete_index:
-                new_trace_id_flows = new_trace_id_flows.drop(
-                    new_trace_id_flow_delete_index).reset_index(drop=True)
-            new_trace_id_flows.rename(columns={'_id_str': '_id'}, inplace=True)
-
-            # only otel data
-            new_flows = pd.DataFrame()
-            if self.signal_sources != ['otel']:
-                # 新的网络追踪信息
-                new_network_metas = set()
-                req_tcp_seqs = set()
-                resp_tcp_seqs = set()
-                # net-span 追踪: 基于 req_tcp_seq/resp_tcp_seq 获取所有关联的有意义的 flow
-                for index in range(len(dataframe_flowmetas.index)):
-                    req_tcp_seq = dataframe_flowmetas['req_tcp_seq'][index]
-                    resp_tcp_seq = dataframe_flowmetas['resp_tcp_seq'][index]
-                    tap_side = dataframe_flowmetas['tap_side'][index]
-                    if req_tcp_seq == 0 and resp_tcp_seq == 0:
-                        continue
-                    if tap_side not in [
-                            TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS
-                    ] and tap_side not in const.TAP_SIDE_RANKS:
-                        continue
-                    new_network_metas.add((
-                        dataframe_flowmetas['_id'][index],
-                        dataframe_flowmetas['type'][index],
-                        dataframe_flowmetas['req_tcp_seq'][index],
-                        dataframe_flowmetas['resp_tcp_seq'][index],
-                        dataframe_flowmetas['start_time_us'][index],
-                        dataframe_flowmetas['end_time_us'][index],
-                        dataframe_flowmetas['span_id'][index],
-                        dataframe_flowmetas['x_request_id_0'][index],
-                        dataframe_flowmetas['x_request_id_1'][index],
-                    ))
-                new_network_metas -= network_metas
-                network_metas |= new_network_metas
-                networks = [
-                    L7NetworkMeta(nnm, network_delay_us)
-                    for nnm in new_network_metas
-                ]
-                for nnm in new_network_metas:
-                    req_tcp_seq = nnm[2]
-                    resp_tcp_seq = nnm[3]
-                    if req_tcp_seq:
-                        req_tcp_seqs.add(str(req_tcp_seq))
-                    if resp_tcp_seq:
-                        resp_tcp_seqs.add(str(resp_tcp_seq))
-                # Network span relational query
-                # C2: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
-                network_filters = []
-                if req_tcp_seqs:
-                    network_filters.append(
-                        f"req_tcp_seq IN ({','.join(req_tcp_seqs)})")
-                if resp_tcp_seqs:
-                    network_filters.append(
-                        f"resp_tcp_seq IN ({','.join(resp_tcp_seqs)})")
-                if network_filters:
-                    filters.append(f"({' OR '.join(network_filters)})")
-
-                # 新的系统调用追踪信息
-                new_syscall_metas = set()
-                syscall_trace_id_requests = set()
-                syscall_trace_id_responses = set()
-                for index in range(len(dataframe_flowmetas.index)):
-                    syscall_trace_id_request = dataframe_flowmetas[
-                        'syscall_trace_id_request'][index]
-                    syscall_trace_id_response = dataframe_flowmetas[
-                        'syscall_trace_id_response'][index]
-                    if syscall_trace_id_request > 0 or syscall_trace_id_response > 0:
-                        new_syscall_metas.add((
-                            dataframe_flowmetas['_id'][index],
-                            dataframe_flowmetas['vtap_id'][index],
-                            dataframe_flowmetas['syscall_trace_id_request']
-                            [index],
-                            dataframe_flowmetas['syscall_trace_id_response']
-                            [index],
-                            dataframe_flowmetas['tap_side'][index],
-                            dataframe_flowmetas['start_time_us'][index],
-                            dataframe_flowmetas['end_time_us'][index],
-                        ))
-                new_syscall_metas -= syscall_metas
-                syscall_metas |= new_syscall_metas
-                syscalls = [L7SyscallMeta(nsm) for nsm in new_syscall_metas]
-                for nsm in new_syscall_metas:
-                    syscall_trace_id_request = nsm[2]
-                    syscall_trace_id_response = nsm[3]
-                    if syscall_trace_id_request > 0:
-                        syscall_trace_id_requests.add(
-                            str(syscall_trace_id_request))
-                    if syscall_trace_id_response > 0:
-                        syscall_trace_id_responses.add(
-                            str(syscall_trace_id_response))
-                # System span relational query
-                # C3: 以 syscall_trace_id_request & syscall_trace_id_response 作为条件查询关联 flow
-                syscall_filters = []
-                if syscall_trace_id_requests or syscall_trace_id_responses:
-                    syscall_filters.append(
-                        f"syscall_trace_id_request IN ({','.join(list(syscall_trace_id_requests) + list(syscall_trace_id_responses))})"
-                    )
-                    syscall_filters.append(
-                        f"syscall_trace_id_response IN ({','.join(list(syscall_trace_id_requests) + list(syscall_trace_id_responses))})"
-                    )
-                if syscall_filters:
-                    filters.append(f"({' OR '.join(syscall_filters)})")
-
-                new_x_request_metas = set()
-                x_request_id_0s = set()
-                x_request_id_1s = set()
-                for index in range(len(dataframe_flowmetas.index)):
-                    x_request_id_0 = dataframe_flowmetas['x_request_id_0'][
-                        index]
-                    x_request_id_1 = dataframe_flowmetas['x_request_id_1'][
-                        index]
-                    if x_request_id_0 in [0, ''] and x_request_id_1 in [0, '']:
-                        continue
-                    new_x_request_metas.add(
-                        (dataframe_flowmetas['_id'][index],
-                         dataframe_flowmetas['x_request_id_0'][index],
-                         dataframe_flowmetas['x_request_id_1'][index]))
-                new_x_request_metas -= x_request_metas
-                x_request_metas |= new_x_request_metas
-                xrequests = [
-                    L7XrequestMeta(nxr) for nxr in new_x_request_metas
-                ]
-                for nxr in new_x_request_metas:
-                    x_request_id_0 = nxr[1]
-                    x_request_id_1 = nxr[2]
-                    if x_request_id_0:
-                        x_request_id_0s.add(f"'{x_request_id_0}'")
-                    if x_request_id_1:
-                        x_request_id_1s.add(f"'{x_request_id_1}'")
-
-                # x_request_id related query
-                # 根据 x_request_id 构建查询条件关联 flow
-                # 当启用了 x_request_id 时，可关联穿越 nginx 类网关的 flow
-                # C4: 以 x_request_id_0 & x_request_id_1 作为条件查询关联 flow
-                x_request_filters = []
-                if x_request_id_0s:
-                    x_request_filters.append(
-                        f"x_request_id_1 IN ({','.join(x_request_id_0s)})")
-                if x_request_id_1s:
-                    x_request_filters.append(
-                        f"x_request_id_0 IN ({','.join(x_request_id_1s)})")
-                if x_request_filters:
-                    filters.append(f"({' OR '.join(x_request_filters)})")
-
-                new_flows = pd.DataFrame()
-                if filters:
-                    # Non-trace_id relational queries
-                    # Q4: 查询上述基于 C[1234] 构建出的条件，即与【第一层迭代】关联的所有 flow，构建【第二层迭代】做查询
-                    new_flows = await self.query_flowmetas(
-                        time_filter, ' OR '.join(filters))
-                    if type(new_flows) != DataFrame:
-                        break
-                    new_flow_delete_index = []
-                    deleted_trace_ids = set()
-                    old_ids = set(dataframe_flowmetas['_id'])
-                    id_to_related_tag = dict()
-                    for index in new_flows.index:
-                        _id = new_flows.at[index, '_id_str']
-                        vtap_id = new_flows.at[index, 'vtap_id']
-                        req_tcp_seq = new_flows.at[index, 'req_tcp_seq']
-                        resp_tcp_seq = new_flows.at[index, 'resp_tcp_seq']
-                        tap_side = new_flows.at[index, 'tap_side']
-                        _type = new_flows.at[index, 'type']
-                        start_time_us = new_flows.at[index, 'start_time_us']
-                        end_time_us = new_flows.at[index, 'end_time_us']
-                        span_id = new_flows.at[index, 'span_id']
-                        parent_span_id = new_flows.at[index, 'parent_span_id']
-                        x_request_id_0 = new_flows.at[index, 'x_request_id_0']
-                        x_request_id_1 = new_flows.at[index, 'x_request_id_1']
-                        syscall_trace_id_request = new_flows.at[
-                            index, 'syscall_trace_id_request']
-                        syscall_trace_id_response = new_flows.at[
-                            index, 'syscall_trace_id_response']
-                        flow_trace_id = new_flows.at[index, 'trace_id']
-
-                        id_to_related_tag[_id] = {
-                            '_id': _id,
-                            'vtap_id': vtap_id,
-                            'req_tcp_seq': req_tcp_seq,
-                            'resp_tcp_seq': resp_tcp_seq,
-                            'tap_side': tap_side,
-                            'type': _type,
-                            'start_time_us': start_time_us,
-                            'end_time_us': end_time_us,
-                            'span_id': span_id,
-                            'parent_span_id': parent_span_id,
-                            'x_request_id_0': x_request_id_0,
-                            'x_request_id_1': x_request_id_1,
-                            'syscall_trace_id_request':
-                            syscall_trace_id_request,
-                            'syscall_trace_id_response':
-                            syscall_trace_id_response
-                        }
-                        # Delete different trace id data
-                        if not allow_multiple_trace_ids_in_tracing_result:
-                            if trace_id and flow_trace_id and trace_id != flow_trace_id:
-                                new_flow_delete_index.append(index)
-                                deleted_trace_ids.add(flow_trace_id)
-                                continue
-                        # delete dup _id for performance
-                        if _id in old_ids:
-                            new_flow_delete_index.append(index)
-                    if new_flow_delete_index:
-                        new_flows = new_flows.drop(
-                            new_flow_delete_index).reset_index(drop=True)
-                    if deleted_trace_ids:
-                        log.debug(f"删除的trace id为：{deleted_trace_ids}")
-                    new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
-
-                    # 先标记可能存在的关联关系，在 new_related_map 中通过多次迭代标记上有关联的 _id
-                    # 如果一个 _id 没有标记到 new_related_map 中，flow 会被删掉，后续逻辑不再处理
-                    new_related_map = defaultdict(dict)
-                    new_flow_ids = set(new_flows['_id'])
-                    if xrequests:
-                        for x_request in xrequests:
-                            x_request.set_relate(new_flow_ids, new_related_map,
-                                                 id_to_related_tag)
-                    if syscalls:
-                        for syscall in syscalls:
-                            syscall.set_relate(new_flow_ids, new_related_map,
-                                               id_to_related_tag)
-                    if networks:
-                        for network in networks:
-                            network.set_relate(new_flow_ids, new_related_map,
-                                               id_to_related_tag)
-
-                    # 注意上面的 new_flow_delete_index append 了多次，此处可能去掉的数据有:
-                    # 1. _id 已经存在的重复数据
-                    # 2. 通过 trace_id 关联，在不允许多 trace_id 的情况下查出了非本次追踪的 trace_id 的数据
-                    # 3. 通过 tcp_seq / syscall_trace_id / x_request_id 关联不上任何关系的数据
-                    # 4. 虽然关联上了，但是 network_delay_us 没有落在范围内被丢弃的数据
-                    # 此处为第一次筛选，在后面的关联合并排序中仍然会去掉无关联数据
-                    new_flow_delete_index = []
-                    for index in range(len(new_flows.index)):
-                        _id = new_flows['_id'][index]
-                        # Delete unrelated data
-                        if _id not in new_related_map:
-                            new_flow_delete_index.append(index)
-                    if new_flow_delete_index:
-                        new_flows = new_flows.drop(
-                            new_flow_delete_index).reset_index(drop=True)
-
-            # Merge all flows and check if any new flows are generated
-            old_flows_length = len(dataframe_flowmetas)
-            dataframe_flowmetas = pd.concat(
-                [dataframe_flowmetas, new_flows, new_trace_id_flows],
-                join="outer",
-                ignore_index=True).drop_duplicates(["_id"
-                                                    ]).reset_index(drop=True)
-            # L7 Flow ID信息
-            l7_flow_ids |= set(dataframe_flowmetas['_id'])
-            new_flows_length = len(dataframe_flowmetas)
-            if old_flows_length == new_flows_length:
-                break
-        # end of max_iteration loop
-        # 做 span 追溯，标记所有 span 是因为什么信息而被追踪关联
-        set_all_relate(dataframe_flowmetas, related_map, network_delay_us)
-        if not l7_flow_ids:
-            return {}
-        # 获取追踪到的所有应用流日志
+        # 查询会获取这些 _id 对应的完整 l7_flow_log 信息。
         # 通过 RETURN_FIELDS 确定需要返回哪些字段（精简有用的返回信息）
-        return_fields += RETURN_FIELDS
-        flow_fields = list(RETURN_FIELDS)
+        return_fields = RETURN_FIELDS
         if self.has_attributes:
             return_fields.append("attribute")
-            flow_fields.append("attribute")
-        # Q5: 此处查询会获取这些 _id 对应的完整 Application Metadata
         l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
-                                              flow_fields)
-        if type(l7_flows) != DataFrame:
+                                              return_fields)
+        if type(l7_flows) != DataFrame or l7_flows.empty:
+            # 几乎不可能发生没有 l7_flows 但有 app_spans_from_apm 的情况
+            # 实际上几乎不可能发生没有 l7_flows 的情况，因为至少包含初始 flow
             return {}
         l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
-        l7_flows = pd.concat(
-            [l7_flows, pd.DataFrame(third_app_spans_all)],
-            join="outer",
-            ignore_index=True).drop_duplicates(["_id"]).reset_index(drop=True)
-        l7_flows.insert(0, "related_ids", "")
+
+        # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
+        l7_flows = self.concat_l7_flow_log_dataframe(
+            [l7_flows, pd.DataFrame(app_spans_from_apm)])
+
+        # 将 null 转化为 None
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
-        # 对查出来的所有调用日志，通过之前构建的 related_map 标记所有有关联关系的 _id
-        for index in l7_flows.index:
-            l7_flows.at[index, 'related_ids'] = related_map[l7_flows.at[index,
-                                                                        '_id']]
-        # 对所有应用流日志排序
-        # 这里实际上包含几个动作：排序+合并+分组+设置父子关系
-        l7_flows_merged, app_flows, networks = sort_all_flows(
+
+        # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
+        l7_flows_merged, app_flows, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
+
         return format_final_result(l7_flows_merged, networks, app_flows,
-                                   self.args.get('_id'), network_delay_us)
+                                   self.args.get('_id'), network_delay_us,
+                                   flow_index_to_id0, related_flow_index_map)
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
@@ -691,9 +542,10 @@ class L7FlowTracing(Base):
             x_request_id_1：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
         """
         sql = """SELECT
-        type, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us, toUnixTimestamp64Micro(end_time) AS end_time_us,
-        vtap_id, syscall_trace_id_request, syscall_trace_id_response, span_id, parent_span_id, l7_protocol,
-        trace_id, x_request_id_0, x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
+        type, signal_source, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us,
+        toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, syscall_trace_id_request,
+        syscall_trace_id_response, span_id, parent_span_id, l7_protocol, trace_id, x_request_id_0,
+        x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
         FROM `l7_flow_log`
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -706,6 +558,16 @@ class L7FlowTracing(Base):
             status_discription += " Hit Select Limit"
         self.status.append(status_discription, response)
         return response.get("data", [])
+
+    async def query_apm_for_app_span_completion(self, trace_id: str) -> list:
+        get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
+        app_spans_res, app_spans_code = await curl_perform(
+            'get', get_third_app_span_url)
+        if app_spans_code != HTTP_OK:
+            log.warning(f"Get app spans failed! url: {get_third_app_span_url}")
+        app_spans = app_spans_res.get('data', {}).get('spans', [])
+        self.complete_app_span(app_spans)
+        return app_spans
 
     async def query_all_flows(self, time_filter: str, l7_flow_ids: list,
                               return_fields: list):
@@ -742,182 +604,210 @@ class L7FlowTracing(Base):
         return response["data"]
 
 
-def set_all_relate(dataframe_flowmetas, related_map, network_delay_us):
+def set_all_relate(trace_infos: list,
+                   related_map: defaultdict(inner_defaultdict_set),
+                   network_delay_us: int,
+                   fast_check: bool = False,
+                   skip_first_n_trace_infos: int = 0):
     """
     用于 span 追溯关联
     先构建 tcp_seq/syscall_trace_id/x_request_id 对 _id 的反向索引，再对每一种类型的关联通过各自的 `set_relate` 判断是否有关联
+    fast_check = True: 为每个 trace_infos 中的 trace_info 找到一个关联即可，用于初期剪枝
+    skip_first_n_trace_infos > 0：跳过上一轮迭代及之前搜索到的 trace_infos，因为他们肯定不会在新一轮被剪枝
     """
-    new_network_metas = set()
-    new_syscall_metas = set()
-    new_x_request_metas = set()
-    new_app_metas = set()
-    req_tcp_seq_to_ids = defaultdict(set)
-    resp_tcp_seq_to_ids = defaultdict(set)
-    syscall_req_to_ids = defaultdict(set)
-    syscall_resp_to_ids = defaultdict(set)
-    span_id_to_ids = defaultdict(set)
-    parent_span_id_to_ids = defaultdict(set)
-    x_req_0_to_ids = defaultdict(set)
-    x_req_1_to_ids = defaultdict(set)
-    id_to_related_tag = defaultdict(dict)
+    # tcp_seq => set(TraceInfo)
+    tcp_seq_to_trace_infos = defaultdict(set)
+    # span_id_id => set(TraceInfo)
+    span_id_to_trace_infos = defaultdict(set)
+    # x_request_id => set(TraceInfo)
+    x_request_id_to_trace_infos = defaultdict(set)
+    # syscall_trace_id => set(TraceInfo)
+    syscall_trace_id_to_trace_infos = defaultdict(set)
 
-    # 先提取出所有有意义的 tcp_seq/syscall_trace_id/x_request_id/span_id，构建一个对 _id 的反向索引
-    for index in dataframe_flowmetas.index:
-        req_tcp_seq = dataframe_flowmetas.at[index, 'req_tcp_seq']
-        resp_tcp_seq = dataframe_flowmetas.at[index, 'resp_tcp_seq']
-        tap_side = dataframe_flowmetas.at[index, 'tap_side']
-        _id = dataframe_flowmetas.at[index, '_id']
-        vtap_id = dataframe_flowmetas.at[index, 'vtap_id']
-        _type = dataframe_flowmetas.at[index, 'type']
-        start_time_us = dataframe_flowmetas.at[index, 'start_time_us']
-        end_time_us = dataframe_flowmetas.at[index, 'end_time_us']
-        span_id = dataframe_flowmetas.at[index, 'span_id']
-        parent_span_id = dataframe_flowmetas.at[index, 'parent_span_id']
-        x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
-        x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
-        syscall_trace_id_request = dataframe_flowmetas.at[
-            index, 'syscall_trace_id_request']
-        syscall_trace_id_response = dataframe_flowmetas.at[
-            index, 'syscall_trace_id_response']
-        flow_trace_id = dataframe_flowmetas.at[index, 'trace_id']
+    for ti in trace_infos:
+        # tcp_seq
+        if ti.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            if ti.type != L7_FLOW_TYPE_RESPONSE:  # has req_tcp_seq
+                tcp_seq_to_trace_infos[ti.req_tcp_seq].add(ti)
+            if ti.type != L7_FLOW_TYPE_REQUEST:  # has resp_tcp_seq
+                tcp_seq_to_trace_infos[ti.resp_tcp_seq].add(ti)
+        # span_id
+        if ti.span_id:
+            span_id_to_trace_infos[ti.span_id].add(ti)
+        if ti.parent_span_id:
+            span_id_to_trace_infos[ti.parent_span_id].add(ti)
+        # x_request_id
+        if ti.x_request_id_0:
+            x_request_id_to_trace_infos[ti.x_request_id_0].add(ti)
+        if ti.x_request_id_1:
+            x_request_id_to_trace_infos[ti.x_request_id_1].add(ti)
+        # syscall_trace_id
+        if ti.syscall_trace_id_request:
+            syscall_trace_id_to_trace_infos[ti.syscall_trace_id_request].add(
+                ti)
+        if ti.syscall_trace_id_response:
+            syscall_trace_id_to_trace_infos[ti.syscall_trace_id_response].add(
+                ti)
 
-        id_to_related_tag[_id] = {
-            '_id': _id,
-            'vtap_id': vtap_id,
-            'req_tcp_seq': req_tcp_seq,
-            'resp_tcp_seq': resp_tcp_seq,
-            'tap_side': tap_side,
-            'type': _type,
-            'start_time_us': start_time_us,
-            'end_time_us': end_time_us,
-            'span_id': span_id,
-            'parent_span_id': parent_span_id,
-            'x_request_id_0': x_request_id_0,
-            'x_request_id_1': x_request_id_1,
-            'syscall_trace_id_request': syscall_trace_id_request,
-            'syscall_trace_id_response': syscall_trace_id_response
-        }
+    for ti in trace_infos[skip_first_n_trace_infos:]:
+        # tcp_seq
+        if ti.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            # tcp_seq 是否有效（是否需要参与比较）取决于 flow.type，例如：
+            # 当 type = SESSION 时即使某一侧 tcp_seq 为 0 也需要比较。
+            # 因此当 type 决定了某一侧没有内容时，将 tcp_seq 赋值为 None，
+            # 使得在 tcp_seq_to_trace_infos 中无法查询到结果。
+            req_tcp_seq = ti.req_tcp_seq if ti.type != L7_FLOW_TYPE_RESPONSE else None
+            resp_tcp_seq = ti.resp_tcp_seq if ti.type != L7_FLOW_TYPE_REQUEST else None
+            related_trace_infos = tcp_seq_to_trace_infos.get(
+                req_tcp_seq, set()) | tcp_seq_to_trace_infos.get(
+                    resp_tcp_seq, set())
+            find_related = L7NetworkMeta.set_relate(ti, related_trace_infos,
+                                                    related_map,
+                                                    network_delay_us,
+                                                    fast_check)
+            if fast_check and find_related: continue
+        # span_id
+        related_trace_infos = span_id_to_trace_infos.get(
+            ti.span_id, set()) | span_id_to_trace_infos.get(
+                ti.parent_span_id, set())
+        find_related = L7AppMeta.set_relate(ti, related_trace_infos,
+                                            related_map, fast_check)
+        if fast_check and find_related: continue
+        # x_request_id
+        related_trace_infos = x_request_id_to_trace_infos.get(
+            ti.x_request_id_0, set()) | x_request_id_to_trace_infos.get(
+                ti.x_request_id_1, set())
+        find_related = L7XrequestMeta.set_relate(ti, related_trace_infos,
+                                                 related_map, fast_check)
+        if fast_check and find_related: continue
+        # syscall_trace_id
+        related_trace_infos = syscall_trace_id_to_trace_infos.get(
+            ti.syscall_trace_id_request,
+            set()) | syscall_trace_id_to_trace_infos.get(
+                ti.syscall_trace_id_response, set())
+        find_related = L7SyscallMeta.set_relate(ti, related_trace_infos,
+                                                related_map, fast_check)
+        if fast_check and find_related: continue
 
-        if req_tcp_seq == 0 and resp_tcp_seq == 0:
-            continue
-        if tap_side not in [TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS
-                            ] and tap_side not in const.TAP_SIDE_RANKS:
-            continue
-        new_network_metas.add((_id, _type, req_tcp_seq, resp_tcp_seq,
-                               start_time_us, end_time_us, span_id))
 
-        if req_tcp_seq:
-            req_tcp_seq_to_ids[req_tcp_seq].add(_id)
-        if resp_tcp_seq:
-            resp_tcp_seq_to_ids[resp_tcp_seq].add(_id)
+class TraceInfo:
+    def __init__(self, _id, signal_source, vtap_id, _type, start_time_us,
+                 end_time_us, req_tcp_seq, resp_tcp_seq, trace_id, span_id,
+                 parent_span_id, x_request_id_0, x_request_id_1,
+                 syscall_trace_id_request, syscall_trace_id_response,
+                 origin_flow_list, index_in_origin_flow_list):
+        self._id = _id
+        self.signal_source = signal_source
+        self.vtap_id = vtap_id
+        self.type = _type
+        # time
+        self.start_time_us = start_time_us
+        self.end_time_us = end_time_us
+        # tcp_seq
+        self.req_tcp_seq = req_tcp_seq
+        self.resp_tcp_seq = resp_tcp_seq
+        # span_id
+        self.trace_id = trace_id
+        self.span_id = span_id
+        self.parent_span_id = parent_span_id
+        # x_request_id
+        self.x_request_id_0 = x_request_id_0
+        self.x_request_id_1 = x_request_id_1
+        # syscall_trace_id
+        self.syscall_trace_id_request = syscall_trace_id_request
+        self.syscall_trace_id_response = syscall_trace_id_response
+        # origin_flow_list
+        self.origin_flow_list = origin_flow_list
+        self.index_in_origin_flow_list = index_in_origin_flow_list
 
-    for index in dataframe_flowmetas.index:
-        syscall_trace_id_request = dataframe_flowmetas.at[
-            index, 'syscall_trace_id_request']
-        syscall_trace_id_response = dataframe_flowmetas.at[
-            index, 'syscall_trace_id_response']
-        _id = dataframe_flowmetas.at[index, '_id']
-        vtap_id = dataframe_flowmetas.at[index, 'vtap_id']
-        if syscall_trace_id_request > 0 or syscall_trace_id_response > 0:
-            new_syscall_metas.add((_id, vtap_id, syscall_trace_id_request,
-                                   syscall_trace_id_response))
-            if syscall_trace_id_request:
-                syscall_req_to_ids[syscall_trace_id_request].add(_id)
-            if syscall_trace_id_response:
-                syscall_resp_to_ids[syscall_trace_id_response].add(_id)
+    def __eq__(self, rhs):
+        return self._id == rhs._id
 
-    for index in dataframe_flowmetas.index:
-        x_request_id_0 = dataframe_flowmetas.at[index, 'x_request_id_0']
-        x_request_id_1 = dataframe_flowmetas.at[index, 'x_request_id_1']
-        _id = dataframe_flowmetas.at[index, '_id']
-        if x_request_id_0 in [0, ''] and x_request_id_1 in [0, '']:
-            continue
-        new_x_request_metas.add((_id, x_request_id_0, x_request_id_1))
-        if x_request_id_0:
-            x_req_0_to_ids[x_request_id_0].add(_id)
-        if x_request_id_1:
-            x_req_1_to_ids[x_request_id_1].add(_id)
-    for index in dataframe_flowmetas.index:
-        span_id = dataframe_flowmetas.at[index, 'span_id']
-        parent_span_id = dataframe_flowmetas.at[index, 'parent_span_id']
-        tap_side = dataframe_flowmetas.at[index, 'tap_side']
-        _id = dataframe_flowmetas.at[index, '_id']
-        if tap_side not in [
-                TAP_SIDE_CLIENT_PROCESS, TAP_SIDE_SERVER_PROCESS,
-                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
-        ] or not span_id:
-            continue
-        if span_id or parent_span_id:
-            new_app_metas.add((_id, tap_side, span_id, parent_span_id))
-            if span_id:
-                span_id_to_ids[span_id].add(_id)
-            if parent_span_id:
-                parent_span_id_to_ids[parent_span_id].add(_id)
-    networks = [
-        L7NetworkMeta(nnm, network_delay_us) for nnm in new_network_metas
-    ]
-    syscalls = [L7SyscallMeta(nsm) for nsm in new_syscall_metas]
-    xrequests = [L7XrequestMeta(nxr) for nxr in new_x_request_metas]
-    apps = [L7AppMeta(nam) for nam in new_app_metas]
+    def __hash__(self):
+        return hash(self._id)
 
-    # 对每一种关联类型，标记 flow 两两之间是通过什么关系关联上的，打上标记
-    for x_request in xrequests:
-        if x_request.x_request_id_0:
-            x_req_ids = x_req_1_to_ids[x_request.x_request_id_0]
-            x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
-        if x_request.x_request_id_1:
-            x_req_ids = x_req_0_to_ids[x_request.x_request_id_1]
-            x_request.set_relate(x_req_ids, related_map, id_to_related_tag)
+    def get_extra_field(self, key):
+        if isinstance(self.origin_flow_list, DataFrame):
+            if key in self.origin_flow_list.columns:
+                return self.origin_flow_list.at[self.index_in_origin_flow_list,
+                                                key]
+        elif isinstance(self.origin_flow_list, list):
+            return self.origin_flow_list[self.index_in_origin_flow_list].get(
+                key)
+        return None
 
-    for syscall in syscalls:
-        if syscall.syscall_trace_id_request:
-            syscall_req_ids = syscall_req_to_ids[
-                syscall.syscall_trace_id_request]
-            syscall_resp_ids = syscall_resp_to_ids[
-                syscall.syscall_trace_id_request]
-            syscall_ids = syscall_req_ids | syscall_resp_ids
-            syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
-        if syscall.syscall_trace_id_response:
-            syscall_req_ids = syscall_req_to_ids[
-                syscall.syscall_trace_id_response]
-            syscall_resp_ids = syscall_resp_to_ids.get(
-                syscall.syscall_trace_id_response)
-            syscall_ids = syscall_req_ids | syscall_resp_ids
-            syscall.set_relate(syscall_ids, related_map, id_to_related_tag)
+    @classmethod
+    def construct_from_dataframe(cls, dataframe_flowmetas: DataFrame):
+        trace_infos = []  # [TraceInfo]
+        for index in dataframe_flowmetas.index:
+            trace_infos.append(
+                TraceInfo(
+                    dataframe_flowmetas.at[index, '_id'],
+                    dataframe_flowmetas.at[index, 'signal_source'],
+                    dataframe_flowmetas.at[index, 'vtap_id'],
+                    dataframe_flowmetas.at[index, 'type'],
+                    # time
+                    dataframe_flowmetas.at[index, 'start_time_us'],
+                    dataframe_flowmetas.at[index, 'end_time_us'],
+                    # tcp_seq
+                    dataframe_flowmetas.at[index, 'req_tcp_seq'],
+                    dataframe_flowmetas.at[index, 'resp_tcp_seq'],
+                    # span_id
+                    dataframe_flowmetas.at[index, 'trace_id'],
+                    dataframe_flowmetas.at[index, 'span_id'],
+                    dataframe_flowmetas.at[index, 'parent_span_id'],
+                    # x_request_id
+                    dataframe_flowmetas.at[index, 'x_request_id_0'],
+                    dataframe_flowmetas.at[index, 'x_request_id_1'],
+                    # syscall_trace_id
+                    dataframe_flowmetas.at[index, 'syscall_trace_id_request'],
+                    dataframe_flowmetas.at[index, 'syscall_trace_id_response'],
+                    # origin_flow_list
+                    dataframe_flowmetas,
+                    index))
+        return trace_infos
 
-    for network in networks:
-        if network.req_tcp_seq:
-            network_ids = req_tcp_seq_to_ids[network.req_tcp_seq]
-            network.set_relate(network_ids, related_map, id_to_related_tag)
-        if network.resp_tcp_seq:
-            network_ids = resp_tcp_seq_to_ids[network.resp_tcp_seq]
-            network.set_relate(network_ids, related_map, id_to_related_tag)
-
-    for app in apps:
-        if app.span_id:
-            span_id_ids = span_id_to_ids[app.span_id]
-            parent_span_id_ids = parent_span_id_to_ids[app.span_id]
-            span_ids = span_id_ids | parent_span_id_ids
-            app.set_relate(span_ids, related_map, id_to_related_tag)
-        if app.parent_span_id:
-            span_ids = span_id_to_ids[app.parent_span_id]
-            app.set_relate(span_ids, related_map, id_to_related_tag)
+    @classmethod
+    def construct_from_dict_list(cls, flow_dicts: dict):
+        trace_infos = []  # [TraceInfo]
+        for index in range(len(flow_dicts)):
+            flow = flow_dicts[index]
+            trace_infos.append(
+                TraceInfo(
+                    # flow maybe merged from multiple l7_flow_logs, use _index instead of _id
+                    flow['_index'],
+                    flow['signal_source'],
+                    flow['vtap_id'],
+                    flow['type'],
+                    # time
+                    flow['start_time_us'],
+                    flow['end_time_us'],
+                    # tcp_seq
+                    flow['req_tcp_seq'],
+                    flow['resp_tcp_seq'],
+                    # span_id
+                    flow['trace_id'],
+                    flow['span_id'],
+                    flow['parent_span_id'],
+                    # x_request_id
+                    flow['x_request_id_0'],
+                    flow['x_request_id_1'],
+                    # syscall_trace_id
+                    flow['syscall_trace_id_request'],
+                    flow['syscall_trace_id_response'],
+                    # origin_flow_list
+                    flow_dicts,
+                    index))
+        return trace_infos
 
 
 class L7XrequestMeta:
-    """
-    x_request_id追踪：
-    """
-    def __init__(self, flow_metas: Tuple):
-        self._id = flow_metas[0]
-        self.x_request_id_0 = flow_metas[1]
-        self.x_request_id_1 = flow_metas[2]
-
-    def __eq__(self, rhs):
-        return (self.x_request_id_0 == rhs.x_request_id_0
-                and self.x_request_id_1 == rhs.x_request_id_1)
-
-    def set_relate(self, _ids, related_map, id_to_related_tag):
+    @classmethod
+    def set_relate(cls,
+                   trace_info: TraceInfo,
+                   related_trace_infos: set,
+                   related_map: defaultdict(inner_defaultdict_set),
+                   fast_check: bool = False) -> bool:
         """
         当请求穿越网关(可能是 ingress 或云托管 LB)，网关内部生成 x_request_id 标记同一个请求
         因为 nginx 类网关是通过多 worker 进程实现的，所以需要依赖于 x_request_id 来关联
@@ -929,45 +819,101 @@ class L7XrequestMeta:
         当网关内部或有多 worker 工作线程场景: eBPF 无法关联出入请求与出请求
         当网关使用云 LB 时无法部署 agent: 无法获取到任何网关内信息
         """
-        for _id in _ids:
-            _id_df = id_to_related_tag[_id]['_id']
-            x_request_id_0_df = id_to_related_tag[_id]['x_request_id_0']
-            x_request_id_1_df = id_to_related_tag[_id]['x_request_id_1']
-            if _id_df == self._id:
+        find_related = False
+        for rti in related_trace_infos:
+            if trace_info._id == rti._id:
                 continue
             # x_request_id_0 语义是 x_request_id_req，x_request_id_1 语义是 x_request_id_resp
             # x_request_id_0 == x_request_id_1 实际上是标注网关内部的关联关系，把跨进程/线程的请求/响应关联
             # 由于先发生【被请求】，再发生【转发】，所以 x_request_id_1 一定在 x_request_id_0 之上
-            if self.x_request_id_0 and self.x_request_id_0 == x_request_id_1_df:
-                related_map[_id_df][self._id] = related_map[_id_df].get(
-                    self._id, set())
-                related_map[_id_df][self._id].add('xrequestid')
-            if self.x_request_id_1 and self.x_request_id_1 == x_request_id_0_df:
-                related_map[_id_df][self._id] = related_map[_id_df].get(
-                    self._id, set())
-                related_map[_id_df][self._id].add('xrequestid')
+            # x_request_id_0
+            if trace_info.x_request_id_0 and trace_info.x_request_id_0 == rti.x_request_id_1:
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_X_REQUEST_ID)
+                find_related = True
+                if fast_check: return True
+                continue
+            # x_request_id_1
+            if trace_info.x_request_id_1 and trace_info.x_request_id_1 == rti.x_request_id_0:
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_X_REQUEST_ID)
+                find_related = True
+                if fast_check: return True
+                continue
+
+        return find_related
 
 
 class L7NetworkMeta:
-    """
-    网络流量追踪信息:
-    { _id, type, req_tcp_seq, resp_tcp_seq, start_time_us, end_time_us, span_id, network_delay_us }
-    """
-    def __init__(self, flow_metas: Tuple, network_delay_us: int):
-        self._id = flow_metas[0]
-        self.type = flow_metas[1]
-        self.req_tcp_seq = flow_metas[2]
-        self.resp_tcp_seq = flow_metas[3]
-        self.start_time_us = flow_metas[4]
-        self.end_time_us = flow_metas[5]
-        self.span_id = flow_metas[6] if flow_metas[6] else ''
-        self.network_delay_us = network_delay_us
+    @classmethod
+    def flow_field_conflict(cls, lhs: TraceInfo, rhs: TraceInfo) -> bool:
+        # span_id
+        if lhs.trace_id and lhs.span_id and rhs.trace_id and rhs.span_id and (
+                lhs.trace_id != rhs.trace_id or lhs.span_id != rhs.span_id):
+            return True
 
-    def __eq__(self, rhs):
-        return (self.type == rhs.type and self.req_tcp_seq == rhs.req_tcp_seq
-                and self.resp_tcp_seq == rhs.resp_tcp_seq)
+        is_http2_grpc_and_differ = False
 
-    def set_relate(self, _ids, related_map, id_to_related_tag):
+        # other fields
+        for key in [
+                'l7_protocol',  # 固定此列第一个检查，HTTP2/gRPC 的后续字段检查要用到
+                'x_request_id_0',
+                'x_request_id_1',
+                'http_proxy_client',
+                'protocol',
+                'l7_protocol_str',
+                'version',
+                'request_id',
+                'endpoint',
+                'http_proxy_client',
+                'requset_type',
+                'request_domain',
+                'request_resource',
+                'response_code',
+                'response_exception',
+                'response_result',
+        ]:
+            lhs_value = lhs.get_extra_field(key)
+            rhs_value = rhs.get_extra_field(key)
+            if not lhs_value or not rhs_value:
+                continue
+
+            # FIXME: 统一在源头处理这个问题
+            # ClickHouse 中的 Nullable(int) 字段在无值时会返回为 dataframe 中的 float(nan)
+            # 在 Python 中 float(nan) != float(nan)，因此将其转为 None 方便比较
+            # request_id 就是一个 Nullable(uint64) 字段
+            if isinstance(lhs_value, float) and math.isnan(lhs_value):
+                lhs_value = None
+            if isinstance(rhs_value, float) and math.isnan(rhs_value):
+                rhs_value = None
+
+            # Agent 有可能协议识别有误差，没将 HTTP2 识别为 gRPC。
+            # 此处忽略这个差异，虽然 HTTP2 不一定都是 gRPC。
+            if key == 'l7_protocol' and lhs_value in [
+                    L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
+            ] and rhs_value in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC]:
+                if lhs_value != rhs_value:
+                    is_http2_grpc_and_differ = True
+                continue
+
+            if key == 'request_resource' and is_http2_grpc_and_differ:
+                # 某些情况下同一股流量在不同位置可能会被 Agent 分别解析为 HTTP2 和 gRPC
+                # 目前这两种协议的 request_resource 取自不同的协议字段，详见下面的文档：
+                # https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#http2
+                # 于是，当一个协议是 HTTP2、另一个是 gRPC 时，不用比较这些差异字段
+                continue
+
+            if lhs_value != rhs_value:
+                return True
+        return False
+
+    @classmethod
+    def set_relate(cls,
+                   trace_info: TraceInfo,
+                   related_trace_infos: set,
+                   related_map: defaultdict(inner_defaultdict_set),
+                   network_delay_us: int,
+                   fast_check: bool = False) -> bool:
         """
         使用 tcp_seq 标记穿越不同网元的关联关系
              req_tcp_seq_1 ┌──────┐req_tcp_seq_1 ┌─────┐
@@ -975,121 +921,118 @@ class L7NetworkMeta:
         user               │ Node │              │ Pod │
              <─────────────│      │<─────────────│     │
             resp_tcp_seq_2 └──────┘resp_tcp_seq_2└─────┘
+
+        注意：DNS 协议可能是 UDP，双向 tcp_seq 都为 0
         """
-        for _id in _ids:
-            _id_df = id_to_related_tag[_id]['_id']
-            type_df = id_to_related_tag[_id]['type']
-            span_id_df = id_to_related_tag[_id]['span_id']
-            start_time_us_df = id_to_related_tag[_id]['start_time_us']
-            end_time_us_df = id_to_related_tag[_id]['end_time_us']
-            req_tcp_seq_df = id_to_related_tag[_id]['req_tcp_seq']
-            resp_tcp_seq_df = id_to_related_tag[_id]['resp_tcp_seq']
-            if _id_df == self._id:
+        find_related = False
+        for rti in related_trace_infos:
+            if trace_info._id == rti._id:
                 continue
-            if type_df != L7_FLOW_TYPE_RESPONSE and self.type != L7_FLOW_TYPE_RESPONSE and span_id_df:
-                if span_id_df != self.span_id:
-                    continue
             # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，
             # 否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃。
             # 注意：两个 Span 都是会话时，要求两侧 TCP Seq 必须都相等，即使有一侧 TCP Seq 为 0，
             #       例如 MySQL Close、RabbitMQ Connection.Blocked 等单向 SESSION 的场景。
             #       否则，只需要一侧 TCP Seq 相等即可。
-            if self.type == type_df == L7_FLOW_TYPE_SESSION:
-                if abs(self.start_time_us -
-                       start_time_us_df) <= self.network_delay_us and abs(
-                           self.end_time_us -
-                           end_time_us_df) <= self.network_delay_us:
-                    if self.req_tcp_seq == req_tcp_seq_df and self.resp_tcp_seq == resp_tcp_seq_df:
-                        related_map[_id_df][
-                            self._id] = related_map[_id_df].get(
-                                self._id, set())
-                        related_map[_id_df][self._id].add('network')
-            elif self.type != L7_FLOW_TYPE_RESPONSE and type_df != L7_FLOW_TYPE_RESPONSE:
-                if abs(self.start_time_us -
-                       start_time_us_df) <= self.network_delay_us:
-                    if self.req_tcp_seq == req_tcp_seq_df:
-                        related_map[_id_df][
-                            self._id] = related_map[_id_df].get(
-                                self._id, set())
-                        related_map[_id_df][self._id].add('network')
-            elif self.type != L7_FLOW_TYPE_REQUEST and type_df != L7_FLOW_TYPE_REQUEST:
-                if abs(self.end_time_us -
-                       end_time_us_df) <= self.network_delay_us:
-                    if self.resp_tcp_seq == resp_tcp_seq_df:
-                        related_map[_id_df][
-                            self._id] = related_map[_id_df].get(
-                                self._id, set())
-                        related_map[_id_df][self._id].add('network')
+            if trace_info.type == rti.type == L7_FLOW_TYPE_SESSION:  # req & resp
+                if abs(trace_info.start_time_us -
+                       rti.start_time_us) <= network_delay_us and abs(
+                           trace_info.end_time_us -
+                           rti.end_time_us) <= network_delay_us:
+                    if trace_info.req_tcp_seq == rti.req_tcp_seq and trace_info.resp_tcp_seq == rti.resp_tcp_seq:
+                        if not cls.flow_field_conflict(trace_info, rti):
+                            related_map[trace_info._id][rti._id].add(
+                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            find_related = True
+            elif trace_info.type != L7_FLOW_TYPE_RESPONSE and rti.type != L7_FLOW_TYPE_RESPONSE:  # req
+                if abs(trace_info.start_time_us -
+                       rti.start_time_us) <= network_delay_us:
+                    if trace_info.req_tcp_seq == rti.req_tcp_seq:
+                        if not cls.flow_field_conflict(trace_info, rti):
+                            related_map[trace_info._id][rti._id].add(
+                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            find_related = True
+            elif trace_info.type != L7_FLOW_TYPE_REQUEST and rti.type != L7_FLOW_TYPE_REQUEST:  # resp
+                if abs(trace_info.end_time_us -
+                       rti.end_time_us) <= network_delay_us:
+                    if trace_info.resp_tcp_seq == rti.resp_tcp_seq:
+                        if not cls.flow_field_conflict(trace_info, rti):
+                            related_map[trace_info._id][rti._id].add(
+                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            find_related = True
+            if fast_check and find_related: return
+            # XXX: vtap_id 相同时应该能有更好的判断，例如 duration 大的 Span 时间范围必须覆盖 duration 小的 Span
+
+        return find_related
 
 
 class L7SyscallMeta:
-    """
-    系统调用追踪信息:
-    { vtap_id, syscall_trace_id_request, syscall_trace_id_response, tap_side, start_time_us, end_time_us }
-    """
-    def __init__(self, flow_metas: Tuple):
-        self._id = flow_metas[0]
-        self.vtap_id = flow_metas[1]
-        self.syscall_trace_id_request = flow_metas[2]
-        self.syscall_trace_id_response = flow_metas[3]
-
-    def __eq__(self, rhs):
-        return (self.vtap_id == rhs.vtap_id and self.syscall_trace_id_request
-                == rhs.syscall_trace_id_request
-                and self.syscall_trace_id_response
-                == rhs.syscall_trace_id_response)
-
-    def set_relate(self, _ids, related_map, id_to_related_tag):
+    @classmethod
+    def set_relate(cls,
+                   trace_info: TraceInfo,
+                   related_trace_infos: set,
+                   related_map: defaultdict(inner_defaultdict_set),
+                   fast_check: bool = False) -> bool:
         """
         syscall_trace_id_x 关联关系连接同一个线程内出入请求
-        ┌─────┐ syscall_trace_id_request  ┌─────────┐ syscall_trace_id_request  ┌───────┐
-        │     │ ──────────────────────────│─>1   1─>│───────────────────────────│->2    │
-        │ Req │                           │   Pod1  |                           │  Pod2 │
-        │     │ <─────────────────────────│<─3   3<─│───────────────────────────│<─2    │
-        └─────┘ syscall_trace_id_response └─────────┘ syscall_trace_id_response └───────┘
+        ┌───────┐ syscall_trace_id_request  ┌─────────┐ syscall_trace_id_request  ┌────────┐
+        │       │ ──────────────────────────│─>1   2─>│───────────────────────────│->3     │
+        │ Proc1 │                           │  Proc2  |                           │  Proc3 │
+        │       │ <─────────────────────────│<─6   5<─│───────────────────────────│<─4     │
+        └───────┘ syscall_trace_id_response └─────────┘ syscall_trace_id_response └────────┘
+
+        对于 syscall_trace_id：
+        在 Proc2 的关联：
+        - syscall_trace_id_request_1 = syscall_trace_id_request_2
+        - syscall_trace_id_response_5 = syscall_trace_id_response_6
+        在 Proc3 的关联：
+        - syscall_trace_id_request_3 = syscall_trace_id_response_4
         """
-        # 对于 syscall_trace_id_request：
-        # 在 Pod1 的关联是 syscall_trace_id_request_1 = syscall_trace_id_request_1
-        # 在 Pod2 的关联是 syscall_trace_id_request_2 = syscall_trace_id_response_2
-        # 同时，在 Pod1 也有 syscall_trace_id_response_3 = syscall_trace_id_response_3
-        # 也即同时存在内部追踪关系与 ID 跨越服务不变性
-        for _id in _ids:
-            _id_df = id_to_related_tag[_id]['_id']
-            vtap_id_df = id_to_related_tag[_id]['vtap_id']
-            syscall_trace_id_request_df = id_to_related_tag[_id][
-                'syscall_trace_id_request']
-            syscall_trace_id_response_df = id_to_related_tag[_id][
-                'syscall_trace_id_response']
-            if _id_df == self._id or self.vtap_id != vtap_id_df:
+        if trace_info.syscall_trace_id_request == trace_info.syscall_trace_id_response:
+            # this is either an initial or terminal request
+            return
+
+        find_related = False
+        for rti in related_trace_infos:
+            if trace_info._id == rti._id:
                 continue
-            if self.syscall_trace_id_request:
-                if self.syscall_trace_id_request == syscall_trace_id_request_df or self.syscall_trace_id_request == syscall_trace_id_response_df:
-                    related_map[_id_df][self._id] = related_map[_id_df].get(
-                        self._id, set())
-                    related_map[_id_df][self._id].add('syscall')
-            if self.syscall_trace_id_response:
-                if self.syscall_trace_id_response == syscall_trace_id_request_df or self.syscall_trace_id_response == syscall_trace_id_response_df:
-                    related_map[_id_df][self._id] = related_map[_id_df].get(
-                        self._id, set())
-                    related_map[_id_df][self._id].add('syscall')
+            if trace_info.vtap_id != rti.vtap_id:
+                continue
+            if rti.syscall_trace_id_request == rti.syscall_trace_id_response:
+                # this is either an initial or terminal request
+                continue
+            # syscall_trace_id_request
+            if trace_info.syscall_trace_id_request:
+                if trace_info.syscall_trace_id_request in [
+                        rti.syscall_trace_id_request,
+                        rti.syscall_trace_id_response
+                ]:
+                    related_map[trace_info._id][rti._id].add(
+                        L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID)
+                    find_related = True
+                    if fast_check: return True
+                    continue
+            # syscall_trace_id_response
+            if trace_info.syscall_trace_id_response:
+                if trace_info.syscall_trace_id_response in [
+                        rti.syscall_trace_id_request,
+                        rti.syscall_trace_id_response
+                ]:
+                    related_map[trace_info._id][rti._id].add(
+                        L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID)
+                    find_related = True
+                    if fast_check: return True
+                    continue
+
+        return find_related
 
 
 class L7AppMeta:
-    """
-    应用插桩的追踪信息:
-    { span_id, parent_span_id }
-    """
-    def __init__(self, flow_metas: Tuple):
-        self._id = flow_metas[0]
-        self.tap_side = flow_metas[1]
-        self.span_id = flow_metas[2]
-        self.parent_span_id = flow_metas[3]
-
-    def __eq__(self, rhs):
-        return (self.tap_side == rhs.tap_side and self.span_id == rhs.span_id
-                and self.parent_span_id == rhs.parent_span_id)
-
-    def set_relate(self, _ids, related_map, id_to_related_tag):
+    @classmethod
+    def set_relate(cls,
+                   trace_info: TraceInfo,
+                   related_trace_infos: set,
+                   related_map: defaultdict(inner_defaultdict_set),
+                   fast_check: bool = False) -> bool:
         """
         app-span 通过 trace_id/span_id 关联 span，其中，上游的 span_id 到达下游服务后会成为下游服务发起请求的 parent_span_id
                   ┌─────┐ span_id => parent_span_id ┌────────┐ span_id => parent_span_id ┌────────┐
@@ -1098,126 +1041,57 @@ class L7AppMeta:
                   │     │                           │        │                           │        │
                   └─────┘                           └────────┘                           └────────┘
         """
-        for _id in _ids:
-            _id_df = id_to_related_tag[_id]['_id']
-            span_id_df = id_to_related_tag[_id]['span_id']
-            parent_span_id_df = id_to_related_tag[_id]['parent_span_id']
-            if _id_df == self._id:
+        if not trace_info.trace_id or not trace_info.span_id:
+            return
+
+        find_related = False
+        for rti in related_trace_infos:
+            if trace_info._id == rti._id:
                 continue
-            if self.span_id:
-                if self.span_id == span_id_df or self.span_id == parent_span_id_df:
-                    related_map[_id_df][self._id] = related_map[_id_df].get(
-                        self._id, set())
-                    related_map[_id_df][self._id].add('app')
-            if self.parent_span_id:
-                if self.parent_span_id == span_id_df:
-                    related_map[_id_df][self._id] = related_map[_id_df].get(
-                        self._id, set())
-                    related_map[_id_df][self._id].add('app')
+            if trace_info.trace_id != rti.trace_id:
+                # The span_id of different traces is likely to be the same.
+                continue
+            # span_id
+            if trace_info.span_id in [rti.span_id, rti.parent_span_id]:
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_SPAN_ID)
+                find_related = True
+                if fast_check: return True
+                continue
+            # parent_span_id
+            if trace_info.parent_span_id:
+                if trace_info.parent_span_id == rti.span_id:
+                    related_map[trace_info._id][rti._id].add(
+                        L7_FLOW_RELATIONSHIP_SPAN_ID)
+                    find_related = True
+                    if fast_check: return True
+                    continue
+
+        return find_related
 
 
-class Networks:
+class Network:
     def __init__(self):
-        # 标识 tcp_seq 用于匹配 sys-span 与 net-span
-        self.req_tcp_seq = None  # not None（包括 0）表示有效
-        self.resp_tcp_seq = None  # not None（包括 0）表示有效
         # 标识 span_id 用于匹配 app-span
         self.span_id = None
         # 标识是否已找到了 sys-span，如果有则不需要关联 app-span，优先设置为 sys-span 的 parent/child
         self.has_sys_span = False
-        # 存储所有 MERGE_KEYS 数据，用于匹配另一个 flow 是否完全一致
-        self.metas = {}
         # 分组聚合所有 tcp_seq 相同的 flow
         self.flows = []
-        # time_us 用于判断合并的流是否超出流时差
-        self.start_time_us = None
-        self.end_time_us = None
 
-    def add_flow(self, flow, network_delay_us):
+    def add_flow(self, flow):
         """
         将 net-span 与 sys-span 按 tcp_seq 分组
         """
-        if self.flows:
-            # 当 self.flows 和 flow 的某一侧 TCP Seq 同时有效时，这一侧的 TCP Seq 必须相等
-            # 注意：我们使用 flow['type'] 来判断 TCP Seq 的有效性。
-            #       这是因为存在一类单向的、type = SESSION 的调用日志，例如 MySQL Close、RabbitMQ Connection.Blocked，
-            #       由于他们永远不会有 Response（或 Request），Agent 会将它的 type 强制置为 SESSION。
-            #       当 type = SESSION 时，即使某个方向的 TCP Seq 为 0，也意味着它需要进行比较。
-            if self.req_tcp_seq is not None and flow[
-                    'type'] != L7_FLOW_TYPE_RESPONSE and (self.req_tcp_seq !=
-                                                          flow["req_tcp_seq"]):
-                return False
-            if self.resp_tcp_seq is not None and flow[
-                    'type'] != L7_FLOW_TYPE_REQUEST and (self.resp_tcp_seq !=
-                                                         flow["resp_tcp_seq"]):
-                return False
-
-            # One has only req_tcp_seq, the other has only resp_tcp_seq
-            for key in MERGE_KEYS:
-                if not self.req_tcp_seq or not flow[
-                        'req_tcp_seq']:  # no request in self.flows or flow
-                    if key in MERGE_KEY_REQUEST:  # skip keys only for requsest
-                        continue
-                if not self.resp_tcp_seq or not flow[
-                        'resp_tcp_seq']:  # no response in self.flows or flow
-                    if key in MERGE_KEY_RESPONSE:  # skip keys only for response
-                        continue
-                if self.get(key) and flow.get(key):
-                    # agent 有可能协议识别有误，没将 http2 识别为 grpc，此处忽略这个差异，不要返回
-                    # 虽然 http2 不仅仅只有 grpc 一种实现，但如果两个流只有 l7_protocol 协议不一致而其他值都一致，则仍然认为是同一个流
-                    if key == 'l7_protocol' and self.get(key) in [
-                            L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
-                    ] and flow.get(key) in [
-                            L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
-                    ]:
-                        continue
-                    # 如果 self/flow 的 merge_keys 任意一个不相等，应直接返回
-                    if self.get(key) != flow.get(key):
-                        return False
-
-            # 如果超出流时差，暂时判断为无关系，可能有以下原因:
-            # 可能是 tcp_seq 重复
-            # 可能是 L4 网关与应用所在宿主机时间差异太大，明明是同一个请求但采集时间相差过远
-            if abs(self.start_time_us -
-                   flow["start_time_us"]) > network_delay_us or abs(
-                       self.end_time_us -
-                       flow["end_time_us"]) > network_delay_us:
-                return False
-
-        # 为 req_tcp_seq 和 resp_tcp_seq 赋值
-        # 当 self.flows 的 req_tcp_seq/resp_tcp_seq 无效、且 flow 的 req_tcp_seq/resp_tcp_seq 有效时进行赋值
-        # 注意：我们使用 flow['type'] 来判断 TCP Seq 的有效性。
-        if self.req_tcp_seq is None and flow['type'] != L7_FLOW_TYPE_RESPONSE:
-            self.req_tcp_seq = flow["req_tcp_seq"]
-        if self.resp_tcp_seq is None and flow['type'] != L7_FLOW_TYPE_REQUEST:
-            self.resp_tcp_seq = flow["resp_tcp_seq"]
-
-        # 为其他字段赋值
-        for key in MERGE_KEYS:
-            if not self.get(key) and flow.get(key):
-                self.metas[key] = flow[key]
-        if not self.start_time_us:
-            self.start_time_us = flow["start_time_us"]
-        if not self.end_time_us:
-            self.end_time_us = flow["end_time_us"]
         if not self.span_id and flow["span_id"]:
             self.span_id = flow["span_id"]
         self.flows.append(flow)
-        if flow["tap_side"] in [
-                TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ]:
+        if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
             # 标识 self 根据 tcp_seq 找到了对应的 sys-span
             # 对 s/s-nd，需要找 s-p，对 c/c-nd 需要找 c-p
             self.has_sys_span = True
             # self 不一定是 net-span，外层的调用是 net-span + sys-span 组成的列表
             flow["networks"] = self
-        return True
-
-    def get(self, key):  # XXX: 待删除，nan 在最源头进行处理
-        if type(self.metas.get(key, None)) == float:
-            if math.isnan(self.metas[key]):
-                return None
-        return self.metas.get(key, None)
 
     def sort_and_set_parent(self):
         self.flows = network_flow_sort(self.flows)
@@ -1398,9 +1272,17 @@ def merge_flow(flows: list, flow: dict) -> bool:
         TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
     ]
     is_dns_sys_span = flow['l7_protocol'] == L7_PROTOCOL_DNS and is_sys_span
-    no_request_id = not flow['request_id']
+
+    # 当存在 request_id 时，一般意味着同一个 L4 Flow 中的请求是并发的（不会等待响应返回就发下一个请求）
+    # 但有一个特殊是 MySQL，参考：https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#mysql
+    need_compare_request_id = flow[
+        'request_id'] and flow['l7_protocol'] != L7_PROTOCOL_MYSQL
 
     for i in range(len(flows) - 1, -1, -1):
+        if not is_dns_sys_span:  # 仅需要合并至 REQUEST
+            if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                continue
+
         # vtap_id + flow_id：唯一确定一条 L4 Flow
         # request_id：用于并发请求的场景
         important_field_not_match = False
@@ -1412,11 +1294,16 @@ def merge_flow(flows: list, flow: dict) -> bool:
             continue
 
         if flows[i]['l7_protocol'] != flow['l7_protocol']:
-            # 一个 L4 Flow 中的前序 flow 是异种协议时，停止合并，避免误匹配
-            # 例如：TLS 和应用协议、Service Mesh Sidecar 处理的多种协议
+            # 一个 L4 Flow 中的前序 flow 是异种协议时，暂不考虑合并，避免误匹配
+            # 可能出现多种协议的情况：HTTP2 和 gRPC、TLS 和应用协议、Service Mesh Sidecar 所有流量
             return False
 
-        if no_request_id:
+        if need_compare_request_id:
+            # request_id 匹配成功即可合并，下面主要排除一些（不可能发生）的异常场景
+            if not is_dns_sys_span and flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
+                return False
+        else:
             if is_dns_sys_span:
                 # DNS sys span，要求 cap_seq 一定要连续才能合并
                 if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
@@ -1435,11 +1322,6 @@ def merge_flow(flows: list, flow: dict) -> bool:
                                     flow['syscall_cap_seq_1']):
                     # 对于 sys span，要求 cap_seq 一定要连续
                     continue
-        else:  # 并发请求
-            # request_id 匹配成功即可合并，下面主要排除一些（不可能发生）的异常场景
-            if not is_dns_sys_span and flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
-                # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
-                return False
 
         # merge flow
         if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
@@ -1450,8 +1332,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
             elif not flows[i].get(key):  # attention: L7_FLOW_TYPE_REQUEST = 0
                 flows[i][key] = flow[key]
         flows[i]['end_time_us'] = flow['end_time_us']
-        flows[i][
-            'duration'] = flows[i]['end_time_us'] - flows[i]['start_time_us']
+        flows[i]['response_duration'] = flows[i]['end_time_us'] - flows[i][
+            'start_time_us']
         flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
         flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
         return True
@@ -1486,18 +1368,18 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     4. 融合1-3的结果，并将2和3中的结果合并到1中
     """
     flows = []
-    id_map = {}
     # 按start_time升序，用于merge_flow
     dict_flows = dataframe_flows.sort_values(by=["start_time_us"],
                                              ascending=True).to_dict("list")
     for index in range(len(dataframe_flows.index)):
         flow = {}
         for key in return_fields:
-            key = key.strip("'")
+            key = key.strip("'")  # XXX: why???
             value = dict_flows[key][index]
             if key == '_id':  # 流合并后会对应多条记录
                 flow[key] = [value]
             elif isinstance(value, float) and math.isnan(value):
+                # XXX: 要在源头统一处理
                 # ClickHouse 中的 Nullable(int) 字段在无值时会返回为 dataframe 中的 float(nan)
                 # 在 Python 中 float(nan) != float(nan)，因此将其转为 None 方便比较
                 # request_id 就是一个 Nullable(uint64) 字段
@@ -1506,10 +1388,24 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 flow[key] = value
         if merge_flow(flows, flow):  # 合并单向Flow为会话
             continue
-        # assert '_uid' not in flow
-        flow['_uid'] = index
+        flow['_index'] = len(flows)  # assert '_index' not in flow
         flows.append(flow)
-    flowcount = len(flows)
+    # 注意：不要对 flows 再做排序，下面的代码会通过 flows[flow_index] 来反查 flow
+
+    # flow 合并之后，添加一个 selftime，后续要用到
+    # XXX: 这个字段应该不用添加，考虑直接使用 response_duration
+    for flow in flows:
+        flow['selftime'] = flow['response_duration']
+
+    # 对合并后的 flow 计算 related_flow_index_map，用于后续操作的加速
+    related_flow_index_map = defaultdict(inner_defaultdict_set)
+    trace_infos = TraceInfo.construct_from_dict_list(flows)
+    set_all_relate(trace_infos, related_flow_index_map,
+                   network_delay_us)  # XXX: slow function
+    # 构建一个 flow._index 到 flow._id(s) 的映射，方便后续 related_flow_index_map 的使用
+    flow_index_to_id0 = [0] * len(flows)
+    for flow in flows:
+        flow_index_to_id0[flow['_index']] = flow['_id'][0]
 
     network_flows = []
     app_flows = []
@@ -1520,29 +1416,12 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 对 app_flows: app-span 按固定的规则设置层级（span_id/parent_span_id），按 span_id 挂 sys-span 以及挂到 sys-span 构建的 <service> 上
     # 对 syscall_flows: sys-span 需要提取<vtap_id, local_process_id>分组定义为<service> ，并以此为主体构建火焰图骨架
     for flow in flows:
-        for _id in flow['_id']:
-            id_map[str(_id)] = flow['_uid']
-        flow['duration'] = flow['end_time_us'] - flow['start_time_us']
-        if flow['tap_side'] in [
-                TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-        ]:
+        if flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_EBPF:
             syscall_flows.append(flow)
-        elif flow['tap_side'] in const.TAP_SIDE_RANKS:
+        elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_PACKET:
             network_flows.append(flow)
-        elif flow['tap_side'] in [
-                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
-        ]:
+        elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
             app_flows.append(flow)
-    for flow in flows:
-        related_ids = set()
-        for _id, related_types in flow["related_ids"].items():
-            if _id in flow['_id']:
-                # flow['_id'] 包含 _id，在上面逻辑中已被合并，此处无需处理自身
-                continue
-            if id_map.get(_id, None) is not None:
-                related_ids.add(
-                    f"{id_map[_id]}-{','.join(related_types)}-{_id}")
-        flow["related_ids"] = list(related_ids)
 
     # 从Flow中提取Service：一个<vtap_id, local_process_id>二元组认为是一个Service。
     # 所有的追踪先从 s-p 开始构建，至少找到一个 s-p 才能开始构建<Service>
@@ -1601,17 +1480,25 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     network_flows = sorted(network_flows + syscall_flows,
                            key=lambda x: x.get("type"),
                            reverse=True)
+    flow_aggregated = set()  # set(flow._index)
     for flow in network_flows:
-        if not flow["req_tcp_seq"] and not flow["resp_tcp_seq"]:
+        if flow['_index'] in flow_aggregated:
             continue
-        is_add = False
-        for network in networks:
-            if network.add_flow(flow, network_delay_us):
-                is_add = True
-        if not is_add:
-            network = Networks()
-            network.add_flow(flow, network_delay_us)
-            networks.append(network)
+        # construct a network
+        network = Network()
+        networks.append(network)
+        # aggregate self to this network
+        network.add_flow(flow)
+        flow_aggregated.add(flow['_index'])
+        # aggregate other spans to this network
+        for _index, related_types in related_flow_index_map[
+                flow['_index']].items():
+            if L7_FLOW_RELATIONSHIP_TCP_SEQ not in related_types:
+                continue
+            if _index in flow_aggregated:
+                continue
+            network.add_flow(flows[_index])
+            flow_aggregated.add(_index)
 
     # 将应用span挂到Service上
     for index, app_flow in enumerate(app_flows):
@@ -1620,7 +1507,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 break
     app_flow_set_service(app_flows)
     # 获取没有系统span存在的networks分组
-    net_spanid_flows = defaultdict(list)
+    net_spanid_flows = defaultdict(list)  # flow.span_id => Network()
     for network in networks:
         if not network.has_sys_span and network.span_id:
             net_spanid_flows[network.span_id] = network
@@ -1645,7 +1532,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # s-p排序
     service_sort(services, app_flows)
     sort_by_x_request_id(network_flows)
-    return services, app_flows, networks
+    return services, app_flows, networks, flow_index_to_id0, related_flow_index_map
 
 
 def app_flow_set_service(array):
@@ -1691,18 +1578,20 @@ def app_flow_set_service(array):
     array.reverse()
 
 
-def networks_set_to_app_fow(array, network_flows):
+def networks_set_to_app_fow(app_flows, network_flows):
     """
     设置 net-span 与 app-span 的层级关系
+    app_flows: app_flows
+    network_flows: dict{flow.span_id: Network()}
     """
-    array.reverse()
-    for flow in array:
+    app_flows.reverse()
+    for flow in app_flows:
         # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
         if flow["span_id"] in network_flows:
             _set_parent(network_flows[flow["span_id"]].flows[0], flow,
                         "network mounted duo to span_id")
             flow["network_flows"] = network_flows[flow["span_id"]]
-    array.reverse()
+    app_flows.reverse()
 
 
 def app_flow_sort(array):
@@ -1801,10 +1690,10 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
             ) if not flow.get('span_id') or len(str(
                 flow['span_id'])) < 16 else flow['span_id']
             id_map[flow[
-                '_uid']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_uid']}"
-            if flow['_uid'] not in tracing:
+                '_index']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_index']}"
+            if flow['_index'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
-                tracing.add(flow['_uid'])
+                tracing.add(flow['_index'])
             if flow.get("networks"):
                 for indirect_flow in flow["networks"].flows:
                     if indirect_flow["response_status"] > flow[
@@ -1819,13 +1708,13 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
             ]:
                 continue
             id_map[flow[
-                '_uid']] = f"{network.span_id}.{flow['tap_side']}.{flow['_uid']}"
-            if flow['_uid'] not in tracing:
+                '_index']] = f"{network.span_id}.{flow['tap_side']}.{flow['_index']}"
+            if flow['_index'] not in tracing:
                 response["tracing"].append(_get_flow_dict(flow))
-                tracing.add(flow['_uid'])
+                tracing.add(flow['_index'])
 
     for flow in app_flows:
-        id_map[flow["_uid"]] = flow["span_id"]
+        id_map[flow["_index"]] = flow["span_id"]
         response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
@@ -1861,7 +1750,7 @@ def _range_overlap(start_1: int, end_1: int, start_2: int, end_2: int,
 
 # Obtain traces after pruning
 def pruning_flows(_id, flows, network_delay_us):
-    _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _uid change to id
+    _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _index change to id
 
     # 构建一个并查集，用来将所有的 Trace 划分为一个个 Tree
     disjoint_set = DisjointSet()
@@ -1870,44 +1759,61 @@ def pruning_flows(_id, flows, network_delay_us):
         disjoint_set.put(index, flow['parent_id'])
         disjoint_set.get(index)  # compress tree
 
-    # 记录所有 Trace Tree 的最小、最大时间
-    trace_trees = {}
+    # 记录所有 Trace Tree 的最小、最大时间和 trace_id 集合
+    # root_index => {min_start_time_us, max_end_time_us, set(trace_id)}
+    tree_infos = {}
     root_of_initial_flow = -1
     for flow in flows:
         index = flow[_FLOW_INDEX_KEY]
         root = disjoint_set.get(index)
         if _id in flow['_ids']:
             root_of_initial_flow = root
-        if root not in trace_trees:
-            trace_trees[root] = {
+        if root not in tree_infos:
+            tree_infos[root] = {
                 'min_start_time_us': flow['start_time_us'],
                 'max_end_time_us': flow['end_time_us'],
             }
         else:
-            time_range = trace_trees[root]
-            if time_range['min_start_time_us'] > flow['start_time_us']:
-                time_range['min_start_time_us'] = flow['start_time_us']
-            if time_range['max_end_time_us'] < flow['end_time_us']:
-                time_range['max_end_time_us'] = flow['end_time_us']
+            tree_info = tree_infos[root]
+            if tree_info['min_start_time_us'] > flow['start_time_us']:
+                tree_info['min_start_time_us'] = flow['start_time_us']
+            if tree_info['max_end_time_us'] < flow['end_time_us']:
+                tree_info['max_end_time_us'] = flow['end_time_us']
 
-    if len(trace_trees) == 1:
+    if len(tree_infos) == 1:
         return flows
+
+    # 计算每棵树里面的 trace_ids
+    for flow in flows:
+        if not flow['trace_id']:
+            continue
+        index = flow[_FLOW_INDEX_KEY]
+        root = disjoint_set.get(index)
+        if 'trace_ids' not in tree_infos[root]:
+            tree_infos[root]['trace_ids'] = set([flow['trace_id']])
+        else:
+            tree_infos[root]['trace_ids'].add(flow['trace_id'])
 
     # 保留与 root_of_initial_flow 所在 Trace Tree 时间有交叠的 Trace Tree
     final_flows = []
-    initial_tree_start_time_us = trace_trees[root_of_initial_flow][
-        'min_start_time_us']
-    initial_tree_end_time_us = trace_trees[root_of_initial_flow][
-        'max_end_time_us']
-    for root, time_range in trace_trees.items():
+    initial_tree_info = tree_infos[root_of_initial_flow]
+    initial_tree_start_time_us = initial_tree_info['min_start_time_us']
+    initial_tree_end_time_us = initial_tree_info['max_end_time_us']
+    initial_tree_trace_ids = initial_tree_info.get('trace_ids', set())
+    for root, tree_info in tree_infos.items():
         if not _range_overlap(
-                time_range['min_start_time_us'],
-                time_range['max_end_time_us'],
+                tree_info['min_start_time_us'],
+                tree_info['max_end_time_us'],
                 initial_tree_start_time_us,
                 initial_tree_end_time_us,
                 network_delay_us,
         ):
-            continue
+            if initial_tree_trace_ids and initial_tree_trace_ids & tree_infos[
+                    root].get('trace_ids', set()):
+                pass
+            else:
+                # 时间与原始树不交迭、trace_id 与原始树不共享，则进行剪枝
+                continue
         for flow in flows:
             if disjoint_set.get(flow[_FLOW_INDEX_KEY]) == root:
                 final_flows.append(flow)
@@ -1918,9 +1824,31 @@ def pruning_flows(_id, flows, network_delay_us):
 def pruning_trace(response, _id, network_delay_us):
     """
     剪枝
+    response: {'tracing': [flow]}
     """
-    traces = response.get('tracing', [])
-    response['tracing'] = pruning_flows(_id, traces, network_delay_us)
+    flows = response.get('tracing', [])
+    response['tracing'] = pruning_flows(_id, flows, network_delay_us)
+
+
+def calculate_related_ids(
+    response, flow_index_to_id0: list,
+    related_flow_index_map: defaultdict(inner_defaultdict_set)):
+    """
+    计算 flow 的 related_ids 字段。
+    当 related_ids 很多时，构造这些字符串非常耗时，因此这一步放在 pruning_trace 之后进行。
+
+    response: {'tracing': [flow]}
+    """
+    _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _index change to id
+
+    return_flows = response.get('tracing', [])
+    for flow in return_flows:
+        flow['related_ids'] = []
+        for _index, related_types in related_flow_index_map[
+                flow[_FLOW_INDEX_KEY]].items():
+            _id = flow_index_to_id0[_index]
+            flow['related_ids'].append(
+                f"{_index}-{','.join(related_types)}-{_id}")
 
 
 def merge_service(services, app_flows, response):
@@ -1963,7 +1891,7 @@ def merge_service(services, app_flows, response):
         for index, flow in enumerate(service.direct_flows):
             flow['service_uid'] = service_uid
             flow['service_uname'] = service_uname
-            trace = id_to_trace_map.get(flow.get('_uid'))
+            trace = id_to_trace_map.get(flow.get('_index'))
             if trace:
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = service_uname
@@ -1977,9 +1905,9 @@ def merge_service(services, app_flows, response):
             serivce_name_to_service_uid[flow['app_service']] = service_uid
     # 对 app_flows 进行分类统计
     for flow in app_flows:
-        if flow.get('_uid') not in ids:
+        if flow.get('_index') not in ids:
             continue
-        trace = id_to_trace_map.get(flow.get('_uid'))
+        trace = id_to_trace_map.get(flow.get('_index'))
         if not flow.get("service") and flow[
                 'app_service'] not in serivce_name_to_service_uid:
             # 如果没有匹配到任何被学习到的资源，可能是外部导入的 app-span，需要根据 span 自带的 app_service 进行统计
@@ -2031,9 +1959,17 @@ def merge_service(services, app_flows, response):
     response["services"] = _call_metrics(metrics_map)
 
 
-def format_final_result(services, networks, app_flows, _id, network_delay_us):
+def format_final_result(
+    services, networks, app_flows, _id, network_delay_us: int,
+    flow_index_to_id0: list,
+    related_flow_index_map: defaultdict(inner_defaultdict_set)):
+    """
+    格式化返回结果
+    """
     response = format_trace(services, networks, app_flows)
-    pruning_trace(response, _id, network_delay_us)
+    pruning_trace(response, _id, network_delay_us)  # XXX: slow function
+    calculate_related_ids(response, flow_index_to_id0,
+                          related_flow_index_map)  # XXX: slow function
     traces = response.get('tracing', [])
     uid_index_map = {trace["id"]: i for i, trace in enumerate(traces)}
     for trace in traces:
@@ -2054,7 +1990,6 @@ def format_final_result(services, networks, app_flows, _id, network_delay_us):
 class TraceSort:
     def __init__(self, traces):
         self.traces = traces
-        self.sorted_indexs = []
 
     def sort_tracing(self):
         self.traces = sorted(self.traces, key=lambda x: x["start_time_us"])
@@ -2107,20 +2042,24 @@ def _call_metrics(services: dict):
 
 def _get_flow_dict(flow: DataFrame):
     flow_dict = {
+        "id":
+        flow["_index"],  # 注意：字段名修改
         "_ids":
-        list(map(str, flow["_id"])),
+        list(map(str, flow["_id"])),  # 数据库中的 l7_flow_log._id，由于发生了聚合这里是一个数组
+        "related_ids":
+        None,  # 对标返回结果中的 _ids 字段，即程序逻辑中的 _id 字段，此时原 flow 中还没有这个字段
+        "signal_source":
+        flow["signal_source"],
         "type":
         flow["type"],
-        "related_ids":
-        flow["related_ids"],
         "start_time_us":
         flow["start_time_us"],
         "end_time_us":
         flow["end_time_us"],
         "duration":
-        flow["end_time_us"] - flow["start_time_us"],
+        flow["response_duration"],  # 注意：字段名修改
         "selftime":
-        flow["duration"],
+        flow["selftime"],
         "tap_side":
         flow["tap_side"],
         "Enum(tap_side)":
@@ -2165,8 +2104,6 @@ def _get_flow_dict(flow: DataFrame):
         flow["syscall_cap_seq_1"],
         "attribute":
         flow.get("attribute", None),
-        "id":
-        flow["_uid"],
         "parent_id":
         flow.get("parent_id", -1),
         "childs":
@@ -2200,7 +2137,7 @@ def _get_flow_dict(flow: DataFrame):
         "tap":
         flow.get("tap", None)
     }
-    if flow["tap_side"] in [TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
+    if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
         flow_dict["subnet"] = flow.get("subnet")
         flow_dict["ip"] = flow.get("ip")
         flow_dict["auto_service"] = flow.get("auto_service")
@@ -2217,11 +2154,11 @@ def _get_df_key(df: DataFrame, key: str):  # XXX: 待删除，nan 在最源头�
 
 
 def _set_parent(flow, flow_parent, info=None):
-    flow['parent_id'] = flow_parent['_uid']
+    flow['parent_id'] = flow_parent['_index']
     if flow_parent.get("childs"):
-        flow_parent["childs"].append(flow['_uid'])
+        flow_parent["childs"].append(flow['_index'])
     else:
-        flow_parent["childs"] = [flow['_uid']]
+        flow_parent["childs"] = [flow['_index']]
     flow['set_parent_info'] = info
 
 
@@ -2309,12 +2246,12 @@ def get_parent_trace(parent_trace, traces):
     if not traces:
         return parent_trace
     for trace in traces:
-        if trace.get('_uid') == parent_trace.get('_uid'):
+        if trace.get('_index') == parent_trace.get('_index'):
             continue
         if trace.get('x_request_id_0') == parent_trace.get('x_request_id_1'):
             # Avoid ring
             new_traces = [
-                i for i in traces if i.get('_uid') != trace.get('_uid')
+                i for i in traces if i.get('_index') != trace.get('_index')
             ]
             # 递归，继续在 `traces` 里找到 `trace` 的子节点
             return get_parent_trace(trace, new_traces)
@@ -2324,13 +2261,15 @@ def get_parent_trace(parent_trace, traces):
 
 def sort_by_x_request_id(traces):
     for trace_0 in traces:
+        if not trace_0.get('x_request_id_0'):
+            continue
+
         if trace_0.get('parent_id', -1) < 0:
             parent_traces = []
             for trace_1 in traces:
-                if trace_0.get('_uid') == trace_1.get('_uid'):
+                if trace_0.get('_index') == trace_1.get('_index'):
                     continue
-                if not trace_1.get('x_request_id_1') or not trace_0.get(
-                        'x_request_id_0'):
+                if not trace_1.get('x_request_id_1'):
                     continue
                 # 这里确定父子关系
                 # 逻辑顺序是 [前端，网关1，网关2，后端]
