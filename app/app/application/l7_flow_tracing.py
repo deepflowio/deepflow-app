@@ -651,8 +651,8 @@ class L7FlowTracing(Base):
         # 这里实际上包含几个动作：排序+合并+分组+设置父子关系
         l7_flows_merged, app_flows, networks = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
-        return format(l7_flows_merged, networks, app_flows,
-                      self.args.get('_id'), network_delay_us)
+        return format_final_result(l7_flows_merged, networks, app_flows,
+                                   self.args.get('_id'), network_delay_us)
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True, debug=self.args.debug)
@@ -1061,12 +1061,12 @@ class L7SyscallMeta:
                 'syscall_trace_id_response']
             if _id_df == self._id or self.vtap_id != vtap_id_df:
                 continue
-            if self.syscall_trace_id_request > 0:
+            if self.syscall_trace_id_request:
                 if self.syscall_trace_id_request == syscall_trace_id_request_df or self.syscall_trace_id_request == syscall_trace_id_response_df:
                     related_map[_id_df][self._id] = related_map[_id_df].get(
                         self._id, set())
                     related_map[_id_df][self._id].add('syscall')
-            if self.syscall_trace_id_response > 0:
+            if self.syscall_trace_id_response:
                 if self.syscall_trace_id_response == syscall_trace_id_request_df or self.syscall_trace_id_response == syscall_trace_id_response_df:
                     related_map[_id_df][self._id] = related_map[_id_df].get(
                         self._id, set())
@@ -1123,7 +1123,7 @@ class Networks:
         # 标识 span_id 用于匹配 app-span
         self.span_id = None
         # 标识是否已找到了 sys-span，如果有则不需要关联 app-span，优先设置为 sys-span 的 parent/child
-        self.has_syscall = False
+        self.has_sys_span = False
         # 存储所有 MERGE_KEYS 数据，用于匹配另一个 flow 是否完全一致
         self.metas = {}
         # 分组聚合所有 tcp_seq 相同的 flow
@@ -1142,19 +1142,23 @@ class Networks:
             #       这是因为存在一类单向的、type = SESSION 的调用日志，例如 MySQL Close、RabbitMQ Connection.Blocked，
             #       由于他们永远不会有 Response（或 Request），Agent 会将它的 type 强制置为 SESSION。
             #       当 type = SESSION 时，即使某个方向的 TCP Seq 为 0，也意味着它需要进行比较。
-            if self.req_tcp_seq is not None and flow['type'] != L7_FLOW_TYPE_RESPONSE and (
-                    self.req_tcp_seq != flow["req_tcp_seq"]):
+            if self.req_tcp_seq is not None and flow[
+                    'type'] != L7_FLOW_TYPE_RESPONSE and (self.req_tcp_seq !=
+                                                          flow["req_tcp_seq"]):
                 return False
-            if self.resp_tcp_seq is not None and flow['type'] != L7_FLOW_TYPE_REQUEST and (
-                    self.resp_tcp_seq != flow["resp_tcp_seq"]):
+            if self.resp_tcp_seq is not None and flow[
+                    'type'] != L7_FLOW_TYPE_REQUEST and (self.resp_tcp_seq !=
+                                                         flow["resp_tcp_seq"]):
                 return False
 
             # One has only req_tcp_seq, the other has only resp_tcp_seq
             for key in MERGE_KEYS:
-                if not self.req_tcp_seq or not flow['req_tcp_seq']: # no request in self.flows or flow
+                if not self.req_tcp_seq or not flow[
+                        'req_tcp_seq']:  # no request in self.flows or flow
                     if key in MERGE_KEY_REQUEST:  # skip keys only for requsest
                         continue
-                if not self.resp_tcp_seq or not flow['resp_tcp_seq']:  # no response in self.flows or flow
+                if not self.resp_tcp_seq or not flow[
+                        'resp_tcp_seq']:  # no response in self.flows or flow
                     if key in MERGE_KEY_RESPONSE:  # skip keys only for response
                         continue
                 if self.get(key) and flow.get(key):
@@ -1162,7 +1166,9 @@ class Networks:
                     # 虽然 http2 不仅仅只有 grpc 一种实现，但如果两个流只有 l7_protocol 协议不一致而其他值都一致，则仍然认为是同一个流
                     if key == 'l7_protocol' and self.get(key) in [
                             L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
-                    ] and flow.get(key) in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC]:
+                    ] and flow.get(key) in [
+                            L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC
+                    ]:
                         continue
                     # 如果 self/flow 的 merge_keys 任意一个不相等，应直接返回
                     if self.get(key) != flow.get(key):
@@ -1201,7 +1207,7 @@ class Networks:
         ]:
             # 标识 self 根据 tcp_seq 找到了对应的 sys-span
             # 对 s/s-nd，需要找 s-p，对 c/c-nd 需要找 c-p
-            self.has_syscall = True
+            self.has_sys_span = True
             # self 不一定是 net-span，外层的调用是 net-span + sys-span 组成的列表
             flow["networks"] = self
         return True
@@ -1223,8 +1229,9 @@ class Networks:
             # 这里做一个简单的处理，当相邻两个 Span 都是 SYS Span 时不要按照 TCP Seq 来设置他们的 Parent 关系。
             if self.flows[i]["tap_side"] in [
                     TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-                    ] and self.flows[i + 1]["tap_side"] in [
-                            TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS]:
+            ] and self.flows[i + 1]["tap_side"] in [
+                    TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
+            ]:
                 continue
             _set_parent(self.flows[i], self.flows[i + 1],
                         "trace mounted due to tcp_seq")
@@ -1482,7 +1489,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 # case #2: for DNS sys span, a session (flows[i]) can be merged with a consequence response (flow)
                 # Note: We could omit the judgment condition for #1, since it is covered by the condition for #2.
                 #       However, we have kept all the conditions for the sake of clarity.
-                if not flows[i]['resp_tcp_seq'] or flows[i]['end_time_us'] < flow['end_time_us']:
+                if not flows[i]['resp_tcp_seq'] or flows[i][
+                        'end_time_us'] < flow['end_time_us']:
                     flows[i]['end_time_us'] = flow['end_time_us']
                     flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
                     flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
@@ -1664,7 +1672,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 获取没有系统span存在的networks分组
     net_spanid_flows = defaultdict(list)
     for network in networks:
-        if not network.has_syscall and network.span_id:
+        if not network.has_sys_span and network.span_id:
             net_spanid_flows[network.span_id] = network
 
     ## 排序
@@ -2043,7 +2051,7 @@ def merge_service(services, app_flows, response):
     response["services"] = _call_metrics(metrics_map)
 
 
-def format(services, networks, app_flows, _id, network_delay_us):
+def format_final_result(services, networks, app_flows, _id, network_delay_us):
     response = format_trace(services, networks, app_flows)
     pruning_trace(response, _id, network_delay_us)
     traces = response.get('tracing', [])
@@ -2198,12 +2206,12 @@ def _get_flow_dict(flow: DataFrame):
         "tap_port_name":
         flow["tap_port_name"],
         "resource_from_vtap":
-        flow["resource_from_vtap"][2]
-        if flow["resource_from_vtap"][0] else None,
+        flow["resource_from_vtap"][2] if len(flow["resource_from_vtap"]) >= 3
+        and flow["resource_from_vtap"][0] else None,
         "set_parent_info":
         flow.get("set_parent_info"),
         "auto_instance":
-        flow["auto_instance_0"] if flow["tap_side"][0] == 'c'
+        flow["auto_instance_0"] if flow["tap_side"].startswith('c')
         and flow["tap_side"] != "app" else flow["auto_instance_1"],
         "tap_id":
         flow.get("tap_id", None),
