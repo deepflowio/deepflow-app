@@ -11,6 +11,7 @@ from .base import Base
 from common import const
 from common.utils import curl_perform
 from common.const import HTTP_OK
+from common.disjoint_set import DisjointSet
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 log = logger.getLogger(__name__)
@@ -1441,17 +1442,18 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 return False
 
         # merge flow
+        if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
+            flows[i]['type'] = L7_FLOW_TYPE_SESSION
         for key in flow.keys():
             if key == '_id':
                 flows[i][key].extend(flow[key])
-            elif not flows[i].get(key):
+            elif not flows[i].get(key):  # attention: L7_FLOW_TYPE_REQUEST = 0
                 flows[i][key] = flow[key]
         flows[i]['end_time_us'] = flow['end_time_us']
-        flows[i]['duration'] = flows[i]['end_time_us'] - flows[i]['start_time_us']
+        flows[i][
+            'duration'] = flows[i]['end_time_us'] - flows[i]['start_time_us']
         flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
         flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
-        if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
-            flows[i]['type'] = L7_FLOW_TYPE_SESSION
         return True
 
     return False
@@ -1852,35 +1854,65 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
             return
 
 
+def _range_overlap(start_1: int, end_1: int, start_2: int, end_2: int,
+                   deviation: int) -> bool:
+    return end_1 + deviation >= start_2 and end_2 + deviation >= start_1
+
+
 # Obtain traces after pruning
-def get_tree(_id, remain_trees, network_delay_us):
-    trees = []
-    tree_ids = []
-    new_remain_trees = []
-    root_start_time_us = 0
-    root_end_time_us = 0
-    # 当出现多棵树的时候，先按遍历顺序随机选取一棵树作为 root 来做后续判断
-    for trace in remain_trees:
-        trace_start_time_us = trace.get('start_time_us', 0)
-        trace_end_time_us = trace.get('end_time_us', 0)
-        if not root_start_time_us:
-            root_start_time_us = trace_start_time_us
-        if not root_end_time_us:
-            root_end_time_us = trace_end_time_us
-        _ids = trace.get('_ids', [])
-        # 遍历其他的树，如果其他树和 root 的时间范围有交叠（流时差范围内），不被剪枝
-        if trace_start_time_us - network_delay_us <= root_end_time_us and trace_end_time_us + network_delay_us >= root_start_time_us:
-            trees.append(trace)
-            tree_ids.extend(_ids)
+def pruning_flows(_id, flows, network_delay_us):
+    _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _uid change to id
+
+    # 构建一个并查集，用来将所有的 Trace 划分为一个个 Tree
+    disjoint_set = DisjointSet()
+    for flow in flows:
+        index = flow[_FLOW_INDEX_KEY]
+        disjoint_set.put(index, flow['parent_id'])
+        disjoint_set.get(index)  # compress tree
+
+    # 记录所有 Trace Tree 的最小、最大时间
+    trace_trees = {}
+    root_of_initial_flow = -1
+    for flow in flows:
+        index = flow[_FLOW_INDEX_KEY]
+        root = disjoint_set.get(index)
+        if _id in flow['_ids']:
+            root_of_initial_flow = root
+        if root not in trace_trees:
+            trace_trees[root] = {
+                'min_start_time_us': flow['start_time_us'],
+                'max_end_time_us': flow['end_time_us'],
+            }
         else:
-            # 此处被剪枝
-            new_remain_trees.append(trace)
-    if _id not in tree_ids and new_remain_trees:
-        # 如果入口点击的 _id 不在保留的树内，那就一定在被剪枝的树内，说明与 root 相关的树不是求值结果，这里反转以被剪枝的树作为主体重新求值
-        # FIXME: 有可能被 append 到 `trees` 里的树和 `new_remain_trees` 也有交叠，此时可能剪多了，应该要回溯检查
-        return get_tree(_id, new_remain_trees, network_delay_us)
-    else:
-        return trees
+            time_range = trace_trees[root]
+            if time_range['min_start_time_us'] > flow['start_time_us']:
+                time_range['min_start_time_us'] = flow['start_time_us']
+            if time_range['max_end_time_us'] < flow['end_time_us']:
+                time_range['max_end_time_us'] = flow['end_time_us']
+
+    if len(trace_trees) == 1:
+        return flows
+
+    # 保留与 root_of_initial_flow 所在 Trace Tree 时间有交叠的 Trace Tree
+    final_flows = []
+    initial_tree_start_time_us = trace_trees[root_of_initial_flow][
+        'min_start_time_us']
+    initial_tree_end_time_us = trace_trees[root_of_initial_flow][
+        'max_end_time_us']
+    for root, time_range in trace_trees.items():
+        if not _range_overlap(
+                time_range['min_start_time_us'],
+                time_range['max_end_time_us'],
+                initial_tree_start_time_us,
+                initial_tree_end_time_us,
+                network_delay_us,
+        ):
+            continue
+        for flow in flows:
+            if disjoint_set.get(flow[_FLOW_INDEX_KEY]) == root:
+                final_flows.append(flow)
+
+    return final_flows
 
 
 def pruning_trace(response, _id, network_delay_us):
@@ -1888,7 +1920,7 @@ def pruning_trace(response, _id, network_delay_us):
     剪枝
     """
     traces = response.get('tracing', [])
-    response['tracing'] = get_tree(_id, traces, network_delay_us)
+    response['tracing'] = pruning_flows(_id, traces, network_delay_us)
 
 
 def merge_service(services, app_flows, response):
