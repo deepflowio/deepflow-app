@@ -1,4 +1,4 @@
-FROM python:3.8-slim-bookworm AS runner
+FROM python:3.8.19-slim-bullseye AS runner
 ARG TARGETARCH
 RUN apt-get update && apt-get upgrade -y
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools
