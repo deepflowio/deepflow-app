@@ -1563,7 +1563,7 @@ def app_flow_set_service(app_flows: list):
             if child["parent_span_id"] == parent["span_id"]:
                 if child["app_service"] == parent["app_service"]:
                     if child.get("service",
-                                  None) and not parent.get("service", None):
+                                 None) and not parent.get("service", None):
                         parent["service"] = child["service"]
                         child["service"].app_flow_of_direct_flows.append(
                             parent)
@@ -1581,7 +1581,7 @@ def app_flow_set_service(app_flows: list):
             if child["parent_span_id"] == parent["span_id"]:
                 if child["app_service"] == parent["app_service"]:
                     if child.get("service",
-                                  None) and not parent.get("service", None):
+                                 None) and not parent.get("service", None):
                         parent["service"] = child["service"]
                         child["service"].app_flow_of_direct_flows.append(
                             parent)
@@ -1609,6 +1609,7 @@ def networks_set_to_app_flow(app_flows, network_flows_grouping_spanid):
             app_span["network_flows"] = network_flows_grouping_spanid[
                 app_span["span_id"]]
 
+
 def app_flow_sort(app_flows: list):
 
     for app_span in app_flows:
@@ -1621,7 +1622,8 @@ def app_flow_sort(app_flows: list):
             if app_span["parent_span_id"] == app_parent_span["span_id"]:
                 # 2. 若存在parent_span_id，且span_id等于该parent_span_id的flow存在span_id相同的网络span，则将该应用span的parent设置为该网络span
                 if app_parent_span.get("network_flows"):
-                    _set_parent(app_span, app_parent_span["network_flows"].flows[-1],
+                    _set_parent(app_span,
+                                app_parent_span["network_flows"].flows[-1],
                                 "app_flow mounted due to parent_network")
                 else:
                     # 3. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
@@ -2024,11 +2026,17 @@ class TraceSort:
         finded_child_ids = []
         # 找到 parent_id = -1 的 span，意味着它是一个 service 的起点
         # FIXME: 这里仍然有可能丢弃 span，考虑增加一个环检测，避免所有 span 的 parent_id > -1
+        final_result_count = 0
         for trace in self.traces:
             if trace["parent_id"] == -1:
                 spans.append(trace)
                 spans.extend(self.find_child(trace["childs"],
                                              finded_child_ids))
+                final_result_count += len(spans)
+        if len(self.traces) - final_result_count > 0:
+            log.warning(
+                f"trace drop[{len(self.traces) - final_result_count}] due to ring between traces"
+            )
         return spans
 
     def find_child(self, child_ids, finded_child_ids):
@@ -2229,47 +2237,49 @@ def network_flow_sort(traces):
                 sorted_traces.insert(0, sys_trace)
             else:
                 sorted_traces.append(sys_trace)
-    else:
-        # 对非 local/rest 的 span 按 tap_side rank 排序
-        sorted_traces = sorted(
-            sorted_traces + sys_traces,
-            key=lambda x:
-            (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
+        return sorted_traces
+
+    # 对非 local/rest 的 span 按 tap_side rank 排序
+    sorted_traces = sorted(
+        sorted_traces + sys_traces,
+        key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
+
     return sorted_traces
 
 
-def get_parent_trace(parent_trace, traces):
+def get_parent_trace(parent_flow, parent_traces):
     """
     `traces` 来源于 network_flows，迭代直到找到 parent_trace 最下级的 flow
     FIXME: 由于这里寻父逻辑与前面`基于观测点的寻父`与`基于 span_id 的寻父`逻辑不同，有可能成环，考虑让前两种寻父逻辑作为校验
     """
-    if not traces:
-        return parent_trace
-    for trace in traces:
-        if trace.get('_index') == parent_trace.get('_index'):
+    if not parent_traces:
+        return parent_flow
+    for trace in parent_traces:
+        if trace.get('_index') == parent_flow.get('_index'):
             continue
-        if trace.get('x_request_id_0') == parent_trace.get('x_request_id_1'):
+        if trace.get('x_request_id_0') == parent_flow.get('x_request_id_1'):
             # Avoid ring
             new_traces = [
-                i for i in traces if i.get('_index') != trace.get('_index')
+                i for i in parent_traces
+                if i.get('_index') != trace.get('_index')
             ]
             # 递归，继续在 `traces` 里找到 `trace` 的子节点
             return get_parent_trace(trace, new_traces)
-    else:
-        return parent_trace
+        else:
+            return parent_flow
 
 
-def sort_by_x_request_id(traces):
-    for trace_0 in traces:
-        if not trace_0.get('x_request_id_0'):
+def sort_by_x_request_id(traces: list):
+    for child in traces:
+        if not child.get('x_request_id_0'):
             continue
 
-        if trace_0.get('parent_id', -1) < 0:
+        if child.get('parent_id', -1) < 0:
             parent_traces = []
-            for trace_1 in traces:
-                if trace_0.get('_index') == trace_1.get('_index'):
+            for parent in traces:
+                if child.get('_index') == parent.get('_index'):
                     continue
-                if not trace_1.get('x_request_id_1'):
+                if not parent.get('x_request_id_1'):
                     continue
                 # 这里确定父子关系
                 # 逻辑顺序是 [前端，网关1，网关2，后端]
@@ -2279,12 +2289,18 @@ def sort_by_x_request_id(traces):
                 # 对后端：s 位置的 flow 有 x_request_id_y_0
                 # 综上，当 x_request_id_0 == x_request_id_1 时，x_request_id_1 一定是父节点
                 # 注意需要考虑网关无法部署 agent 的场景
-                if trace_1.get('x_request_id_1') == trace_0.get(
-                        'x_request_id_0'):
-                    parent_traces.append(trace_1)
+                if parent.get('x_request_id_1') == child.get('x_request_id_0'):
+                    if parent.get('x_request_id_1') == child.get(
+                            'x_request_id_1') or parent.get(
+                                'x_request_id_0') == child.get(
+                                    'x_request_id_0'):
+                        # FIXME: 这里直接 break 不要尝试找父级，会导致递归溢出，后续修改注意覆盖这种情况
+                        continue
+                    else:
+                        parent_traces.append(parent)
             # 如果span有多个父span，选父span的叶子span作为parent
             if parent_traces:
                 parent_trace = get_parent_trace(parent_traces[0],
                                                 parent_traces)
-                _set_parent(trace_0, parent_trace,
+                _set_parent(child, parent_trace,
                             "trace mounted due to x_request_id")
