@@ -2244,6 +2244,47 @@ def network_flow_sort(traces):
         sorted_traces + sys_traces,
         key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
 
+    # 获取入口 agent，顺序向后扫，找遇到的第一个 c-span
+    ingress_agent = ''
+    for i in range(0, len(sorted_traces)):
+        if sorted_traces[i]['tap_side'] in (const.TAP_SIDE_CLIENT_PROCESS,
+                                            const.TAP_SIDE_CLIENT_NIC,
+                                            const.TAP_SIDE_CLIENT_POD_NODE):
+            ingress_agent = sorted_traces[i]['vtap_id']
+            break
+
+    # 获取出口 agent，逆序向前扫，找遇到的第一个 s-span（也就是最后一个 child）
+    egress_agent = ''
+    for i in range(len(sorted_traces) - 1, -1, -1):
+        if sorted_traces[i]['tap_side'] in (const.TAP_SIDE_SERVER_PROCESS,
+                                            const.TAP_SIDE_SERVER_NIC,
+                                            const.TAP_SIDE_SERVER_POD_NODE):
+            egress_agent = sorted_traces[i]['vtap_id']
+            break
+
+    first_group = []
+    last_group = []
+    if ingress_agent != egress_agent:
+        if ingress_agent != '':
+            first_group = [
+                x for x in sorted_traces if x['vtap_id'] == ingress_agent
+            ]
+            first_group = sorted(first_group,
+                                 key=lambda x:
+                                 (x['start_time_us'], -x['end_time_us']))
+            sorted_traces = [x for x in sorted_traces if x not in first_group]
+        if egress_agent != '':
+            last_group = [
+                x for x in sorted_traces if x['vtap_id'] == egress_agent
+            ]
+            last_group = sorted(last_group,
+                                key=lambda x:
+                                (x['start_time_us'], -x['end_time_us']))
+            sorted_traces = [x for x in sorted_traces if x not in last_group]
+
+    # 维持相对顺序不变重新组合
+    sorted_traces = first_group + sorted_traces + last_group
+
     return sorted_traces
 
 
