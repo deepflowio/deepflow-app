@@ -46,6 +46,8 @@ L7_FLOW_RELATIONSHIP_X_REQUEST_ID = 'xrequestid'
 L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID = 'syscall'
 L7_FLOW_RELATIONSHIP_SPAN_ID = 'app'
 
+CAPTURE_CLOUD_NETWORK_TYPE = 3
+
 RETURN_FIELDS = list(
     set([
         # 追踪Meta信息
@@ -1519,11 +1521,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             if service.attach_app_flow(app_flow):
                 break
     app_flow_set_service(app_flows)
-    # 获取没有系统span存在的networks分组
-    net_spanid_flows = defaultdict(list)  # flow.span_id => Network()
-    for network in networks:
-        if not network.has_sys_span and network.span_id:
-            net_spanid_flows[network.span_id] = network
 
     ## 排序
 
@@ -1531,8 +1528,14 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 1.网络span按照tap_side_rank或response_duration进行排序，系统span始终在网络span的两头
     for network in networks:
         network.sort_and_set_parent()
+
     # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
-    networks_set_to_app_fow(app_flows, net_spanid_flows)
+    # 获取没有系统span存在的networks分组
+    net_span_grouping_spanid = defaultdict(list)  # flow.span_id => Network()
+    for network in networks:
+        if not network.has_sys_span and network.span_id:
+            net_span_grouping_spanid[network.span_id] = network
+    networks_set_to_app_flow(app_flows, net_span_grouping_spanid)
 
     ### 应用span排序
     app_flow_sort(app_flows)
@@ -1548,90 +1551,89 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     return services, app_flows, networks, flow_index_to_id0, related_flow_index_map
 
 
-def app_flow_set_service(array):
+def app_flow_set_service(app_flows: list):
     """
     将 app-span 挂到 Service 下
     FIXME: 240328: 这里相同的逻辑执行了两次，需要找到原因修正
     """
-    for flow_0 in array:
-        if flow_0.get('parent_id', -1) >= 0:
+    for child in app_flows:
+        if child.get('parent_id', -1) >= 0:
             continue
-        for flow_1 in array:
-            if flow_0["parent_span_id"] == flow_1["span_id"]:
-                if flow_0["app_service"] == flow_1["app_service"]:
-                    if flow_0.get("service",
-                                  None) and not flow_1.get("service", None):
-                        flow_1["service"] = flow_0["service"]
-                        flow_0["service"].app_flow_of_direct_flows.append(
-                            flow_1)
-                    elif not flow_0.get("service", None) and flow_1.get(
+        for parent in app_flows:
+            if child["parent_span_id"] == parent["span_id"]:
+                if child["app_service"] == parent["app_service"]:
+                    if child.get("service",
+                                  None) and not parent.get("service", None):
+                        parent["service"] = child["service"]
+                        child["service"].app_flow_of_direct_flows.append(
+                            parent)
+                    elif not child.get("service", None) and parent.get(
                             "service", None):
-                        flow_0["service"] = flow_1["service"]
-                        flow_1["service"].app_flow_of_direct_flows.append(
-                            flow_0)
+                        child["service"] = parent["service"]
+                        parent["service"].app_flow_of_direct_flows.append(
+                            child)
                 break
-    array.reverse()
-    for flow_0 in array:
-        if flow_0.get('parent_id', -1) >= 0:
+    app_flows.reverse()
+    for child in app_flows:
+        if child.get('parent_id', -1) >= 0:
             continue
-        for flow_1 in array:
-            if flow_0["parent_span_id"] == flow_1["span_id"]:
-                if flow_0["app_service"] == flow_1["app_service"]:
-                    if flow_0.get("service",
-                                  None) and not flow_1.get("service", None):
-                        flow_1["service"] = flow_0["service"]
-                        flow_0["service"].app_flow_of_direct_flows.append(
-                            flow_1)
-                    elif not flow_0.get("service", None) and flow_1.get(
+        for parent in app_flows:
+            if child["parent_span_id"] == parent["span_id"]:
+                if child["app_service"] == parent["app_service"]:
+                    if child.get("service",
+                                  None) and not parent.get("service", None):
+                        parent["service"] = child["service"]
+                        child["service"].app_flow_of_direct_flows.append(
+                            parent)
+                    elif not child.get("service", None) and parent.get(
                             "service", None):
-                        flow_0["service"] = flow_1["service"]
-                        flow_1["service"].app_flow_of_direct_flows.append(
-                            flow_0)
+                        child["service"] = parent["service"]
+                        parent["service"].app_flow_of_direct_flows.append(
+                            child)
                 break
-    array.reverse()
+    app_flows.reverse()
 
 
-def networks_set_to_app_fow(app_flows, network_flows):
+def networks_set_to_app_flow(app_flows, network_flows_grouping_spanid):
     """
     设置 net-span 与 app-span 的层级关系
     app_flows: app_flows
     network_flows: dict{flow.span_id: Network()}
     """
-    app_flows.reverse()
-    for flow in app_flows:
+    for app_span in app_flows:
         # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
-        if flow["span_id"] in network_flows:
-            _set_parent(network_flows[flow["span_id"]].flows[0], flow,
-                        "network mounted duo to span_id")
-            flow["network_flows"] = network_flows[flow["span_id"]]
-    app_flows.reverse()
+        if app_span["span_id"] in network_flows_grouping_spanid:
+            _set_parent(
+                network_flows_grouping_spanid[app_span["span_id"]].flows[0],
+                app_span, "network mounted duo to span_id")
+            app_span["network_flows"] = network_flows_grouping_spanid[
+                app_span["span_id"]]
 
+def app_flow_sort(app_flows: list):
 
-def app_flow_sort(array):
-
-    for flow_0 in array:
+    for app_span in app_flows:
         # 1. 若存在parent_span_id，且存在flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
-        if flow_0.get("parent_syscall_flow"):
-            _set_parent(flow_0, flow_0["parent_syscall_flow"],
+        if app_span.get("parent_syscall_flow"):
+            _set_parent(app_span, app_span["parent_syscall_flow"],
                         "app_flow mounted on syscall due to parent_span_id")
             continue
-        for flow_1 in array:
-            if flow_0["parent_span_id"] == flow_1["span_id"]:
+        for app_parent_span in app_flows:
+            if app_span["parent_span_id"] == app_parent_span["span_id"]:
                 # 2. 若存在parent_span_id，且span_id等于该parent_span_id的flow存在span_id相同的网络span，则将该应用span的parent设置为该网络span
-                if flow_1.get("network_flows"):
-                    _set_parent(flow_0, flow_1["network_flows"].flows[-1],
+                if app_parent_span.get("network_flows"):
+                    _set_parent(app_span, app_parent_span["network_flows"].flows[-1],
                                 "app_flow mounted due to parent_network")
                 else:
                     # 3. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
-                    _set_parent(flow_0, flow_1,
+                    _set_parent(app_span, app_parent_span,
                                 "app_flow mounted due to parent_span_id")
-        if flow_0.get('parent_id', -1) >= 0:
+        if app_span.get('parent_id', -1) >= 0:
             continue
-        if flow_0.get("service"):
+        if app_span.get("service"):
             # 4. 若有所属service，将该应用span的parent设置为该service的s-p的flow
-            if flow_0["service"].direct_flows[0][
+            if app_span["service"].direct_flows[0][
                     "tap_side"] == TAP_SIDE_SERVER_PROCESS:
-                _set_parent(flow_0, flow_0["service"].direct_flows[0],
+                _set_parent(app_span, app_span["service"].direct_flows[0],
                             "app_flow mouted on s-p in service")
                 continue
 
@@ -1808,6 +1810,10 @@ def pruning_flows(_id, flows, network_delay_us):
         else:
             tree_infos[root]['trace_ids'].add(flow['trace_id'])
 
+    # avoid unknown exceptions
+    if root_of_initial_flow < 0:
+        log.warning(f"cannot find the root of initial flow: [{_id}]")
+        return flows
     # 保留与 root_of_initial_flow 所在 Trace Tree 时间有交叠的 Trace Tree
     final_flows = []
     initial_tree_info = tree_infos[root_of_initial_flow]
@@ -2187,8 +2193,7 @@ def network_flow_sort(traces):
     """
     对网络span进行排序，排序规则：
     1. 按照TAP_SIDE_RANKS进行排序
-    2. 对Local和rest就近（比较采集器）排到其他位置附近（按时间排）
-    3. 网络 Span 中如 tap_side = local 或 rest 或 xx_gw 或者 tap!= 虚拟网络，则取消 tap_side 排序逻辑，改为响应时延长度倒排，TAP_SIDE_RANKS正排
+    2. 网络 Span 中如 tap_side = local 或 rest 或 xx_gw 或者 tap!= 虚拟网络，则取消 tap_side 排序逻辑，改为响应时延长度倒排，TAP_SIDE_RANKS正排
     """
     local_rest_traces = []
     sorted_traces = []
@@ -2200,7 +2205,7 @@ def network_flow_sort(traces):
                 const.TAP_SIDE_CLIENT_GATEWAY, const.TAP_SIDE_SERVER_GATEWAY,
                 const.TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR,
                 const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR
-        ] or trace['tap'] != "虚拟网络":  # FIXME: 确认虚拟网络是否已改名，以及这里要兼容多版本、多语言
+        ] or trace['tap_id'] != CAPTURE_CLOUD_NETWORK_TYPE:
             response_duration_sort = True
 
         if trace['tap_side'] in [const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST]:
@@ -2212,8 +2217,8 @@ def network_flow_sort(traces):
         else:
             sorted_traces.append(trace)
 
-    # 对非虚拟网络的 flow 按响应时延排序（认为火焰图应是倒三角结构）
     if response_duration_sort:
+        # 对非云内流量及有任意一个 local/rest span 按响应时延排序
         sorted_traces = sorted(
             sorted_traces + local_rest_traces,
             key=lambda x:
@@ -2224,38 +2229,12 @@ def network_flow_sort(traces):
                 sorted_traces.insert(0, sys_trace)
             else:
                 sorted_traces.append(sys_trace)
-        return sorted_traces
-
-    # 对非 local/rest 的 span 按 tap_side rank 排序
-    sorted_traces = sorted(
-        sorted_traces + sys_traces,
-        key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
-    if not sorted_traces:
-        sorted_traces += local_rest_traces
     else:
-        # 对 local/rest 位置的 span 排到 start_time 最接近的 span 位置
-        # 这里为了找到时间最接近的 span，经过两种搜索:
-        # 1. 先找 agent 相同，时间最接近的 span
-        # 2. 如果没有相同 agent，直接找时间最接近的 span
-        for trace in local_rest_traces:
-            vtap_index = -1
-            for i, sorted_trace in enumerate(sorted_traces):
-                if vtap_index > 0 and sorted_trace['vtap_id'] != trace[
-                        'vtap_id']:
-                    break
-                if sorted_trace['vtap_id'] == trace['vtap_id']:
-                    if sorted_trace['start_time_us'] < trace['start_time_us']:
-                        vtap_index = i + 1
-                    elif vtap_index == -1:
-                        vtap_index = i
-            if vtap_index >= 0:
-                sorted_traces.insert(vtap_index, trace)
-            else:
-                # FIXME: 这里需要改二分
-                for i, sorted_trace in enumerate(sorted_traces):
-                    if trace['start_time_us'] < sorted_trace['start_time_us']:
-                        sorted_traces.insert(i, trace)
-                        break
+        # 对非 local/rest 的 span 按 tap_side rank 排序
+        sorted_traces = sorted(
+            sorted_traces + sys_traces,
+            key=lambda x:
+            (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
     return sorted_traces
 
 
