@@ -874,7 +874,7 @@ class L7NetworkMeta:
                 'request_id',
                 'endpoint',
                 'http_proxy_client',
-                'requset_type',
+                'request_type',
                 'request_domain',
                 'request_resource',
                 'response_code',
@@ -2196,56 +2196,20 @@ def generate_span_id():
     return hex(RandomIdGenerator().generate_span_id())
 
 
-def network_flow_sort(traces):
+def network_flow_sort(traces: list):
     """
     对网络span进行排序，排序规则：
     1. 按照TAP_SIDE_RANKS进行排序
     2. 网络 Span 中如 tap_side = local 或 rest 或 xx_gw 或者 tap!= 虚拟网络，则取消 tap_side 排序逻辑，改为响应时延长度倒排，TAP_SIDE_RANKS正排
     """
-    local_rest_traces = []
-    sorted_traces = []
-    sys_traces = []
-    response_duration_sort = False
-    for trace in traces:
-        if trace['tap_side'] in [
-                const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST,
-                const.TAP_SIDE_CLIENT_GATEWAY, const.TAP_SIDE_SERVER_GATEWAY,
-                const.TAP_SIDE_CLIENT_GATEWAY_HAPERVISOR,
-                const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR
-        ] or trace['tap_id'] != CAPTURE_CLOUD_NETWORK_TYPE:
-            response_duration_sort = True
-
-        if trace['tap_side'] in [const.TAP_SIDE_LOCAL, const.TAP_SIDE_REST]:
-            local_rest_traces.append(trace)
-        elif trace['tap_side'] in [
-                const.TAP_SIDE_CLIENT_PROCESS, const.TAP_SIDE_SERVER_PROCESS
-        ]:
-            sys_traces.append(trace)
-        else:
-            sorted_traces.append(trace)
-
-    if response_duration_sort:
-        # 对非云内流量及有任意一个 local/rest span 按响应时延排序
-        sorted_traces = sorted(
-            sorted_traces + local_rest_traces,
-            key=lambda x:
-            (-x['response_duration'], const.TAP_SIDE_RANKS.get(x['tap_side']),
-             x['tap_side']))
-        for sys_trace in sys_traces:
-            if sys_trace['tap_side'] == const.TAP_SIDE_CLIENT_PROCESS:
-                sorted_traces.insert(0, sys_trace)
-            else:
-                sorted_traces.append(sys_trace)
-        return sorted_traces
-
-    # 对非 local/rest 的 span 按 tap_side rank 排序
+    # 先根据 tap_side 排序，方便找 client-side 和 server-side span
     sorted_traces = sorted(
-        sorted_traces + sys_traces,
+        traces,
         key=lambda x: (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
 
     # 获取入口 agent，顺序向后扫，找遇到的第一个 c-span
     ingress_agent = ''
-    for i in range(0, len(sorted_traces)):
+    for i in range(len(sorted_traces)):
         if sorted_traces[i]['tap_side'] in (const.TAP_SIDE_CLIENT_PROCESS,
                                             const.TAP_SIDE_CLIENT_NIC,
                                             const.TAP_SIDE_CLIENT_POD_NODE):
@@ -2261,28 +2225,43 @@ def network_flow_sort(traces):
             egress_agent = sorted_traces[i]['vtap_id']
             break
 
-    first_group = []
-    last_group = []
-    if ingress_agent != egress_agent:
-        if ingress_agent != '':
-            first_group = [
-                x for x in sorted_traces if x['vtap_id'] == ingress_agent
-            ]
-            first_group = sorted(first_group,
-                                 key=lambda x:
-                                 (x['start_time_us'], -x['end_time_us']))
-            sorted_traces = [x for x in sorted_traces if x not in first_group]
-        if egress_agent != '':
-            last_group = [
-                x for x in sorted_traces if x['vtap_id'] == egress_agent
-            ]
-            last_group = sorted(last_group,
-                                key=lambda x:
-                                (x['start_time_us'], -x['end_time_us']))
-            sorted_traces = [x for x in sorted_traces if x not in last_group]
+    for i in range(len(sorted_traces)):
+        if sorted_traces[i]['vtap_id'] == ingress_agent:
+            sorted_traces[i]['agent_rank'] = 0
+        elif sorted_traces[i]['vtap_id'] == egress_agent:
+            sorted_traces[i]['agent_rank'] = 2
+        else:
+            sorted_traces[i]['agent_rank'] = 1
 
-    # 维持相对顺序不变重新组合
-    sorted_traces = first_group + sorted_traces + last_group
+    sorted_traces = sorted(
+        sorted_traces,
+        key=lambda x:
+        (x['agent_rank'], x['vtap_id'], x['start_time_us'], -x['end_time_us']))
+
+    # 当 ingress_agent=egress_agent 时
+    # 如果中间穿过了其他节点数据，需要将所有 server-side span 排序到末尾
+    if ingress_agent == egress_agent:
+        first_serverside_index = -1
+        for i in range(len(sorted_traces)):
+            if sorted_traces[i]['tap_side'] in (
+                    const.TAP_SIDE_SERVER_GATEWAY,
+                    const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR,
+                    const.TAP_SIDE_SERVER_HYPERVISOR,
+                    const.TAP_SIDE_SERVER_POD_NODE,
+                    const.TAP_SIDE_SERVER_NIC,
+                    const.TAP_SIDE_SERVER_PROCESS):
+                first_serverside_index = i
+                break
+
+        diff_agent_index = -1
+        for i in range(first_serverside_index, len(sorted_traces)):
+            if sorted_traces[i]['agent_rank'] != 0:
+                diff_agent_index = i
+                break
+
+        if diff_agent_index > 0:
+            sorted_traces = sorted_traces[:first_serverside_index] + sorted_traces[
+                diff_agent_index:] + sorted_traces[first_serverside_index:diff_agent_index]
 
     return sorted_traces
 
