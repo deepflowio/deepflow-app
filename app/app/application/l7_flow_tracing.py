@@ -1125,6 +1125,391 @@ class Network:
                             "trace mounted due to tcp_seq")
 
 
+class SpanNode:
+
+    def __init__(self, flow: dict):
+        self.flow: dict = flow
+        self.signal_source: int = -1  # overwrite by Child Class
+        self.parent: SpanNode = None
+
+    def append_child(self, child, mounted_info: str = None):
+        # child is typeof(SpanNode)
+        child.parent = self
+        _set_parent(child.flow, self.flow, mounted_info)
+
+    def iterate_childs(self, spans: list) -> tuple[list, list]:
+        source: list[SpanNode] = spans[:]
+        stack: list[SpanNode] = [self]
+        childs: list[SpanNode] = [self]  # including self & self's childs
+        while stack:
+            node = stack.pop()
+            for span in source:
+                if span.parent == node:
+                    childs.append(span)
+                    stack.append(span)
+        source = [span for span in source if span not in childs]
+        return childs, source
+
+    def get_tap_side(self) -> str:
+        return self.flow.get('tap_side', '')
+
+    def get_parent_id(self) -> int:
+        return self.flow.get('parent_id', -1)
+
+    def get_flow_index(self) -> int:
+        return self.flow['_index']
+
+    def get_span_id(self) -> str:
+        return self.flow.get('span_id', '')
+
+    def get_parent_span_id(self) -> str:
+        return self.flow.get('parent_span_id', '')
+
+    def get_x_request_id_0(self) -> str:
+        return self.flow.get('x_request_id_0', '')
+
+    def get_x_request_id_1(self) -> str:
+        return self.flow.get('x_request_id_1', '')
+
+    def get_syscall_trace_id_request(self) -> int:
+        return self.flow.get('syscall_trace_id_request', 0)
+
+    def get_syscall_trace_id_response(self) -> int:
+        return self.flow.get('syscall_trace_id_response', 0)
+
+
+class AppSpanNode(SpanNode):
+
+    def __init__(self, flow_info: dict):
+        super().__init__(flow_info)
+        self.signal_source = L7_FLOW_SIGNAL_SOURCE_OTEL
+
+
+class SysCallSpanNode(SpanNode):
+
+    def __init__(self, flow_info: dict):
+        super().__init__(flow_info)
+        self.signal_source = L7_FLOW_SIGNAL_SOURCE_EBPF
+
+
+class ProcessSpanSet:
+
+    def __init__(self, group_index: str):
+        self.group_index = group_index
+        # 构建一个以列表形式访问 span 的树结构
+        self.spans: list[SpanNode] = []
+        # app_span_trees，用于存放 app-span 的树结构
+        self.app_span_roots: list[SpanNode] = None
+        self.leaf_syscall_trace_id_request: set[int] = set[int]()
+        self.leaf_syscall_trace_id_response: set[int] = set[int]()
+        # 用于显示调用拓扑使用
+        self.subnet_id = None
+        self.subnet = None
+        # 用于关联 event
+        self.process_id = None
+        self.process_kname = None
+        # 用于聚合包含 sys-span 的服务的时延
+        self.auto_service = None  # 在结果集中作为 service_uname
+        self.auto_service_id = None  # 在结果集中作为 service_uid
+        self.ip = None  # service_uname 的第二优先级
+        self.auto_service_type = None
+        # 当只有 app-span 数据时，避免被剪枝，记录 app_service
+        self.app_service = None
+
+    def __set_app_service(self, span: SpanNode):
+        if self.app_service is None:
+            self.app_service = span.flow.get('app_service', None)
+
+    def __set_value_for_sys_span(self, span: SpanNode):
+        """
+        此方法统一 sys-span 的统计字段并为 flow 生成一个无方向的 key
+        `pruning_trace` 剪枝之后，需要根据剩下的 trace 按 auto_service 分组统计时延消耗
+        为了避免同一进程的 sys-span 分组统计错误，这里统一校准字段
+        """
+        span_tap_side = span.get_tap_side()
+        for key in [
+                'subnet_id',
+                'subnet',
+                'ip',
+                'process_kname',
+                'process_id',
+        ]:
+            direction_key = f'{key}_0' if span_tap_side == TAP_SIDE_CLIENT_PROCESS else f'{key}_1'
+            if getattr(self, key):
+                span.flow[key] = getattr(self, key)
+            else:
+                setattr(self, key, span.flow[direction_key])
+                span.flow[key] = span.flow[direction_key]
+
+        # for auto_service_xx
+        for key in [
+                'auto_service_id',
+                'auto_service',
+                'auto_service_type',
+        ]:
+            direction_key = f'{key}_0' if span_tap_side == TAP_SIDE_CLIENT_PROCESS else f'{key}_1'
+            if getattr(self, key):
+                if self.auto_service_type in [0, 255]:
+                    setattr(self, key, span.flow[direction_key])
+                span.flow[key] = getattr(self, key)
+            else:
+                setattr(self, key, span.flow[direction_key])
+                span.flow[key] = span.flow[direction_key]
+
+    def append_app_span(self, app_flow: dict) -> SpanNode:
+        app_flow['process_span_set'] = self
+        span_node = AppSpanNode(app_flow)
+        self.spans.append(span_node)
+        self.__set_app_service(span_node)
+        return span_node
+
+    def append_sys_span(self, sys_flow: dict, tap_side: str) -> SpanNode:
+        sys_flow['process_span_set'] = self
+        span_node = SysCallSpanNode(sys_flow)
+        self.spans.append(span_node)
+        if tap_side == TAP_SIDE_CLIENT_PROCESS:
+            self.leaf_syscall_trace_id_request.add(
+                span_node.get_syscall_trace_id_request())
+            self.leaf_syscall_trace_id_response.add(
+                span_node.get_syscall_trace_id_response())
+        self.__set_value_for_sys_span(span_node)
+        return span_node
+
+    def get_app_span_roots(self) -> list[SpanNode]:
+        return self.app_span_roots
+
+    def get_roots(self) -> list[SpanNode]:
+        return [span for span in self.spans if span.parent is None]
+
+    def get_leafs(self, roots: list[SpanNode]) -> list[SpanNode]:
+        queue: list[SpanNode] = self.spans[:]
+        stack: list[SpanNode] = roots[:]
+        leafs: list[SpanNode] = []
+        while stack:
+            node = stack.pop()
+            child_count = 0
+            for span in queue:
+                if span.parent == node:
+                    stack.append(span)
+                    child_count += 1
+            if child_count == 0:
+                leafs.append(node)
+        return leafs
+
+    def __build_app_span_tree(self):
+        queue: list[SpanNode] = self.spans[:]
+        while queue:
+            node = queue.pop(0)
+            if node.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                continue
+            for app_span in self.spans:
+                if app_span.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                    continue
+                if app_span.get_parent_id() > 0:
+                    continue
+                if app_span.get_parent_span_id() == node.get_span_id():
+                    node.append_child(
+                        app_span, "app-span mounted due to parent_span_id")
+                    queue.append(app_span)
+
+    # return: list[ProcessSpanSet]
+    def split_to_multiple_process_span_set(self) -> list:
+        # 先构建树、app-span 内部的父子关系，确认 app-span 的结构
+        self.__build_app_span_tree()
+
+        # 构建一个 root 列表，以检测是否存在多个 root
+        app_span_roots = [
+            span for span in self.spans if span.get_parent_id() == -1
+            and span.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL
+        ]
+        unique_root_parent_id = set(span.get_parent_span_id()
+                                    for span in app_span_roots)
+
+        # 出现多个 root，则分裂为多个 ProcessSpanSet
+        if len(unique_root_parent_id) > 1:
+            # 复制一份 spans 用于寻找 root 的 child，每执行一次 iterate_childs 都会减少数据，减少重复遍历
+            left_spans = self.spans[:]
+            # 分裂过程中，同一个 parent_span_id 的 app-span root 仍然要放到同一个 ProcessSpanSet 中
+            split_result: dict[str, ProcessSpanSet] = {}
+            for root in app_span_roots:
+                if root.get_parent_span_id() not in split_result:
+                    newSet = ProcessSpanSet(root.get_parent_span_id())
+                    newSet.app_service = self.app_service
+                    newSet.app_span_roots = [root]
+                    newSet.spans, left_spans = root.iterate_childs(left_spans)
+                    split_result[root.get_parent_span_id()] = newSet
+                else:
+                    split_result[
+                        root.get_parent_span_id()].app_span_roots.append(root)
+                    childs, left_spans = root.iterate_childs(left_spans)
+                    split_result[root.get_parent_span_id()].spans.extend(
+                        childs)
+            return split_result.values()
+        else:
+            root_parent_id = unique_root_parent_id.pop()
+            # 如果 parent_span_id 为空说明这里是入口，即 root
+            # 极端情况下可能会有多个 root，这里没法分辨 app-span 多个 root 的关系，不做拆分
+            if root_parent_id == '':
+                root_parent_id = "root"  # 只是标记 group_index，没有实际作用
+            self.group_index = root_parent_id
+            self.app_span_roots = app_span_roots
+            # spans 不需要再 append 一次，保留原 span list
+            return [self]
+
+    def app_attach_syscall(self, syscall: dict, tap_side: str,
+                           roots: list[SpanNode],
+                           leafs: list[SpanNode]) -> bool:
+        '''
+        将 sys_span 按规则附加到 app_span 的头/尾:
+        s-p: 按 app_span.parent_span_id = sys_span.span_id, 作为 app_span 的 parent
+        c-p: 按 app_span.span_id = sys_span.span_id, 作为 app_span 的 child
+        '''
+        if tap_side == TAP_SIDE_SERVER_PROCESS:
+            return self.__attach_service_process(syscall, tap_side, roots)
+        elif tap_side == TAP_SIDE_CLIENT_PROCESS:
+            return self.__attach_client_process(syscall, tap_side, leafs)
+
+    def __attach_service_process(self, syscall: dict, tap_side: str,
+                                 app_span_roots: list[SpanNode]) -> bool:
+        syscall_span_id = syscall['span_id']
+        for app_root in app_span_roots:
+            if syscall_span_id and syscall_span_id == app_root.get_parent_span_id() \
+                and app_root.get_parent_id() < 0:
+                # 如果 span_id 匹配成功，s-p 作为 app-span 的 parent
+                sp_span_node = self.append_sys_span(syscall, tap_side)
+                sp_span_node.append_child(
+                    app_root,
+                    "s-p sys_span mounted due to same span_id as parent")
+                return True
+            elif not syscall_span_id and (
+                    syscall['syscall_trace_id_request'] in self.leaf_syscall_trace_id_request \
+                    or syscall['syscall_trace_id_response'] in self.leaf_syscall_trace_id_response) \
+                    and app_root.get_parent_id() < 0:
+                # and syscall['start_time_us'] < app_root.get_start_time_us() \
+                # and syscall['end_time_us'] > app_root.get_end_time_us() \
+                # 如果 span_id 不存在，说明可能是入口 span，上游没有注入 span_id，此时根据叶子节点 c-p 的 syscall_trace_id 匹配即可
+                # 这里匹配可以严格点，s-p 和 c-p 只会同侧(req-req / res-res)相等，避免误关联一个独立的 c-p
+                sp_span_node = self.append_sys_span(syscall, tap_side)
+                sp_span_node.append_child(
+                    app_root,
+                    "s-p sys_span mounted due to syscall_trace_id matched c-p")
+                return True
+        return False
+
+    def __attach_client_process(self, syscall: dict, tap_side: str,
+                                app_span_leafs: list[SpanNode]) -> bool:
+        syscall_span_id = syscall['span_id']
+        for app_leaf in app_span_leafs:
+            if syscall_span_id and syscall_span_id == app_leaf.get_span_id():
+                # app_span 作为 sys_span 的 parent
+                cp_span_node = self.append_sys_span(syscall, tap_side)
+                app_leaf.append_child(
+                    cp_span_node,
+                    "c-p sys_span mounted due to same span_id as child")
+                return True
+        return False
+
+    def try_attach_client_syscall(self, client_sys_flow: dict,
+                                  client_tap_side: str) -> bool:
+        '''
+        检查 client_sys_span 是否能被加入本 ProcessSpanSet 中
+        如果 self 有 s-p: s-p 时间必须覆盖 c-p ，且通过 syscall_trace_id 或 x_request_id 关联
+        如果 self 只有 c-p: 如果能通过 syscall_trace_id 关联，允许追加，但不能设置父子关系，仅仅是兄弟关系
+        '''
+        only_contains_cp = True
+        for span in self.spans:
+            if span.signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
+                if span.get_tap_side() == TAP_SIDE_SERVER_PROCESS:
+                    only_contains_cp = False
+                    # 做个防错，避免 auto_instance 匹配到 host 但实际进程不同的情况
+                    if span.flow['vtap_id'] != client_sys_flow['vtap_id'] \
+                        or _get_process_id(span.flow, TAP_SIDE_SERVER_PROCESS) != _get_process_id(client_sys_flow, client_tap_side):
+                        return False
+
+                    if span.flow['start_time_us'] > client_sys_flow['start_time_us'] \
+                        or span.flow['end_time_us'] < client_sys_flow['end_time_us']:
+                        # 不落入时间范围，由于一个 ProcessSpanSet 内只有 0/1 个 s-p，所以直接返回
+                        return False
+                    else:
+                        # syscall_trace_id 判断
+                        # 对 s-p 与 c-p，只能同侧相等（s-p 接收请求后作为 c-p 发出请求）/（c-p 接收响应后作为 s-p 回应请求）
+                        syscall_match = span.get_syscall_trace_id_request() == client_sys_flow['syscall_trace_id_request'] \
+                            or span.get_syscall_trace_id_response() == client_sys_flow['syscall_trace_id_response']
+
+                        # 对 c-p 与 c-p 之间，只能异侧相等（一个 c-p 接收响应后在同一线程发出另一个请求）
+                        # 这种情况下，尝试匹配 s-p 下的所有叶子节点 c-p 的 syscall_trace_id
+                        # 这里包含了兄弟 c-p 的关联关系
+                        client_syscall_match = client_sys_flow['syscall_trace_id_request'] in self.leaf_syscall_trace_id_response \
+                            or client_sys_flow['syscall_trace_id_response'] in self.leaf_syscall_trace_id_request
+
+                        # x_request_id 判断
+                        # s-p.x_req_id_1 = c-p.x_req_id_0: 注入 x_req_id
+                        # s-p.x_req_id_1 = c-p.x_req_id_1: 透传 x_req_id (x_req_id_0 同理)
+                        x_request_id_match = span.get_x_request_id_1() and \
+                            (span.get_x_request_id_1() == client_sys_flow['x_request_id_1'] \
+                            or span.get_x_request_id_0() == client_sys_flow['x_request_id_0'] \
+                            or span.get_x_request_id_1() == client_sys_flow['x_request_id_0'])
+
+                        mounted_info = ""
+                        if syscall_match:
+                            mounted_info = "syscall_trace_id matched to s-p root"
+                        elif x_request_id_match:
+                            mounted_info = "x_request_id matched to s-p root"
+                        elif client_syscall_match:
+                            mounted_info = "syscall_trace_id matched to c-p child"
+
+                        if syscall_match or x_request_id_match or client_syscall_match:
+                            # 任意一个条件满足，直接追加
+                            cp_span_node = self.append_sys_span(
+                                client_sys_flow, client_tap_side)
+                            span.append_child(
+                                cp_span_node,
+                                f"c-p sys-span mounted due to {mounted_info}")
+                            return True
+        # end of s-p match
+
+        if only_contains_cp:
+            if client_sys_flow['syscall_trace_id_request'] in self.leaf_syscall_trace_id_response \
+                or client_sys_flow['syscall_trace_id_response'] in self.leaf_syscall_trace_id_request:
+                cp_span_node = self.append_sys_span(client_sys_flow,
+                                                    client_tap_side)
+                return True
+
+        return False
+
+
+def _get_auto_instance(flow: dict, tap_side: str) -> str:
+    server_side_key = 'auto_instance_id_1'
+    client_side_key = 'auto_instance_id_0'
+    # 对 x-app 位置的 flow，有可能 auto_instance_id=0，说明是外部资源
+    # 外部资源不要分到同一组，改为使用 auto_instance （显示为 IP）分组
+    if tap_side == TAP_SIDE_SERVER_APP:
+        return flow[server_side_key] if flow[server_side_key] else flow[
+            'auto_instance_1']
+    elif tap_side == TAP_SIDE_CLIENT_APP:
+        return flow[client_side_key] if flow[client_side_key] else flow[
+            'auto_instance_0']
+    # 对 x-p 位置的 flow 一定能获取到 auto_instance_id
+    elif tap_side == TAP_SIDE_SERVER_PROCESS:
+        return flow[server_side_key]
+    elif tap_side == TAP_SIDE_CLIENT_PROCESS:
+        return flow[client_side_key]
+    elif tap_side == TAP_SIDE_APP:
+        auto_instance = flow[server_side_key] if flow[
+            server_side_key] else flow['auto_instance_1']
+        if not auto_instance:
+            return flow[client_side_key] if flow[client_side_key] else flow[
+                'auto_instance_0']
+        return auto_instance
+
+
+def _get_process_id(flow: dict, tap_side: str) -> str:
+    if tap_side == TAP_SIDE_SERVER_PROCESS:
+        return flow['process_id_1']
+    elif tap_side == TAP_SIDE_CLIENT_PROCESS:
+        return flow['process_id_0']
+
+
 class Service:
 
     def __init__(self, vtap_id: int, process_id: int):
@@ -1426,7 +1811,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     syscall_flows = []
     # 对 flow 分类，而后分别做排序，方便做层级处理
     # 对 network_flows: net-span 的排序按固定的顺序（TAP_SIDE_RANKS），然后根据 span_id 挂 app-span，根据 tcp_seq 挂 sys-span
-    # 对 network_flows local/rest/xx_gw 位置或非虚拟网络的 net-span，需要按照响应时延倒序，见 `network_flow_sort` 中 response_duration_sort 逻辑
     # 对 app_flows: app-span 按固定的规则设置层级（span_id/parent_span_id），按 span_id 挂 sys-span 以及挂到 sys-span 构建的 <service> 上
     # 对 syscall_flows: sys-span 需要提取<vtap_id, local_process_id>分组定义为<service> ，并以此为主体构建火焰图骨架
     for flow in flows:
@@ -1437,56 +1821,117 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
             app_flows.append(flow)
 
-    # 从Flow中提取Service：一个<vtap_id, local_process_id>二元组认为是一个Service。
-    # 所有的追踪先从 s-p 开始构建，至少找到一个 s-p 才能开始构建<Service>
-    # 先构建出所有的 Services
-    service_map = defaultdict(Service)
-    for flow in syscall_flows:
-        if flow['tap_side'] != TAP_SIDE_SERVER_PROCESS:
-            continue
-        local_process_id = flow['process_id_1']
-        vtap_id = flow['vtap_id']
-        if (vtap_id, local_process_id, 0) not in service_map:
-            service = Service(vtap_id, local_process_id)
-            service_map[(vtap_id, local_process_id, 0)] = service
-            # Service直接接收或发送的Flows
-            service.add_direct_flow(flow)
-        else:
-            index = 0
-            for key in service_map.keys():
-                if key[0] == vtap_id and key[1] == local_process_id:
-                    index += 1
-            service = Service(vtap_id, local_process_id)
-            service_map[(vtap_id, local_process_id, index)] = service
-            service.add_direct_flow(flow)
+    # 构建 Process Span Set
+    # 对 app_span 按 auto_instance_id/auto_instance 进行分组
+    process_span_map: dict[str, list[ProcessSpanSet]] = defaultdict(
+        list[ProcessSpanSet])
+    for flow in app_flows:
+        auto_instance = _get_auto_instance(flow, flow['tap_side'])
+        if auto_instance not in process_span_map:
+            sp_span_pss = ProcessSpanSet(auto_instance)
+            process_span_map[auto_instance] = [sp_span_pss]
+        process_span_map[auto_instance][0].append_app_span(flow)
 
-    # 根据构建出的 Service 找到直接关联的 c-p
-    # 如果无法找到 s-p，会从 c-p 构建一个新的 <Service>
-    for flow in syscall_flows:
-        if flow['tap_side'] != TAP_SIDE_CLIENT_PROCESS:
-            continue
-        local_process_id = flow['process_id_0']
-        vtap_id = flow['vtap_id']
-        index = 0
-        max_start_time_service = None  # 没有任何地方用到，仅仅用于 continue 循环或 debug
-        if (vtap_id, local_process_id, 0) in service_map:
-            for key, service in service_map.items():
-                if key[0] == vtap_id and key[1] == local_process_id:
-                    index += 1
-                    if service.check_client_process_flow(flow):
-                        if not max_start_time_service:
-                            max_start_time_service = service
-                        else:
-                            if service.start_time_us > max_start_time_service.start_time_us:
-                                max_start_time_service = service
-            if max_start_time_service:
-                max_start_time_service.add_direct_flow(flow)
+    # 一个 app-span 构成的 ProcessSpanSet 可能会有多个 root
+    # 如果这些 root 有同一个 parent_span_id: 说明只是还没关联 s-p 作为 parent，不需处理，后续逻辑会关联
+    # 如果这些 root 有不同的 parent_span_id: 说明这个服务被穿越了多次，要拆分为多个 ProcessSpanSet
+    for key, process_span_set_list in process_span_map.items():
+        split_process_span_set: list[ProcessSpanSet] = []
+        for sp_span_pss in process_span_set_list:
+            split_result = sp_span_pss.split_to_multiple_process_span_set()
+            split_process_span_set.extend(split_result)
+        process_span_map[key] = split_process_span_set
+
+    # s-p 按两种方式挂：同一 span_id 关联或 span_id 等于空但 s-p 与 c-p 有 syscall_trace_id 关联
+    # [x['tap_side'] != TAP_SIDE_CLIENT_PROCESS] 排序确定先挂 c-p 再挂 s-p，当无法找到 s-p 的 span_id 时，根据 c-p 的 syscall_trace_id 关联，确保 s-p 一定会关联上
+    # start_time_us 降序是为了让`left_syscall_flows`少做一次排序，不影响这里的 attach
+    syscall_flows = sorted(
+        syscall_flows,
+        key=lambda x:
+        (x['tap_side'] != TAP_SIDE_CLIENT_PROCESS, -x['start_time_us']))
+    # 如果没有 app-span 时，不要做无效扫描
+    if len(process_span_map) > 0:
+        # 临时变量，用于查找一个 `parent_span_id` 对应的所有叶子节点
+        leafs_map: dict[str, list[SpanNode]] = {}
+        for flow in syscall_flows:
+            if flow.get('process_span_set', None) is not None:
                 continue
-        # 没有attach到service上的flow生成一个新的service
-        service = Service(vtap_id, local_process_id)
-        service_map[(vtap_id, local_process_id, index)] = service
-        # Service直接接收或发送的Flow
-        service.add_direct_flow(flow)
+            # 多次用到 tap_side，提前获取减少访问
+            flow_tap_side = flow['tap_side']
+            auto_instance = _get_auto_instance(flow, flow_tap_side)
+            if auto_instance in process_span_map:
+                for sp_span_pss in process_span_map[auto_instance]:
+                    app_span_tree_roots = sp_span_pss.get_app_span_roots()
+                    if sp_span_pss.group_index not in leafs_map.keys():
+                        # 提前获取叶子节点，确保叶子节点都是 app-span
+                        leafs = sp_span_pss.get_leafs(app_span_tree_roots)
+                        leafs_map[sp_span_pss.group_index] = leafs
+                    leafs = leafs_map[sp_span_pss.group_index]
+                    if not sp_span_pss.app_attach_syscall(
+                            flow, flow_tap_side, app_span_tree_roots, leafs):
+                        # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
+                        continue
+
+    # 剩余的 sys_span 单独成 process_span_set
+    # 如果本次追踪没有 app_span，这里应是全部 syscall_flows
+    # 按 s-p/c-p 的顺序执行扫描，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
+    # 由于上面已经排序过按c-p/s-p 顺序加start_time_us 降序，这里直接反序即可
+    # 这里要求 start_time_us 升序，是因为有如下场景：
+    # 当 s-p 内发起多个 c-p 请求，c-p 构成兄弟关系，此时 s-p 只和头尾两个 c-p 有 syscall_trace_id 关联（最坏情况下无关联，只能通过 app-span 关联）
+    # 如果先扫描中间的 c-p，再扫描头尾，会导致中间的 c-p 无法关联，所以这里 start_time_us 升序确保头 c-p 先被关联，再让头 c-p 关联出它的兄弟 c-p
+    left_syscall_flows = [
+        flow for flow in syscall_flows
+        if flow.get('process_span_set', None) is None
+    ]
+    left_syscall_flows.reverse()
+    # 标记同一进程的 s-p 数量，同一个 process_span_set 内只允许存在最多一个 s-p
+    same_process_sp: dict[str, int] = dict.fromkeys(process_span_map.keys(), 1)
+    for flow in left_syscall_flows:
+        if flow.get('process_span_set', None) is not None:
+            continue
+        flow_tap_side = flow['tap_side']
+        # 使用 auto_instance 标记同一进程，用于在第一轮`app_attach_syscall`时没有 attach 到的 c-p 匹配同一进程的 s-p
+        auto_instance = _get_auto_instance(flow, flow_tap_side)
+        if flow_tap_side == TAP_SIDE_SERVER_PROCESS:
+            if auto_instance not in process_span_map:
+                sp_span_pss = ProcessSpanSet(auto_instance)
+                sp_span_pss.append_sys_span(flow, flow_tap_side)
+                process_span_map[auto_instance] = [sp_span_pss]
+                same_process_sp[auto_instance] = 1
+            else:
+                # s-p 在每个 ProcessSpanSet 中如果大于1个，说明这个进程被穿越多次，需要单独构建一个 ProcessSpanSet
+                index = same_process_sp[auto_instance] + 1
+                sp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
+                sp_span_pss.append_sys_span(flow, flow_tap_side)
+                process_span_map[auto_instance].append(sp_span_pss)
+                same_process_sp[auto_instance] = index
+        elif flow_tap_side == TAP_SIDE_CLIENT_PROCESS:
+            cp_matched_sp = False
+            # 这里可以认为所有 s-p 已经构建了 ProcessSpanSet
+            if auto_instance in process_span_map:
+                # 检查 c-p 是否在同一进程的 s-p 覆盖范围内，若不在，它应是独立的 ProcessSpanSet
+                # 若 ProcessSpanSet 内仅有 c-p，也会尝试添加 c-p
+                for sp_process_span_set in process_span_map[auto_instance]:
+                    if sp_process_span_set.try_attach_client_syscall(
+                            flow, flow_tap_side):
+                        cp_matched_sp = True
+                        break
+            if auto_instance not in process_span_map:
+                # 如果找不到 key，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
+                cp_span_pss = ProcessSpanSet(auto_instance)
+                cp_span_pss.append_sys_span(flow, flow_tap_side)
+                process_span_map[auto_instance] = [cp_span_pss]
+                same_process_sp[auto_instance] = 1
+            elif not cp_matched_sp:
+                # 这里 cp_matched_sp False 可能包含两种情况：
+                # 1. c-p 不在同一个进程的 s-p 时间范围内，或无关联关系
+                # 2. c-p 同进程的 ProcessSpanSet 内无 s-p，且无法与 c-p 匹配为兄弟
+                # 这两种情况都作为一个独立的 ProcessSpanSet
+                index = same_process_sp[auto_instance] + 1
+                cp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
+                cp_span_pss.append_sys_span(flow, flow_tap_side)
+                process_span_map[auto_instance].append(cp_span_pss)
+                same_process_sp[auto_instance] = index
 
     # 网络span及系统span按照tcp_seq进行分组
     # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
@@ -1514,13 +1959,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             network.add_flow(flows[_index])
             flow_aggregated.add(_index)
 
-    # 将应用span挂到Service上
-    for index, app_flow in enumerate(app_flows):
-        for service_key, service in service_map.items():
-            if service.attach_app_flow(app_flow):
-                break
-    app_flow_set_service(app_flows)
-
     ## 排序
 
     ### 网络span排序
@@ -1536,14 +1974,13 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             net_span_grouping_spanid[network.span_id] = network
     networks_set_to_app_flow(app_flows, net_span_grouping_spanid)
 
-    ### 应用span排序
-    app_flow_sort(app_flows)
-
     ### 系统span排序
-    for _, service in service_map.items():
-        # c-p排序
-        service.parent_set()
-    services = list(service_map.values())
+    process_span_list: list[ProcessSpanSet] = []
+    for _, process_span_sets in process_span_map.items():
+        for pss in process_span_sets:
+            process_span_list.append(pss)
+
+    services = process_span_list
     # s-p排序
     service_sort(services, app_flows)
     sort_by_x_request_id(network_flows)
@@ -2183,12 +2620,12 @@ def _get_df_key(df: DataFrame, key: str):  # XXX: 待删除，nan 在最源头�
     return df[key]
 
 
-def _set_parent(flow, flow_parent, info=None):
+def _set_parent(flow: dict, flow_parent: dict, info: str = None):
     flow['parent_id'] = flow_parent['_index']
-    if flow_parent.get("childs"):
-        flow_parent["childs"].append(flow['_index'])
+    if flow_parent.get('childs'):
+        flow_parent['childs'].append(flow['_index'])
     else:
-        flow_parent["childs"] = [flow['_index']]
+        flow_parent['childs'] = [flow['_index']]
     flow['set_parent_info'] = info
 
 
@@ -2247,8 +2684,7 @@ def network_flow_sort(traces: list):
                     const.TAP_SIDE_SERVER_GATEWAY,
                     const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR,
                     const.TAP_SIDE_SERVER_HYPERVISOR,
-                    const.TAP_SIDE_SERVER_POD_NODE,
-                    const.TAP_SIDE_SERVER_NIC,
+                    const.TAP_SIDE_SERVER_POD_NODE, const.TAP_SIDE_SERVER_NIC,
                     const.TAP_SIDE_SERVER_PROCESS):
                 first_serverside_index = i
                 break
@@ -2261,7 +2697,8 @@ def network_flow_sort(traces: list):
 
         if diff_agent_index > 0:
             sorted_traces = sorted_traces[:first_serverside_index] + sorted_traces[
-                diff_agent_index:] + sorted_traces[first_serverside_index:diff_agent_index]
+                diff_agent_index:] + sorted_traces[
+                    first_serverside_index:diff_agent_index]
 
     return sorted_traces
 
