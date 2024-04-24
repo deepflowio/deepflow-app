@@ -16,8 +16,17 @@ NODE_TYPE_REGION_MASTER = 1
 
 
 class Query(object):
-    def __init__(self, query_uuid, region, host, database, sql, datasource,
-                 query_id, debug):
+
+    def __init__(self,
+                 query_uuid,
+                 region,
+                 host,
+                 database,
+                 sql,
+                 datasource,
+                 query_id,
+                 debug,
+                 headers=None):
         self.query_uuid = query_uuid
         self.query_id = query_id
         self.region = region
@@ -31,6 +40,7 @@ class Query(object):
         self.query_region = -1
         self.result = None
         self.debug_info = None
+        self.headers = headers
 
     def to_dataframe(self, result):
         df = pd.DataFrame(data=result['values'], columns=result['columns'])
@@ -47,10 +57,10 @@ class Query(object):
         if self.datasource:
             data['datasource'] = self.datasource
         async with aiohttp.ClientSession() as session:
-            async with getattr(session,
-                               'post')(url,
-                                       data=data,
-                                       timeout=config.querier_timeout) as r:
+            async with getattr(session, 'post')(url,
+                                                data=data,
+                                                timeout=config.querier_timeout,
+                                                headers=self.headers) as r:
                 response = await r.read()
                 response = json.loads(response)
                 status_code = r.status
@@ -86,6 +96,7 @@ class Query(object):
 
 
 class Querier(object):
+
     def __init__(self,
                  callback=lambda x: x,
                  headers=None,
@@ -134,8 +145,11 @@ class Querier(object):
                                 datasource=None):
         self.sql = sql
         total_start_time = time.time()
+        headers = {}
+        if self.headers is not None and self.headers.get('X-Org-Id'):
+            headers = {"X-Org-Id": self.headers.get('X-Org-Id')}
 
-        queriers = await get_queriers()
+        queriers = await get_queriers(headers)
         if not queriers:
             return {
                 'description': "无法找到可用的查询节点",
@@ -155,7 +169,7 @@ class Querier(object):
             query_uuid = str(uuid.uuid4())
             querys.append(
                 Query(query_uuid, name, host, database, sql, datasource,
-                      self.query_id, self.debug))
+                      self.query_id, self.debug, headers))
         tasks = []
         for query in querys:
             if query.host:
@@ -182,7 +196,7 @@ class Querier(object):
 QUERIERS = {}
 
 
-async def get_queriers():
+async def get_queriers(headers=None):
     global QUERIERS
     if not QUERIERS:
         QUERIERS["time"] = time.time()
@@ -190,8 +204,10 @@ async def get_queriers():
     if QUERIERS["queriers"] and (time.time() - QUERIERS.get("time", 0) < 120):
         return QUERIERS["queriers"]
     res, code = await utils.curl_perform(
-        'get', f"http://{config.controller_server}:{config.controller_port}" +
-        f'/v1/controllers/')
+        'get',
+        f"http://{config.controller_server}:{config.controller_port}" +
+        f'/v1/controllers/',
+        headers=headers)
     if code == 200 and res['DATA']:
         queriers = dict()
         for item in res['DATA']:
