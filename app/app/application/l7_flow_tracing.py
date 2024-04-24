@@ -509,7 +509,7 @@ class L7FlowTracing(Base):
                                    flow_index_to_id0, related_flow_index_map)
 
     async def query_ck(self, sql: str):
-        querier = Querier(to_dataframe=True, debug=self.args.debug)
+        querier = Querier(to_dataframe=True, debug=self.args.debug, headers=self.headers)
         response = await querier.exec_all_clusters(DATABASE, sql)
         '''
         database = 'flow_log'  # database
