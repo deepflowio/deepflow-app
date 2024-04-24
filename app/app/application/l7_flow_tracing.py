@@ -479,6 +479,9 @@ class L7FlowTracing(Base):
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
         l7_flow_ids, app_spans_from_apm = await self.query_and_trace_flowmetas(
             time_filter, base_filter, max_iteration, network_delay_us)
+    
+        if len(l7_flow_ids) == 0:
+            return {}
 
         # 查询会获取这些 _id 对应的完整 l7_flow_log 信息。
         # 通过 RETURN_FIELDS 确定需要返回哪些字段（精简有用的返回信息）
