@@ -43,6 +43,8 @@ L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID = 'syscall'
 L7_FLOW_RELATIONSHIP_SPAN_ID = 'app'
 
 CAPTURE_CLOUD_NETWORK_TYPE = 3
+IP_AUTO_SERVICE = 255
+INTERNET_IP_AUTO_SERVICE = 0
 
 RETURN_FIELDS = list(
     set([
@@ -500,10 +502,10 @@ class L7FlowTracing(Base):
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
-        l7_flows_merged, app_flows, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
+        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
             l7_flows, network_delay_us, return_fields, ntp_delay_us)
 
-        return format_final_result(l7_flows_merged, networks, app_flows,
+        return format_final_result(l7_flows_merged, networks,
                                    self.args.get('_id'), network_delay_us,
                                    flow_index_to_id0, related_flow_index_map)
 
@@ -1083,6 +1085,12 @@ class L7AppMeta:
 
 
 class NetworkSpanSet:
+    """
+    一个 NetworkSpanSet 由如下 Span 组成：
+    - 零个或一个 c-p
+    - 零个或多个网络类型的 observation_point（即 tap_side）
+    - 零个或一个 s-p
+    """
 
     def __init__(self):
         # 标识 span_id 方便匹配 app-span
@@ -1276,6 +1284,13 @@ class SysCallSpanNode(SpanNode):
 
 
 class ProcessSpanSet:
+    """
+    一个 ProcessSpanSet 由如下 Span 组成：
+    - 零个或一个 s-p SysSpan
+    - 零个或多个 s-app、app、c-app，他们之间根据 span_id 和 parent_span_id 关系形成一棵树
+    - 且树根的 parent_span_id 指向 s-p 的 span_id
+    - 当 s-p 没有 span_id 时，AppSpan 的叶子 Span 指向 c-p，c-p 和 s-p 构成应用同一个线程的 Syscall
+    """
 
     def __init__(self, group_index: str):
         self.group_index = group_index
@@ -1332,7 +1347,9 @@ class ProcessSpanSet:
         ]:
             direction_key = f'{key}_0' if span_tap_side == TAP_SIDE_CLIENT_PROCESS else f'{key}_1'
             if getattr(self, key):
-                if self.auto_service_type in [0, 255]:
+                if self.auto_service_type in [
+                        IP_AUTO_SERVICE, INTERNET_IP_AUTO_SERVICE
+                ]:
                     setattr(self, key, span.flow[direction_key])
                 span.flow[key] = getattr(self, key)
             else:
@@ -1591,6 +1608,22 @@ def _get_process_id(flow: dict, tap_side: str) -> str:
         return flow['process_id_1']
     elif tap_side == TAP_SIDE_CLIENT_PROCESS:
         return flow['process_id_0']
+
+
+def _generate_pseudo_process_span_set(network_leaf: dict,
+                                      network_root: dict) -> ProcessSpanSet:
+    fake_sp = dict(network_leaf)
+    fake_sp['tap_side'] = TAP_SIDE_SERVER_PROCESS
+    fake_sp['_ids'] = []
+
+    fake_cp = dict(network_root)
+    fake_cp['tap_side'] = TAP_SIDE_CLIENT_PROCESS
+    fake_cp['_ids'] = []
+    pss = ProcessSpanSet(
+        f'pseudo-{fake_sp["req_tcp_seq"]}-{fake_sp["resp_tcp_seq"]}')
+    pss.append_sys_span(fake_sp)
+    pss.append_sys_span(fake_cp)
+    return pss
 
 
 def merge_flow(flows: list, flow: dict) -> bool:
@@ -1876,7 +1909,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 process_span_map[auto_instance].append(cp_span_pss)
                 same_process_sp[auto_instance] = index
 
-    # 网络span及系统span按照tcp_seq进行分组
+    # 构建 Network Span Set，每个 Network Span Set 里包含具有同一组 tcp_seq 的 net-span & sys-span
     # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
     networks: list[NetworkSpanSet] = []
     network_flows = sorted(network_flows + syscall_flows,
@@ -1905,136 +1938,179 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     ## 排序
 
     ### 网络span排序
-    # 1.网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
+    # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
         network.sort_network_spans()
         network.set_parent_relation()
         network.unify_response_status()
 
-    # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
-    # 获取没有系统span存在的networks分组
-    net_span_grouping_spanid = defaultdict(list)  # flow.span_id => Network()
-    for network in networks:
-        if not network.has_sys_span and network.span_id:
-            net_span_grouping_spanid[network.span_id] = network
-    networks_set_to_app_flow(app_flows, net_span_grouping_spanid)
+    ### Process Span Set 分离
+    process_span_list: list[ProcessSpanSet] = [
+        pss for _, process_span_sets in process_span_map.items()
+        for pss in process_span_sets
+    ]
 
-    ### 系统 span 分离
-    process_span_list: list[ProcessSpanSet] = []
-    for _, process_span_sets in process_span_map.items():
-        for pss in process_span_sets:
-            process_span_list.append(pss)
+    ### 连接 process span set 与 network span set
+    ### 注意这里连接顺序按如下优先级连接：
+    ### 1. process <-> net, 2. process <-> process 3. net <-> net
 
-    services = process_span_list
-    # s-p排序
-    service_sort(services, app_flows)
-    sort_by_x_request_id(network_flows)
-    return services, app_flows, networks, flow_index_to_id0, related_flow_index_map
+    ### 准备数据，从所有 process 和 network 中获取 root 和 leaf
+    process_root_list = [pss.get_roots()
+                         for pss in process_span_list]  # list of list
+    process_roots = [item for roots in process_root_list
+                     for item in roots]  # flat list
+    process_leafs = [
+        item for i in range(len(process_span_list))
+        for item in process_span_list[i].get_leafs(process_root_list[i])
+    ]
 
+    network_leafs = [network.flows[-1] for network in networks]
+    network_roots = [network.flows[0] for network in networks]
 
-def networks_set_to_app_flow(app_flows, network_flows_grouping_spanid):
-    """
-    设置 net-span 与 app-span 的层级关系
-    app_flows: app_flows
-    network_flows: dict{flow.span_id: Network()}
-    """
-    for app_span in app_flows:
-        # 2. 存在span_id相同的应用span，将该网络span的parent设置为该span_id相同的应用span
-        if app_span["span_id"] in network_flows_grouping_spanid:
-            _set_parent(
-                network_flows_grouping_spanid[app_span["span_id"]].flows[0],
-                app_span, "network mounted duo to span_id")
-            app_span["network_flows"] = network_flows_grouping_spanid[
-                app_span["span_id"]]
+    #### 1. process span set 的 leaf 作为 network span set root 的 parent
+    for ps_parent in process_leafs:
+        # 避免子循环多次访问字典
+        ps_index = ps_parent.get_flow_index()
+        ps_span_id = ps_parent.get_span_id()
+        for net_child in network_roots:
+            if net_child.get('parent_id', -1) >= 0:
+                continue
+            if ps_index == net_child['_index']:
+                # 共享一个 c-p, net_child parent == ps_parent 的 parent
+                continue
+            elif ps_span_id and ps_span_id == net_child['span_id']:
+                # net_child 一定是 net-span 且没有 c-p, ps_parent 一定是 app-span，共享一个 span_id，则 ps_parent 是 parent
+                _set_parent(net_child, ps_parent.flow,
+                            "net-span mounted due to same span_id")
 
+    #### 2. network span 的 leaf 作为 process span set root 的 parent
+    for ps_child in process_roots:
+        if ps_child.flow.get('parent_id', -1) >= 0:
+            continue
+        ps_index = ps_child.get_flow_index()
+        ps_span_id = ps_child.get_span_id()
+        for net_parent in network_leafs:
+            if ps_index == net_parent['_index']:
+                # 共享一个 s-p，则 ps_child 的 parent == net_parent 的 parent
+                continue
+            elif ps_span_id and ps_span_id == net_parent['span_id']:
+                # ps_child 一定是 app-span 且没有 s-p, net_parent 一定是 net-span 且没有 s-p，则 net_parent 是 parent
+                _set_parent(
+                    ps_child.flow, net_parent,
+                    f"{ps_child.get_tap_side()} mounted due to same span_id")
 
-def service_sort(services, app_flows):
-    """
-    设置不同的 service 之间的关系
-    由于一个 service 的起点定义为 s-p，所以这里只需要找到 s-p 的 parent
-    如果 s-p 的 parent 为 net-span，则找到 net-span 的 parent
-    """
-    app_flows_map = {app_flow["span_id"]: app_flow for app_flow in app_flows}
-    for i in range(len(services)):
-        if services[i].direct_flows[0]['tap_side'] == TAP_SIDE_SERVER_PROCESS:
-            # 1. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
-            # 对应顺序：[... app, c-app, c-p, c, c-nd, |跨越服务|, s-nd, s, s-p, s-app, app ...]
-            # 将 s-p 的 parent 设置为 c-app 或 s-p 的 s/s-nd 的 parent 设置为 c-app
-            if services[i].direct_flows[0].get("parent_app_flow"):
-                if services[i].direct_flows[0].get("networks") and \
-                    services[i].direct_flows[0]["networks"].flows[0].get('parent_id', -1) < 0:
-                    # 存在networks,且networks没有parent
-                    _set_parent(
-                        services[i].direct_flows[0]["networks"].flows[0],
-                        services[i].direct_flows[0]["parent_app_flow"],
-                        "trace mounted on app_flow due to parent_app_flow of s-p"
-                    )
+    #### 3. process span set 互相连接
+    for ps_child in process_roots:
+        if ps_child.flow.get('parent_id', -1) >= 0:
+            continue
+        ps_child_index = ps_child.get_flow_index()
+        ps_child_span_id = ps_child.get_span_id()
+        for ps_parent in process_leafs:
+            if ps_child_index == ps_parent.get_flow_index():
+                # 共享一个 c-p，则 ps_child 的 parent == ps_parent 的 parent
+                continue
+            elif ps_child_span_id and ps_child_span_id == ps_parent.get_span_id(
+            ):
+                # ps_child 可能是 app-span/s-p，ps_leaf 一定是 app-span，都没有 c-p, 共享一个 span_id
+                _set_parent(
+                    ps_child.flow, ps_parent.flow,
+                    f"{ps_child.get_tap_side()} mounted due to same span_id")
+
+    #### 4. network span set 互相连接
+    #### relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
+    network_match_parent: dict[int, int] = {}
+    for net_child in network_roots:
+        if net_child.get('parent_id', -1) >= 0:
+            continue
+        net_child_index = net_child['_index']
+        net_child_span_id = net_child['span_id']
+        net_child_req_tcp_seq = net_child['req_tcp_seq']
+        net_child_resp_tcp_seq = net_child['resp_tcp_seq']
+        net_child_x_request_id_0 = net_child['x_request_id_0']
+        net_child_x_request_id_1 = net_child['x_request_id_1']
+        net_child_response_duration = net_child['response_duration']
+        for net_parent in network_leafs:
+            # 避免同一个 tcp_seq 组内首尾相连
+            if net_parent['req_tcp_seq'] == net_child_req_tcp_seq \
+                or net_parent['resp_tcp_seq'] == net_child_resp_tcp_seq:
+                continue
+            if net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent[
+                    'x_request_id_1']:
+                # 网关注入 x_request_id 的场景
+                # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
+                # fake_pss = _generate_pseudo_process_span_set(
+                #     net_child, net_parent)
+                # process_span_list.append(fake_pss)
+                # flows.extend(fake_pss.spans)
+                _set_parent(
+                    net_child, net_parent,
+                    "net-span mounted due to x_request_id_0 match to x_request_id_1"
+                )
+            elif (net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent['x_request_id_0']) \
+                    or (net_child_x_request_id_1 and net_child_x_request_id_1 == net_parent['x_request_id_1']) \
+                    or (net_child_span_id and net_child_span_id == net_parent['span_id']):
+                # 网关透传 x_request_id 或透传 http header 中的 span_id
+                # 要求 parent 的所有 response_duration > child 最大的 response_duration
+                # 由于一个 net-span 内是按 c 端 agent 在前+start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
+                if net_parent[
+                        'response_duration'] < net_child_response_duration:
                     continue
-                elif services[i].direct_flows[0].get('parent_id', -1) < 0:
-                    _set_parent(
-                        services[i].direct_flows[0],
-                        services[i].direct_flows[0]["parent_app_flow"],
-                        "s-p mounted on app_flow due to parent_app_flow(has the same span_id)"
-                    )
-                    continue
+                else:
+                    # 这里不要直接设置 parent，如果找到了时延+id 满足条件的情况，都加入列表待处理
+                    if net_child_index not in network_match_parent:
+                        network_match_parent[net_child_index] = net_parent[
+                            '_index']
+                    else:
+                        # 根据 `时延最接近` 原则找 parent
+                        # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
+                        # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flows 中取 response_duration
+                        if flows[network_match_parent[net_child_index]][
+                                'response_duration'] > net_parent[
+                                    'response_duration']:
+                            network_match_parent[net_child_index] = net_parent[
+                                '_index']
 
-            server_process_parent_span_id = services[i].direct_flows[0].get(
-                "parent_span_id", None)
-            if server_process_parent_span_id not in app_flows_map:
-                continue
-            # s-p没有c-app的parent
-            if server_process_parent_span_id is None or server_process_parent_span_id == '':
-                continue
-            # 2. 存在span_id相同且存在parent_span_id的flow，将该系统span的parent设置为span_id等于该parent_span_id的flow
-            # 对应顺序：[... app, c-app, ~~ , s-p, s-app, app ...]
-            # 如果 s-p 找到了 parent_span_id，说明来自于 s-p 后面的 s-app，它的父 span 为 上一个 c-app
-            if services[i].direct_flows[0].get("networks") and \
-                services[i].direct_flows[0]["networks"].flows[0].get('parent_id', -1) < 0:
-                _set_parent(services[i].direct_flows[0]["networks"].flows[0],
-                            app_flows_map[server_process_parent_span_id],
-                            "trace mounted on parent_span of s-p(from s-app)")
-                continue
-            elif services[i].direct_flows[0].get('parent_id', -1) < 0:
-                _set_parent(services[i].direct_flows[0],
-                            app_flows_map[server_process_parent_span_id],
-                            "parent fill s-p mounted on parent_span of s-app")
-                continue
+    for child, parent in network_match_parent.items():
+        # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
+        # fake_pss = _generate_pseudo_process_span_set(flows[child],
+        #                                              flows[parent])
+        # process_span_list.append(fake_pss)
+        # flows.extend(fake_pss.spans)
+        _set_parent(flows[child], flows[parent],
+                    "net-span mounted due to x_request_id or span_id passed")
+
+    return process_span_list, networks, flow_index_to_id0, related_flow_index_map
 
 
-def format_trace(services: list, networks: list, app_flows: list) -> dict:
+def format_trace(services: list[ProcessSpanSet],
+                 networks: list[NetworkSpanSet]) -> dict:
     """
     重新组织数据格式，并给 trace 排序
     """
     response = {'tracing': []}
-    tracing = set()
     id_map = {-1: ""}
     for service in services:
-        for index, flow in enumerate(service.direct_flows):
-            flow['process_id'] = service.process_id
-            direct_flow_span_id = generate_span_id(
-            ) if not flow.get('span_id') or len(str(
-                flow['span_id'])) < 16 else flow['span_id']
-            id_map[flow[
-                '_index']] = f"{direct_flow_span_id}.{flow['tap_side']}.{flow['_index']}"
-            if flow['_index'] not in tracing:
-                response["tracing"].append(_get_flow_dict(flow))
-                tracing.add(flow['_index'])
+        for span in service.spans:
+            if span.signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
+                span_id = span.get_span_id()
+                direct_flow_span_id = generate_span_id() if not span_id or len(
+                    str(span_id)) < 16 else span_id
+                index_of_span = span.get_flow_index()
+                id_map[
+                    index_of_span] = f"{direct_flow_span_id}.{span.get_tap_side()}.{index_of_span}"
+                response["tracing"].append(_get_flow_dict(span.flow))
+            elif span.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL:
+                id_map[span.get_flow_index()] = span.get_span_id()
+                response["tracing"].append(_get_flow_dict(span.flow))
 
     for network in networks:
         for flow in network.flows:
-            if flow["tap_side"] in [
-                    TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
-            ]:
+            if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
                 continue
             id_map[flow[
                 '_index']] = f"{network.span_id}.{flow['tap_side']}.{flow['_index']}"
-            if flow['_index'] not in tracing:
-                response["tracing"].append(_get_flow_dict(flow))
-                tracing.add(flow['_index'])
+            response["tracing"].append(_get_flow_dict(flow))
 
-    for flow in app_flows:
-        id_map[flow["_index"]] = flow["span_id"]
-        response["tracing"].append(_get_flow_dict(flow))
     for trace in response["tracing"]:
         trace["deepflow_span_id"] = id_map[trace["id"]]
         trace["deepflow_parent_span_id"] = id_map.get(trace["parent_id"], -1)
@@ -2042,7 +2118,12 @@ def format_trace(services: list, networks: list, app_flows: list) -> dict:
     return response
 
 
-def format_selftime(traces, parent_trace, child_ids, uid_index_map):
+def format_selftime(traces: list, parent_trace: dict, child_ids: list,
+                    uid_index_map: dict[int, int]):
+    """
+    计算每个服务的真实执行时间
+    这里要求按从上而下（父->子）的层级顺序来计算
+    """
     parent_self_time = parent_trace["end_time_us"] - parent_trace[
         "start_time_us"]
     if parent_self_time == 0:
@@ -2058,6 +2139,12 @@ def format_selftime(traces, parent_trace, child_ids, uid_index_map):
         if child_self_time > 0 and child_self_time <= parent_trace["selftime"]:
             # parent_trace 的处理时间减去 child 的处理时间才是 parent 本身的时延
             parent_trace["selftime"] -= child_self_time
+        elif child_self_time > parent_trace["selftime"]:
+            # 如果 child_self_time > parent_self_time，很大可能是请求返回了但应用还要执行后续动作或异步场景
+            # 应要用 child start time 减去 parent start time 来计算 parent selftime
+            # 但由于可能存在时间差，这里无法用 starttime 来计算
+            # XXX: 认为 child_self_time 已包含了 parent_self_time，避免重复统计同一段时间
+            parent_trace["selftime"] = 0
         else:
             return
 
@@ -2080,7 +2167,7 @@ def pruning_flows(_id, flows, network_delay_us):
 
     # 记录所有 Trace Tree 的最小、最大时间和 trace_id 集合
     # root_index => {min_start_time_us, max_end_time_us, set(trace_id)}
-    tree_infos = {}
+    tree_infos: dict[int, dict] = {}
     root_of_initial_flow = -1
     for flow in flows:
         index = flow[_FLOW_INDEX_KEY]
@@ -2177,31 +2264,51 @@ def calculate_related_ids(
                 f"{_index}-{','.join(related_types)}-{_id}")
 
 
-def merge_service(services, app_flows, response):
+def merge_service(services: list[ProcessSpanSet], traces: list,
+                  uid_to_trace_index: dict[int, int]) -> list:
     """
     按 service 对 flow 分组并统计时延指标
-    FIXME: 粗看代码有点冗余，本质上就是按 auto_service/app_service/service 对所有 trace 分组匹配之后求时延，可能出于性能考虑
     """
     metrics_map = {}
-    prun_services = set()
-    auto_services = set()
-    ids = set()
-    id_to_trace_map = {}
-    # 先获取所有 auto_service
-    for res in response.get('tracing', []):
-        id_to_trace_map[res.get('id')] = res
+    services_from_process_span_set = set[ProcessSpanSet]()
+    services_from_pruning_traces = set()
+    # 先获取剪枝后的所有 auto_service + app_service
+    for res in traces:
+        # res: dict after _get_flow_dict()
         if res.get('auto_service'):
-            auto_services.add(
+            services_from_pruning_traces.add(
                 (res.get('auto_service_id'), res.get('auto_service')))
-        ids.add(res.get('id'))
-    # 在 `sort_all_flows` 函数中按 s-p 分组的 service 与 auto_service 做匹配，找出最终需要保留的 `service`
+        if res.get('app_service'):
+            services_from_pruning_traces.add(res.get('app_service'))
+
+    # 对服务剪枝
+    # 在 `sort_all_flows` 函数中分组的 process_span_set 与 services_from_pruning_traces 做匹配，找出最终需要保留的 `service`
     for service in services:
-        if (service.auto_service_id, service.auto_service) in auto_services:
-            prun_services.add(service)
+        if (service.auto_service_id, service.auto_service) in services_from_pruning_traces \
+            or service.app_service in services_from_pruning_traces:
+            services_from_process_span_set.add(service)
+        else:
+            log.warning(
+                f"service: {service.app_service}/{service.auto_service} dropped"
+            )
+
     # 前两者取交集，对剩下的 `auto_service` 做统计
-    for service in prun_services:
-        service_uid = f"{service.auto_service_id}-"
-        service_uname = service.auto_service if service.auto_service else service.ip
+    for service in services_from_process_span_set:
+        service_uid = ""
+        service_uname = ""
+        if service.auto_service_id is not None:
+            service_uid = f"{service.auto_service_id}-"
+            service_uname = service.auto_service if service.auto_service else service.ip
+        elif service.app_service is not None:
+            service_uid = f"-{service.app_service}"
+            service_uname = service.app_service
+        else:
+            service_uid = 'unknown-'
+            service_uname = "unknown service"
+            log.warning(
+                f"service has no auto_service_id or app_service, group_index: {service.group_index}, subnet: {service.subnet}, process: {service.process_id}"
+            )
+
         if service_uid not in metrics_map:
             metrics_map[service_uid] = {
                 "service_uid": service_uid,
@@ -2209,90 +2316,32 @@ def merge_service(services, app_flows, response):
                 "duration": 0,
             }
         else:
-            if metrics_map[service_uid].get('service_uname'):
-                pass
-            elif service_uname:
+            if metrics_map[service_uid].get('service_uname', '') == '':
                 metrics_map[service_uid]['service_uname'] = service_uname
-        # 分组之后对 service 底下的所有 flow 设置对应的服务名称
-        for index, flow in enumerate(service.direct_flows):
-            flow['service_uid'] = service_uid
-            flow['service_uname'] = service_uname
-            trace = id_to_trace_map.get(flow.get('_index'))
-            if trace:
+
+        # 分组之后对 service 底下的所有 flow 设置对应的服务名称，并统计时延
+        for span in service.spans:
+            span.flow['service_uid'] = service_uid
+            span.flow['service_uname'] = service_uname
+            trace_index = uid_to_trace_index.get(span.get_flow_index(), -1)
+            if trace_index >= 0:
+                trace = traces[trace_index]
                 trace["service_uid"] = service_uid
                 trace["service_uname"] = service_uname
                 metrics_map[service_uid]["duration"] += trace["selftime"]
-            flow['process_id'] = service.process_id
-    serivce_name_to_service_uid = {}
-    # 先对 app_flows 所属的 service 做索引
-    for flow in app_flows:
-        if flow.get("service"):
-            service_uid = f"{flow['service'].auto_service_id}-"
-            serivce_name_to_service_uid[flow['app_service']] = service_uid
-    # 对 app_flows 进行分类统计
-    for flow in app_flows:
-        if flow.get('_index') not in ids:
-            continue
-        trace = id_to_trace_map.get(flow.get('_index'))
-        if not flow.get("service") and flow[
-                'app_service'] not in serivce_name_to_service_uid:
-            # 如果没有匹配到任何被学习到的资源，可能是外部导入的 app-span，需要根据 span 自带的 app_service 进行统计
-            service_uid = f"-{flow['app_service']}"
-            if service_uid not in metrics_map:
-                metrics_map[service_uid] = {
-                    "service_uid": service_uid,
-                    "service_uname": flow["app_service"],
-                    "duration": 0,
-                }
-            flow["service_uid"] = service_uid
-            flow["service_uname"] = flow["app_service"]
-            if trace:
-                trace["service_uid"] = service_uid
-                trace["service_uname"] = flow["app_service"]
-                metrics_map[service_uid]["duration"] += trace["selftime"]
-        elif flow['app_service'] in serivce_name_to_service_uid:
-            # 匹配第一次遍历已提前分类好的 app_service
-            service_uid = serivce_name_to_service_uid[flow['app_service']]
-            if service_uid not in metrics_map:
-                metrics_map[service_uid] = {
-                    "service_uid": service_uid,
-                    "service_uname": flow["app_service"],
-                    "duration": 0,
-                }
-            flow["service_uid"] = service_uid
-            flow["service_uname"] = metrics_map[service_uid]["service_uname"]
-            if trace:
-                trace["service_uid"] = service_uid
-                trace["service_uname"] = metrics_map[service_uid][
-                    "service_uname"]
-                metrics_map[service_uid]["duration"] += trace["selftime"]
-        elif flow.get("service"):
-            # 这里做补偿，实际和第一次循环构建 serivce_name_to_service_uid 功能一样
-            service_uid = f"{flow['service'].auto_service_id}-"
-            if service_uid not in metrics_map:
-                metrics_map[service_uid] = {
-                    "service_uid": service_uid,
-                    "service_uname": flow["app_service"],
-                    "duration": 0,
-                }
-            flow["service_uid"] = service_uid
-            flow["service_uname"] = metrics_map[service_uid]["service_uname"]
-            if trace:
-                trace["service_uid"] = service_uid
-                trace["service_uname"] = metrics_map[service_uid][
-                    "service_uname"]
-                metrics_map[service_uid]["duration"] += trace["selftime"]
-    response["services"] = _call_metrics(metrics_map)
+
+    service_duration_metrics = _call_metrics(metrics_map)
+    return service_duration_metrics
 
 
 def format_final_result(
-    services, networks, app_flows, _id, network_delay_us: int,
-    flow_index_to_id0: list,
+    services: list[ProcessSpanSet], networks: list[NetworkSpanSet], _id,
+    network_delay_us: int, flow_index_to_id0: list,
     related_flow_index_map: defaultdict(inner_defaultdict_set)):
     """
     格式化返回结果
     """
-    response = format_trace(services, networks, app_flows)
+    response = format_trace(services, networks)
     pruning_trace(response, _id, network_delay_us)  # XXX: slow function
     calculate_related_ids(response, flow_index_to_id0,
                           related_flow_index_map)  # XXX: slow function
@@ -2300,7 +2349,7 @@ def format_final_result(
     uid_index_map = {trace["id"]: i for i, trace in enumerate(traces)}
     for trace in traces:
         format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
-    merge_service(services, app_flows, response)
+    response['services'] = merge_service(services, traces, uid_index_map)
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
         for trace in response.get('tracing', [])
@@ -2324,36 +2373,36 @@ class TraceSort:
             trace["id"]: i
             for i, trace in enumerate(self.traces)
         }
-        spans = []
-        finded_child_ids = []
-        # 找到 parent_id = -1 的 span，意味着它是一个 service 的起点
-        # FIXME: 这里仍然有可能丢弃 span，考虑增加一个环检测，避免所有 span 的 parent_id > -1
-        final_result_count = 0
-        for trace in self.traces:
-            if trace["parent_id"] == -1:
-                spans.append(trace)
-                spans.extend(self.find_child(trace["childs"],
-                                             finded_child_ids))
-                final_result_count += len(spans)
-        if len(self.traces) - final_result_count > 0:
-            log.warning(
-                f"trace drop[{len(self.traces) - final_result_count}] due to ring between traces"
-            )
-        return spans
 
-    def find_child(self, child_ids, finded_child_ids):
-        spans = []
-        for _id in child_ids:
-            if _id not in self.uid_index_map:
-                continue
-            # Avoid ring
-            if _id in finded_child_ids:
-                continue
-            trace = self.traces[self.uid_index_map[_id]]
-            spans.append(trace)
-            finded_child_ids.append(_id)
-            spans.extend(self.find_child(trace["childs"], finded_child_ids))
-        return spans
+        if len(self.traces) == 0:
+            return [], []
+
+        if self.rings_detection():
+            log.warning(
+                f"There are rings in the result tracing, try to find trace from: {self.traces[0]['_ids']}"
+            )
+
+        stack = [trace for trace in self.traces if trace['parent_id'] == -1]
+        result = []
+        while stack:
+            trace = stack.pop()
+            if trace.get('childs'):
+                for child_ids in trace['childs']:
+                    if child_ids not in self.uid_index_map:
+                        continue
+                    stack.append(self.traces[self.uid_index_map[child_ids]])
+            result.append(trace)
+        return result
+
+    def rings_detection(self) -> bool:
+        slow = self.traces[0]
+        fast = self.traces[0]
+        while fast and fast['parent_id'] >= 0:
+            slow = self.traces[slow['parent_id']]
+            fast = self.traces[self.traces[fast['parent_id']]['parent_id']]
+            if slow == fast:
+                return True
+        return False
 
 
 def _call_metrics(services: dict):
@@ -2497,74 +2546,3 @@ def _set_parent(flow: dict, flow_parent: dict, info: str = None):
 
 def generate_span_id():
     return hex(RandomIdGenerator().generate_span_id())
-
-
-def get_parent_trace(parent_flow, parent_traces):
-    """
-    `traces` 来源于 network_flows，迭代直到找到 parent_trace 最下级的 flow
-    FIXME: 由于这里寻父逻辑与前面`基于观测点的寻父`与`基于 span_id 的寻父`逻辑不同，有可能成环，考虑让前两种寻父逻辑作为校验
-    """
-    if not parent_traces:
-        return parent_flow
-    for trace in parent_traces:
-        if trace.get('_index') == parent_flow.get('_index'):
-            continue
-        if trace.get('x_request_id_0') == parent_flow.get('x_request_id_1'):
-            # Avoid ring
-            new_traces = [
-                i for i in parent_traces
-                if i.get('_index') != trace.get('_index')
-            ]
-            # 递归，继续在 `traces` 里找到 `trace` 的子节点
-            return get_parent_trace(trace, new_traces)
-    else:
-        # when `for` ends without return, return here
-        return parent_flow
-
-
-def sort_by_x_request_id(traces: list):
-    for child in traces:
-        if not child.get('x_request_id_0'):
-            continue
-
-        if child.get('parent_id', -1) < 0:
-            parent_traces = []
-            for parent in traces:
-                if child.get('_index') == parent.get('_index'):
-                    continue
-                if not parent.get('x_request_id_1'):
-                    continue
-                # 这里确定父子关系
-                # 逻辑顺序是 [前端，网关1，网关2，后端]
-                # 对前端：c 位置的 flow 只有 x_request_id_x_1
-                # 对网关1：s 位置的 flow 只有 x_request_id_x_1，c 位置的 flow 有 x_request_id_x_0/x_request_id_y_1
-                # 对网关2：s 位置的 flow 有 x_request_id_x_0/x_request_id_y_1，c 位置的 flow 有 x_request_id_y_0
-                # 对后端：s 位置的 flow 有 x_request_id_y_0
-                # 综上，当 x_request_id_0 == x_request_id_1 时，x_request_id_1 一定是父节点
-                # 注意需要考虑网关无法部署 agent 的场景
-                if parent.get('x_request_id_1') == child.get('x_request_id_0'):
-                    if parent.get('x_request_id_1') == child.get(
-                            'x_request_id_1') or parent.get(
-                                'x_request_id_0') == child.get(
-                                    'x_request_id_0'):
-                        # FIXME: 这里直接 break 不要尝试找父级，会导致递归溢出，后续修改注意覆盖这种情况
-                        continue
-                    else:
-                        parent_traces.append(parent)
-            # 如果span有多个父span，选父span的叶子span作为parent
-            if len(parent_traces) > 1:
-                parent_trace = get_parent_trace(parent_traces[0],
-                                                parent_traces[1:])
-                if parent_trace is None:
-                    log.error(
-                        f"sort_by_x_request_id find parent_trace none, related trace: {child.get('_id')}"
-                    )
-                else:
-                    _set_parent(child, parent_trace,
-                                "trace mounted due to x_request_id")
-            elif len(parent_traces) == 1:
-                _set_parent(child, parent_traces[0],
-                            "trace mounted due to x_request_id")
-            else:
-                # continue outer loop
-                continue
