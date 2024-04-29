@@ -1593,146 +1593,6 @@ def _get_process_id(flow: dict, tap_side: str) -> str:
         return flow['process_id_0']
 
 
-class Service:
-
-    def __init__(self, vtap_id: int, process_id: int):
-        self.vtap_id = vtap_id
-        self.process_id = process_id
-
-        self.direct_flows = []
-        self.app_flow_of_direct_flows = []
-        self.unattached_flows = dict()
-        self.subnet_id = None
-        self.subnet = None
-        self.ip = None
-        self.auto_service_type = None
-        self.auto_service_id = None
-        self.auto_service = None
-        self.process_kname = None
-        self.start_time_us = 0
-        self.end_time_us = 0
-        self.level = -1
-
-    def parent_set(self):
-        self.app_flow_of_direct_flows = sorted(
-            self.app_flow_of_direct_flows,
-            key=lambda x: x.get("start_time_us"))
-        # 如果有s-p，s-p 不需要找父级 span，且所有找不到父级 span 的 c-p 都要挂靠到 s-p 下
-        if self.direct_flows[0]['tap_side'] == TAP_SIDE_SERVER_PROCESS:
-            for i, direct_flow in enumerate(self.direct_flows[1:]):
-                if not direct_flow.get('parent_id'):
-                    if direct_flow.get('parent_app_flow', None):
-                        # 1. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
-                        _set_parent(direct_flow,
-                                    direct_flow['parent_app_flow'],
-                                    "c-p mounted on parent_app_flow")
-                    else:
-                        # 2. 所属service中存在应用span，将该系统span的parent设置为service中最后一条应用span
-                        # 对应顺序：[app, c-app] <- c-p
-                        if self.app_flow_of_direct_flows:
-                            _set_parent(direct_flow,
-                                        self.app_flow_of_direct_flows[-1],
-                                        "c-p mounted on latest app_flow")
-                        else:
-                            # 3. 存在syscalltraceid相同且tap_side=s-p的系统span，该系统span的parent设置为该flow(syscalltraceid相同且tap_side=s-p)
-                            # 这里只是把找不到上级 net-span/app-span 的 c-p 挂靠到 s-p 下
-                            # FIXME: 注意这里 c-p 的 flow 加入 direct_flow 的时候用的是 <vtap_id, local_process_id> 匹配，这里关联之前缺了对 syscall_trace_id 关系的判断
-                            # 对此场景：一个服务在一个请求内被穿越多次，可能就有 <vtap_id, local_process_id> 相同而 syscall_trace_id 不同的情况
-                            # 这种情况下如果直接挂到首个 s-p 下，有可能父子关系排序错误
-                            _set_parent(direct_flow, self.direct_flows[0],
-                                        "c-p mounted on s-p")
-            if self.direct_flows[0].get('parent_id', -1) < 0:
-                self.direct_flows[0]['parent_id'] = -1
-        else:
-            # 只有c-p
-            for i, direct_flow in enumerate(self.direct_flows):
-                if not direct_flow.get('parent_id'):
-                    # 1. 存在span_id相同的应用span，将该系统span的parent设置为该span_id相同的应用span
-                    if direct_flow.get('parent_app_flow', None):
-                        _set_parent(self.direct_flows[i],
-                                    self.direct_flows[i]['parent_app_flow'],
-                                    "c-p mounted on own app_flow")
-                    else:
-                        self.direct_flows[i]['parent_id'] = -1
-
-    def check_client_process_flow(self, flow: dict) -> bool:
-        """检查该flow是否与service有关联关系，s-p的时间范围需要覆盖c-p，否则拆分为两个service"""
-        if self.process_id != flow["process_id_0"] \
-            or self.vtap_id != flow["vtap_id"]:
-            return False
-        if self.start_time_us > flow["start_time_us"] \
-            or self.end_time_us < flow["end_time_us"]:
-            return False
-        return True
-
-    def add_direct_flow(self, flow: dict):
-        """direct_flow是指该服务直接接收到的，或直接发出的flow"""
-        #assert (
-        #    self.vtap_id == flow.get('vtap_id')
-        #    and self.process_id == flow.get('process_id')
-        #)
-        if flow['tap_side'] == TAP_SIDE_SERVER_PROCESS:
-            self.start_time_us = flow["start_time_us"]
-            self.end_time_us = flow["end_time_us"]
-        for key in [
-                'subnet_id',
-                'subnet',
-                'ip',
-                'auto_service_id',
-                'auto_service',
-                'auto_service_type',
-                'process_kname',
-        ]:
-            if flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
-                direction_key = key + "_0"
-            else:
-                direction_key = key + "_1"
-            if getattr(self, key) and 'auto_service' not in key:
-                flow[key] = getattr(self, key)
-                continue
-            elif not getattr(self, key):
-                setattr(self, key, flow[direction_key])
-                flow[key] = flow[direction_key]
-            else:
-                if self.auto_service_type in [0, 255]:
-                    setattr(self, key, flow[direction_key])
-                flow[key] = getattr(self, key)
-        self.direct_flows.append(flow)
-
-    def attach_app_flow(self, flow: dict):
-        if flow["tap_side"] not in [
-                TAP_SIDE_CLIENT_APP, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
-        ]:
-            return
-        for direct_flow in self.direct_flows:
-            # span_id相同 x-p的parent一定是x-app
-            if direct_flow["span_id"]:
-                if direct_flow["span_id"] == flow["span_id"]:
-                    direct_flow["parent_app_flow"] = flow
-                    # 只有c-p和x-app的span_id相同时，属于同一个service
-                    if direct_flow['tap_side'] == TAP_SIDE_CLIENT_PROCESS:
-                        flow["service"] = self
-                        self.app_flow_of_direct_flows.append(flow)
-                        return True
-        # x-app的parent是s-p时，一定属于同一个service
-        if flow['parent_span_id'] and self.direct_flows[0]['span_id'] and flow[
-                'parent_span_id'] == self.direct_flows[0][
-                    'span_id'] and self.direct_flows[0][
-                        'tap_side'] == TAP_SIDE_SERVER_PROCESS:
-            # x-app的parent是c-p时，一定不属于同一个service
-            # 逻辑顺序是：[s-nd, s, s-p s-app, app, c-app, c-p, c, c-nd]，所以 x-app 的 parent 不会是 c-p，一定跨了 Service
-            # 如果能找到这种关系说明可能 s-nd/s/s-p 少了
-            for client_process_flow in self.direct_flows[1:]:
-                if flow['parent_span_id'] == client_process_flow['span_id']:
-                    # 标记一下关系，但不要 append 到 service 中
-                    flow["parent_syscall_flow"] = client_process_flow
-                    return False
-            flow["parent_syscall_flow"] = self.direct_flows[0]
-            flow["service"] = self
-            self.app_flow_of_direct_flows.append(flow)
-            return True
-
-
 def merge_flow(flows: list, flow: dict) -> bool:
     """
     按如下策略合并：
@@ -2059,7 +1919,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             net_span_grouping_spanid[network.span_id] = network
     networks_set_to_app_flow(app_flows, net_span_grouping_spanid)
 
-    ### 系统span排序
+    ### 系统 span 分离
     process_span_list: list[ProcessSpanSet] = []
     for _, process_span_sets in process_span_map.items():
         for pss in process_span_sets:
@@ -2070,49 +1930,6 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     service_sort(services, app_flows)
     sort_by_x_request_id(network_flows)
     return services, app_flows, networks, flow_index_to_id0, related_flow_index_map
-
-
-def app_flow_set_service(app_flows: list):
-    """
-    将 app-span 挂到 Service 下
-    FIXME: 240328: 这里相同的逻辑执行了两次，需要找到原因修正
-    """
-    for child in app_flows:
-        if child.get('parent_id', -1) >= 0:
-            continue
-        for parent in app_flows:
-            if child["parent_span_id"] == parent["span_id"]:
-                if child["app_service"] == parent["app_service"]:
-                    if child.get("service",
-                                 None) and not parent.get("service", None):
-                        parent["service"] = child["service"]
-                        child["service"].app_flow_of_direct_flows.append(
-                            parent)
-                    elif not child.get("service", None) and parent.get(
-                            "service", None):
-                        child["service"] = parent["service"]
-                        parent["service"].app_flow_of_direct_flows.append(
-                            child)
-                break
-    app_flows.reverse()
-    for child in app_flows:
-        if child.get('parent_id', -1) >= 0:
-            continue
-        for parent in app_flows:
-            if child["parent_span_id"] == parent["span_id"]:
-                if child["app_service"] == parent["app_service"]:
-                    if child.get("service",
-                                 None) and not parent.get("service", None):
-                        parent["service"] = child["service"]
-                        child["service"].app_flow_of_direct_flows.append(
-                            parent)
-                    elif not child.get("service", None) and parent.get(
-                            "service", None):
-                        child["service"] = parent["service"]
-                        parent["service"].app_flow_of_direct_flows.append(
-                            child)
-                break
-    app_flows.reverse()
 
 
 def networks_set_to_app_flow(app_flows, network_flows_grouping_spanid):
@@ -2129,36 +1946,6 @@ def networks_set_to_app_flow(app_flows, network_flows_grouping_spanid):
                 app_span, "network mounted duo to span_id")
             app_span["network_flows"] = network_flows_grouping_spanid[
                 app_span["span_id"]]
-
-
-def app_flow_sort(app_flows: list):
-
-    for app_span in app_flows:
-        # 1. 若存在parent_span_id，且存在flow的span_id等于该parent_span_id,则将该应用span的parent设置为该flow
-        if app_span.get("parent_syscall_flow"):
-            _set_parent(app_span, app_span["parent_syscall_flow"],
-                        "app_flow mounted on syscall due to parent_span_id")
-            continue
-        for app_parent_span in app_flows:
-            if app_span["parent_span_id"] == app_parent_span["span_id"]:
-                # 2. 若存在parent_span_id，且span_id等于该parent_span_id的flow存在span_id相同的网络span，则将该应用span的parent设置为该网络span
-                if app_parent_span.get("network_flows"):
-                    _set_parent(app_span,
-                                app_parent_span["network_flows"].flows[-1],
-                                "app_flow mounted due to parent_network")
-                else:
-                    # 3. 若存在parent_span_id, 将该应用span的parent设置为span_id等于该parent_span_id的flow
-                    _set_parent(app_span, app_parent_span,
-                                "app_flow mounted due to parent_span_id")
-        if app_span.get('parent_id', -1) >= 0:
-            continue
-        if app_span.get("service"):
-            # 4. 若有所属service，将该应用span的parent设置为该service的s-p的flow
-            if app_span["service"].direct_flows[0][
-                    "tap_side"] == TAP_SIDE_SERVER_PROCESS:
-                _set_parent(app_span, app_span["service"].direct_flows[0],
-                            "app_flow mouted on s-p in service")
-                continue
 
 
 def service_sort(services, app_flows):
