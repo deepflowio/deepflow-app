@@ -2309,8 +2309,9 @@ def get_parent_trace(parent_flow, parent_traces):
             ]
             # 递归，继续在 `traces` 里找到 `trace` 的子节点
             return get_parent_trace(trace, new_traces)
-        else:
-            return parent_flow
+    else:
+        # when `for` ends without return, return here
+        return parent_flow
 
 
 def sort_by_x_request_id(traces: list):
@@ -2343,8 +2344,19 @@ def sort_by_x_request_id(traces: list):
                     else:
                         parent_traces.append(parent)
             # 如果span有多个父span，选父span的叶子span作为parent
-            if parent_traces:
+            if len(parent_traces) > 1:
                 parent_trace = get_parent_trace(parent_traces[0],
-                                                parent_traces)
-                _set_parent(child, parent_trace,
+                                                parent_traces[1:])
+                if parent_trace is None:
+                    log.error(
+                        f"sort_by_x_request_id find parent_trace none, related trace: {child.get('_id')}"
+                    )
+                else:
+                    _set_parent(child, parent_trace,
+                                "trace mounted due to x_request_id")
+            elif len(parent_traces) == 1:
+                _set_parent(child, parent_trace[0],
                             "trace mounted due to x_request_id")
+            else:
+                # continue outer loop
+                continue
