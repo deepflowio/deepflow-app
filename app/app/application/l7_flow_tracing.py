@@ -2352,7 +2352,7 @@ def sort_by_x_request_id(traces: list):
                     _set_parent(child, parent_trace,
                                 "trace mounted due to x_request_id")
             elif len(parent_traces) == 1:
-                _set_parent(child, parent_trace[0],
+                _set_parent(child, parent_traces[0],
                             "trace mounted due to x_request_id")
             else:
                 # continue outer loop
