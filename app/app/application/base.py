@@ -1,6 +1,7 @@
 import uuid
 
 from data.status import Status
+from common.const import L7_FLOW_SIGNAL_SOURCE_OTEL
 
 # 0: unspecified, 1: internal, 2: server, 3: client, 4: producer, 5: consumer
 TAP_SIDE_BY_SPAN_KIND = {
@@ -24,12 +25,19 @@ class Base(object):
         self.region = self.args.get("region", None)
         self.signal_sources = self.args.get("signal_sources") or []
 
-    # Completing application span attribute information
     def complete_app_span(self, app_spans):
+        """
+        Fill application span attribute information
+        will be called in two scenario:
+        1. get external apm app spans
+        2. use tracing_completion api to fill sys spans & net spans
+        """
         for i, app_span in enumerate(app_spans):
             tap_side_by_span_kind = TAP_SIDE_BY_SPAN_KIND.get(
                 app_span.get('span_kind'))
             app_span["tap_side"] = tap_side_by_span_kind
+            # either external apm or tracing_completion should set this fixed value
+            app_span['signal_source'] = L7_FLOW_SIGNAL_SOURCE_OTEL
             app_span.pop("span_kind", None)
             for tag_int in [
                     "type", "req_tcp_seq", "resp_tcp_seq", "l7_protocol",

@@ -53,3 +53,8 @@ TAP_SIDE_RANKS = {
     TAP_SIDE_REST: 13,
     TAP_SIDE_LOCAL: 13,  # rest和local需要就近排列到其他位置上
 }
+
+# signal_source
+L7_FLOW_SIGNAL_SOURCE_PACKET = 0
+L7_FLOW_SIGNAL_SOURCE_EBPF = 3
+L7_FLOW_SIGNAL_SOURCE_OTEL = 4
