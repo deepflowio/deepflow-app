@@ -10,7 +10,7 @@ from config import config
 from .base import Base
 from common import const
 from common.utils import curl_perform, inner_defaultdict_set
-from common.const import HTTP_OK
+from common.const import (HTTP_OK, L7_FLOW_SIGNAL_SOURCE_PACKET, L7_FLOW_SIGNAL_SOURCE_EBPF, L7_FLOW_SIGNAL_SOURCE_OTEL)
 from common.disjoint_set import DisjointSet
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
@@ -24,10 +24,6 @@ NET_SPAN_TAP_SIDE_PRIORITY = {
 L7_FLOW_TYPE_REQUEST = 0
 L7_FLOW_TYPE_RESPONSE = 1
 L7_FLOW_TYPE_SESSION = 2
-
-L7_FLOW_SIGNAL_SOURCE_PACKET = 0
-L7_FLOW_SIGNAL_SOURCE_EBPF = 3
-L7_FLOW_SIGNAL_SOURCE_OTEL = 4
 
 TAP_SIDE_CLIENT_PROCESS = 'c-p'
 TAP_SIDE_SERVER_PROCESS = 's-p'
