@@ -3,7 +3,9 @@ name: build app
 on:
   push:
     branches:
-      - main
+      - main     
+      - v6.[1-9]
+      - v7.[1-9]
       - 'feature-**'
     tags:
       - '*'
