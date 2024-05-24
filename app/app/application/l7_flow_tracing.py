@@ -1,4 +1,5 @@
 import math
+import uuid
 import pandas as pd
 from log import logger
 
@@ -1105,24 +1106,13 @@ class NetworkSpanSet:
         self.span_id = None
         # 分组聚合所有 tcp_seq 相同的 flow
         self.spans: list[SpanNode] = []
-        self.req_tcp_seq = 0
-        self.resp_tcp_seq = 0
+        self.id = uuid.uuid1().hex
 
     def __eq__(self, other: 'NetworkSpanSet') -> bool:
-        equal = True
-        if self.req_tcp_seq:
-            equal &= self.req_tcp_seq == other.req_tcp_seq
-        if self.resp_tcp_seq:
-            equal &= self.resp_tcp_seq == other.resp_tcp_seq
-        if not self.req_tcp_seq and not self.resp_tcp_seq:
-            # if both equals zero, use mem compare
-            equal = self is other
-        return equal
+        return self.id == other.id
 
     def __hash__(self) -> int:
-        if not self.req_tcp_seq and not self.resp_tcp_seq:
-            return super().__hash__()
-        return hash((self.req_tcp_seq, self.resp_tcp_seq))
+        return hash(self.id)
 
     def append_span_node(self, span: 'SpanNode'):
         """
@@ -1131,10 +1121,7 @@ class NetworkSpanSet:
         """
         if not self.span_id and span.get_span_id():
             self.span_id = span.get_span_id()
-        if not self.req_tcp_seq and span.get_req_tcp_seq():
-            self.req_tcp_seq = span.get_req_tcp_seq()
-        if not self.resp_tcp_seq and span.get_resp_tcp_seq():
-            self.resp_tcp_seq = span.get_resp_tcp_seq()
+        # 标记 span 是否属于同一组 network_span_set，避免在 _connect_process_and_networks 首尾关联产生环路
         span.network_span_set = self
         self.spans.append(span)
 
@@ -1244,7 +1231,7 @@ class SpanNode:
     def set_parent(self, parent: 'SpanNode', mounted_info: str = None):
         # parent is typeof(SpanNode)
         self.parent = parent
-        _set_parent(self.flow, parent.flow, mounted_info)
+        _set_parent_mount_info(self.flow, parent.flow, mounted_info)
 
     # 为高频访问字段添加 getter 函数，减少出错
 
@@ -1327,6 +1314,9 @@ class ProcessSpanSet:
     """
 
     def __init__(self, group_key: str):
+        # group_key 用于标记 ProcessSpanSet 的唯一性
+        # 当以 app_span 构建 process_span_set 时，group_key=parent_span_id
+        # 当以 sys_span 构建 process_span_set 时，group_key=auto_instance+index(index 标记同进程 s-p 出现的次数)
         self.group_key = group_key
         # 所有 spans
         self.spans: list[SpanNode] = []
@@ -1814,7 +1804,7 @@ def merge_flow(flows: list, flow: dict) -> bool:
 
 
 def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
-                   return_fields: list, ntp_delay_us: int) -> list:
+                   return_fields: list) -> list:
     """对应用流日志排序，用于绘制火焰图。（包含合并逻辑）
 
     1. 根据系统调用追踪信息追踪：
@@ -1879,33 +1869,103 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     for flow in flows:
         flow_index_to_id0[flow['_index']] = flow['_id'][0]
 
-    network_flows = []
-    app_flows = []
-    syscall_flows = []
+    network_spans: list[NetworkSpanNode] = []
+    app_spans: list[AppSpanNode] = []
+    server_sys_spans: list[SysSpanNode] = []
+    client_sys_spans: list[SysSpanNode] = []
     # 对 flow 分类，而后分别做排序，方便做层级处理
     # 对 network_flows: net-span 的排序按固定的顺序（TAP_SIDE_RANKS），然后根据 span_id 挂 app-span，根据 tcp_seq 挂 sys-span
     # 对 app_flows: app-span 按固定的规则设置层级（span_id/parent_span_id），按 span_id 挂 sys-span 以及挂到 sys-span 构建的 <service> 上
     # 对 syscall_flows: sys-span 需要提取<vtap_id, local_process_id>分组定义为<service> ，并以此为主体构建火焰图骨架
-    for flow in flows:
+    flow_index_to_span = [None] * len(flows)
+    for i in range(len(flows)):
+        flow = flows[i]
+        span: SpanNode = None
         if flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_EBPF:
-            syscall_flows.append(flow)
+            span = SysSpanNode(flow)
+            if span.tap_side == TAP_SIDE_SERVER_PROCESS:
+                server_sys_spans.append(span)
+            else:
+                client_sys_spans.append(span)
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_PACKET:
-            network_flows.append(flow)
+            span = NetworkSpanNode(flow)
+            network_spans.append(span)
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
-            app_flows.append(flow)
+            span = AppSpanNode(flow)
+            app_spans.append(span)
+        else:
+            # avoid error when signal_source is ''
+            span = SpanNode(flow)
+            log.warning(
+                f"unknown flow: {flow['_id']} signal_source: {flow['signal_source']}"
+            )
+        flow_index_to_span[i] = span
 
     # 构建 Process Span Set
     # 对 app_span 按 auto_instance_id/auto_instance 进行分组
+    # auto_instance => []
     process_span_map: dict[str, list[ProcessSpanSet]] = defaultdict(
         list[ProcessSpanSet])
-    for flow in app_flows:
-        auto_instance = _get_auto_instance(flow, flow['tap_side'])
+    process_span_map = _union_app_spans(process_span_map, app_spans)
+    process_span_map = _union_sys_spans(process_span_map, server_sys_spans,
+                                        client_sys_spans)
+
+    # 构建 Network Span Set，每个 Network Span Set 里包含具有同一组 tcp_seq 的 net-span & sys-span
+    # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
+    united_spans = sorted(network_spans + server_sys_spans + client_sys_spans,
+                          key=lambda x: x.flow.get("type"),
+                          reverse=True)
+
+    network_span_list = _build_network_span_set(united_spans,
+                                                related_flow_index_map,
+                                                flow_index_to_span)
+
+    ### Process Span Set 分离
+    process_span_list = [
+        pss for _, process_span_sets in process_span_map.items()
+        for pss in process_span_sets
+    ]
+
+    # 准备数据，从所有 process 和 network 中获取 root 和 leaf
+    process_root_list = [pss.get_roots()
+                         for pss in process_span_list]  # list of list
+    process_roots = [item for roots in process_root_list
+                     for item in roots]  # flat list
+    process_leafs = [
+        item for i in range(len(process_span_list))
+        for item in process_span_list[i].get_leafs()
+    ]
+    # span_id => span
+    process_span_dict = {
+        span.get_span_id(): span
+        for i in range(len(process_span_list))
+        for span in process_span_list[i].spans if span.get_span_id() != ''
+        and span.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL
+    }
+    network_leafs = [network.spans[-1] for network in network_span_list]
+    network_roots = [network.spans[0] for network in network_span_list]
+
+    # 将 process span set 和 network span set 互相连接
+    # 注意这里按如下优先级连接:
+    # 1. process <-> net, 2. net <-> process, 3. process <-> process, 4. net <-> net
+    _connect_process_and_networks(process_roots, process_leafs, network_roots,
+                                  network_leafs, process_span_dict,
+                                  flow_index_to_span)
+
+    return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map
+
+
+def _union_app_spans(
+        process_span_map: dict[str, list[ProcessSpanSet]],
+        app_spans: list[AppSpanNode]) -> dict[str, list[ProcessSpanSet]]:
+    for span in app_spans:
+        auto_instance = _get_auto_instance(span)
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
             process_span_map[auto_instance] = [sp_span_pss]
-        process_span_map[auto_instance][0].append_app_span(flow)
+        process_span_map[auto_instance][0].append_app_span(span)
 
-    # 一个 app-span 构成的 ProcessSpanSet 可能会有多个 root
+    # 一组 app-span 构成的 ProcessSpanSet 可能会有多个 root
     # 如果这些 root 有同一个 parent_span_id: 说明只是还没关联 s-p 作为 parent，不需处理，后续逻辑会关联
     # 如果这些 root 有不同的 parent_span_id: 说明这个服务被穿越了多次，要拆分为多个 ProcessSpanSet
     for key, process_span_set_list in process_span_map.items():
@@ -1914,269 +1974,352 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             split_result = sp_span_pss.split_to_multiple_process_span_set()
             split_process_span_set.extend(split_result)
         process_span_map[key] = split_process_span_set
+    return process_span_map
 
-    # s-p 按两种方式挂：同一 span_id 关联或 span_id 等于空但 s-p 与 c-p 有 syscall_trace_id 关联
-    # [x['tap_side'] != TAP_SIDE_CLIENT_PROCESS] 排序确定先挂 c-p 再挂 s-p，当无法找到 s-p 的 span_id 时，根据 c-p 的 syscall_trace_id 关联，确保 s-p 一定会关联上
-    # start_time_us 降序是为了让`left_syscall_flows`少做一次排序，不影响这里的 attach
-    syscall_flows = sorted(
-        syscall_flows,
-        key=lambda x:
-        (x['tap_side'] != TAP_SIDE_CLIENT_PROCESS, -x['start_time_us']))
-    # 如果没有 app-span 时，不要做无效扫描
+
+def _union_sys_spans(
+        process_span_map: dict[str, list[ProcessSpanSet]],
+        server_sys_spans: list[SysSpanNode],
+        client_sys_spans: list[SysSpanNode]
+) -> dict[str, list[ProcessSpanSet]]:
+
+    # 先根据 syscall_trace_id_request 构建一个映射，方便查找
+    # syscall_trace_id_request => index
+    syscall_req_to_index: dict[int, int] = {}
+    for i in range(len(client_sys_spans)):
+        span = client_sys_spans[i]
+        if span.get_syscall_trace_id_request() > 0:
+            syscall_req_to_index[span.get_syscall_trace_id_request()] = i
+
+    # 对 client_sys_spans 按 syscall_trace_id 划分为一个个集合
+    cp_disjoint_set = DisjointSet()
+    cp_disjoint_set.disjoint_set = [-1] * len(client_sys_spans)
+    for i in range(len(client_sys_spans)):
+        span = client_sys_spans[i]
+        if span.get_syscall_trace_id_response() > 0:
+            # 对任意一个 c-p 的 request，如果它有兄弟 c-p，则 syscall_trace_id_request = 兄弟 c-p 的 syscall_trace_id_response，即为`上一跳`
+            parent_index = syscall_req_to_index.get(
+                span.get_syscall_trace_id_response(), -1)
+            cp_disjoint_set.put(i, parent_index)
+            cp_disjoint_set.get(i)  # compress
+
+    # 构建一个 cp_infos 的关系，计算 syscall_trace_id_response 对应的所有有关联的 c-p 的索引
+    # root_index => { child_indexes }
+    cp_related_infos: dict[int, list[int]] = {}
+    for i in range(len(client_sys_spans)):
+        root = cp_disjoint_set.get(i)  # find root
+        if root != i:
+            cp_related_infos.setdefault(root, []).append(i)
+
+    # s-p 按两种方式挂：同一 span_id 关联 app_span，或 s-p 的 span_id 等于空但 s-p 与 c-p 有 syscall_trace_id 关联
+    # 后者要求 client_sys_spans 先与 app_span 关联，再尝试关联 server_sys_spans
+    # 如果没有 app_span 时，不要做无效扫描
     if len(process_span_map) > 0:
-        # 临时变量，用于查找一个 `parent_span_id` 对应的所有叶子节点
-        leafs_map: dict[str, list[SpanNode]] = {}
-        for flow in syscall_flows:
-            if flow.get('process_span_set', None) is not None:
-                continue
-            # 多次用到 tap_side，提前获取减少访问
-            flow_tap_side = flow['tap_side']
-            auto_instance = _get_auto_instance(flow, flow_tap_side)
-            if auto_instance in process_span_map:
-                for sp_span_pss in process_span_map[auto_instance]:
-                    app_span_tree_roots = sp_span_pss.get_app_span_roots()
-                    if sp_span_pss.group_index not in leafs_map.keys():
-                        # 提前获取叶子节点，确保叶子节点都是 app-span
-                        leafs = sp_span_pss.get_leafs(app_span_tree_roots)
-                        leafs_map[sp_span_pss.group_index] = leafs
-                    leafs = leafs_map[sp_span_pss.group_index]
-                    if not sp_span_pss.app_attach_syscall(
-                            flow, flow_tap_side, app_span_tree_roots, leafs):
-                        # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
-                        continue
+        for span in client_sys_spans + server_sys_spans:  # 先 c-p 后 s-p
+            auto_instance = _get_auto_instance(span)
+            for sp_span_pss in process_span_map.get(auto_instance, []):
+                if not sp_span_pss.attach_sys_span_via_app_span(span):
+                    # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
+                    continue
 
-    # 剩余的 sys_span 单独成 process_span_set
-    # 如果本次追踪没有 app_span，这里应是全部 syscall_flows
-    # 按 s-p/c-p 的顺序执行扫描，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
-    # 由于上面已经排序过按c-p/s-p 顺序加start_time_us 降序，这里直接反序即可
-    # 这里要求 start_time_us 升序，是因为有如下场景：
-    # 当 s-p 内发起多个 c-p 请求，c-p 构成兄弟关系，此时 s-p 只和头尾两个 c-p 有 syscall_trace_id 关联（最坏情况下无关联，只能通过 app-span 关联）
-    # 如果先扫描中间的 c-p，再扫描头尾，会导致中间的 c-p 无法关联，所以这里 start_time_us 升序确保头 c-p 先被关联，再让头 c-p 关联出它的兄弟 c-p
-    left_syscall_flows = [
-        flow for flow in syscall_flows
-        if flow.get('process_span_set', None) is None
-    ]
-    left_syscall_flows.reverse()
-    # 标记同一进程的 s-p 数量，同一个 process_span_set 内只允许存在最多一个 s-p
+    # 按 s-p/c-p 的顺序执行关联，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
+
+    # 标记同一进程的 process 数量，同一个 process_span_set 内只允许存在最多一个 s-p
+    # auto_instance => same auto_instance span_set count
     same_process_sp: dict[str, int] = dict.fromkeys(process_span_map.keys(), 1)
-    for flow in left_syscall_flows:
-        if flow.get('process_span_set', None) is not None:
+    for span in server_sys_spans:
+        if span.process_span_set is not None:
             continue
-        flow_tap_side = flow['tap_side']
-        # 使用 auto_instance 标记同一进程，用于在第一轮`app_attach_syscall`时没有 attach 到的 c-p 匹配同一进程的 s-p
-        auto_instance = _get_auto_instance(flow, flow_tap_side)
-        if flow_tap_side == TAP_SIDE_SERVER_PROCESS:
-            if auto_instance not in process_span_map:
-                sp_span_pss = ProcessSpanSet(auto_instance)
-                sp_span_pss.append_sys_span(flow, flow_tap_side)
-                process_span_map[auto_instance] = [sp_span_pss]
-                same_process_sp[auto_instance] = 1
-            else:
-                # s-p 在每个 ProcessSpanSet 中如果大于1个，说明这个进程被穿越多次，需要单独构建一个 ProcessSpanSet
-                index = same_process_sp[auto_instance] + 1
-                sp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
-                sp_span_pss.append_sys_span(flow, flow_tap_side)
-                process_span_map[auto_instance].append(sp_span_pss)
-                same_process_sp[auto_instance] = index
-        elif flow_tap_side == TAP_SIDE_CLIENT_PROCESS:
-            cp_matched_sp = False
-            # 这里可以认为所有 s-p 已经构建了 ProcessSpanSet
-            if auto_instance in process_span_map:
-                # 检查 c-p 是否在同一进程的 s-p 覆盖范围内，若不在，它应是独立的 ProcessSpanSet
-                # 若 ProcessSpanSet 内仅有 c-p，也会尝试添加 c-p
-                for sp_process_span_set in process_span_map[auto_instance]:
-                    if sp_process_span_set.try_attach_client_syscall(
-                            flow, flow_tap_side):
-                        cp_matched_sp = True
-                        break
-            if auto_instance not in process_span_map:
-                # 如果找不到 key，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
-                cp_span_pss = ProcessSpanSet(auto_instance)
-                cp_span_pss.append_sys_span(flow, flow_tap_side)
-                process_span_map[auto_instance] = [cp_span_pss]
-                same_process_sp[auto_instance] = 1
-            elif not cp_matched_sp:
-                # 这里 cp_matched_sp False 可能包含两种情况：
-                # 1. c-p 不在同一个进程的 s-p 时间范围内，或无关联关系
-                # 2. c-p 同进程的 ProcessSpanSet 内无 s-p，且无法与 c-p 匹配为兄弟
-                # 这两种情况都作为一个独立的 ProcessSpanSet
-                index = same_process_sp[auto_instance] + 1
-                cp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
-                cp_span_pss.append_sys_span(flow, flow_tap_side)
-                process_span_map[auto_instance].append(cp_span_pss)
-                same_process_sp[auto_instance] = index
+        auto_instance = _get_auto_instance(span)
+        if auto_instance not in process_span_map:
+            sp_span_pss = ProcessSpanSet(auto_instance)
+            sp_span_pss.append_sys_span(span)
+            process_span_map[auto_instance] = [sp_span_pss]
+            same_process_sp[auto_instance] = 1
+        else:
+            # s-p 在每个 ProcessSpanSet 中如果大于1个，说明这个进程被穿越多次，需要单独构建一个 ProcessSpanSet
+            index = same_process_sp[auto_instance] + 1
+            sp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
+            sp_span_pss.append_sys_span(span)
+            process_span_map[auto_instance].append(sp_span_pss)
+            same_process_sp[auto_instance] = index
 
-    # 构建 Network Span Set，每个 Network Span Set 里包含具有同一组 tcp_seq 的 net-span & sys-span
-    # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
+    # 这里可以认为所有 s-p 已经构建了 ProcessSpanSet
+    for i in range(len(client_sys_spans)):
+        span = client_sys_spans[i]
+        if span.process_span_set is not None:
+            continue
+        auto_instance = _get_auto_instance(span)
+        # 最终需要上挂的目标 s-p
+        target_sp = None
+        target_mounted_info = ""
+        for sp_process_span_set in process_span_map.get(auto_instance, []):
+            # 检查 c-p 是否在同一进程的 s-p 覆盖范围内，若不在，它应是独立的 ProcessSpanSet
+            matched_sp, mounted_info = sp_process_span_set.try_attach_client_sys_span_via_sys_span(
+                span)
+            if matched_sp is None:
+                continue
+            if target_sp is None:
+                target_sp = matched_sp
+                target_mounted_info = mounted_info
+            else:
+                # 在有多个 s-p 都满足匹配条件的情况下，选开始时间最大的(在满足时间覆盖的情况下，这说明此 s-p 最接近 c-p)，它更有可能是直接的【上一跳】
+                if matched_sp.flow['start_time_us'] > target_sp.flow[
+                        'start_time_us']:
+                    target_sp = matched_sp
+                    target_mounted_info = mounted_info
+
+        if target_sp is not None:
+            target_sp.process_span_set.append_sys_span(span)
+            span.set_parent(target_sp, target_mounted_info)
+            # 如果任意一个 c-p 关联成功，则它的兄弟都尝试关联
+            client_root_of_span = cp_disjoint_set.get(i)
+
+            for child in cp_related_infos.get(client_root_of_span, []):
+                target_sp.process_span_set.indirect_attach_client_sys_span_via_sys_span(
+                    target_sp, client_sys_spans[child])
+    # end of client_sys_span match to server_sys_span
+
+    # 这里分开两次循环，避免[c-p-a 找不到关联关系，先建立了一个 process_span_set，但是 c-p-a 的兄弟 c-p-b 有关联，并将 c-p-a 关联上 s-p，导致重复]的情况
+    for i in range(len(client_sys_spans)):
+        span = client_sys_spans[i]
+        if span.process_span_set is not None:
+            continue
+        auto_instance = _get_auto_instance(span)
+        # 如果找不到 auto_instance，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
+        # process_span_set 允许存在多个 c-p，但这些 c-p 如果没有关联关系，需要划分为多个 Process Span Set
+        group_key = ''
+        auto_instance_index = 0
+        if auto_instance not in process_span_map:
+            auto_instance_index = 1
+            group_key = auto_instance
+        else:
+            # 如果找到了 auto_instance，但第一轮匹配中没有匹配上任何一个 s-p
+            # 此时可能包含两种情况：
+            # 1. c-p 无关联关系，或有关系但不在同一个进程的 s-p 时间范围内
+            # 2. c-p 同进程的 ProcessSpanSet 内无 s-p
+            # 这两种情况都作为一个独立的 ProcessSpanSet
+            auto_instance_index = same_process_sp[auto_instance] + 1
+            group_key = f'{auto_instance}-{auto_instance_index}'
+        cp_span_pss = ProcessSpanSet(group_key)
+        cp_span_pss.append_sys_span(span)
+        process_span_map.setdefault(auto_instance, []).append(cp_span_pss)
+        same_process_sp[auto_instance] = auto_instance_index
+    # end of client_sys_span match
+    return process_span_map
+
+
+def _build_network_span_set(
+        united_spans: list[SpanNode],
+        related_flow_index_map: defaultdict(inner_defaultdict_set),
+        flow_index_to_span: list[SpanNode]) -> list[NetworkSpanSet]:
     networks: list[NetworkSpanSet] = []
-    network_flows = sorted(network_flows + syscall_flows,
-                           key=lambda x: x.get("type"),
-                           reverse=True)
+
+    # 先构建一个 flow index to span 的映射
     flow_aggregated = set()  # set(flow._index)
-    for flow in network_flows:
-        if flow['_index'] in flow_aggregated:
+    for span in united_spans:
+        flow_index = span.get_flow_index()
+        if flow_index in flow_aggregated:
             continue
         # construct a network
         network = NetworkSpanSet()
         networks.append(network)
         # aggregate self to this network
-        network.append_network_flow(flow)
-        flow_aggregated.add(flow['_index'])
+        network.append_span_node(span)
+        flow_aggregated.add(flow_index)
         # aggregate other spans to this network
-        for _index, related_types in related_flow_index_map[
-                flow['_index']].items():
+        for _index, related_types in related_flow_index_map[flow_index].items(
+        ):
             if L7_FLOW_RELATIONSHIP_TCP_SEQ not in related_types:
                 continue
             if _index in flow_aggregated:
                 continue
-            network.append_network_flow(flows[_index])
+            network.append_span_node(flow_index_to_span[_index])
             flow_aggregated.add(_index)
-
-    ## 排序
 
     ### 网络span排序
     # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
-        network.sort_network_spans()
         network.set_parent_relation()
-        network.unify_response_status()
+    return networks
 
-    ### Process Span Set 分离
-    process_span_list: list[ProcessSpanSet] = [
-        pss for _, process_span_sets in process_span_map.items()
-        for pss in process_span_sets
-    ]
 
-    ### 连接 process span set 与 network span set
-    ### 注意这里连接顺序按如下优先级连接：
-    ### 1. process <-> net, 2. process <-> process 3. net <-> net
+def _same_span_set(lhs: SpanNode, rhs: SpanNode, spanset: str) -> bool:
+    if hasattr(lhs, spanset) and hasattr(rhs, spanset)\
+        and getattr(lhs, spanset) and getattr(rhs, spanset) \
+        and getattr(lhs, spanset) == getattr(rhs, spanset):
+        return True
 
-    ### 准备数据，从所有 process 和 network 中获取 root 和 leaf
-    process_root_list = [pss.get_roots()
-                         for pss in process_span_list]  # list of list
-    process_roots = [item for roots in process_root_list
-                     for item in roots]  # flat list
-    process_leafs = [
-        item for i in range(len(process_span_list))
-        for item in process_span_list[i].get_leafs(process_root_list[i])
-    ]
 
-    network_leafs = [network.flows[-1] for network in networks]
-    network_roots = [network.flows[0] for network in networks]
-
-    #### 1. process span set 的 leaf 作为 network span set root 的 parent
+def _connect_process_and_networks(process_roots: list[SpanNode],
+                                  process_leafs: list[SpanNode],
+                                  network_roots: list[SpanNode],
+                                  network_leafs: list[SpanNode],
+                                  process_span_dict: dict[str, SpanNode],
+                                  flow_index_to_span: list[SpanNode]):
+    # 1. process span set 的 leaf 作为 network span set root 的 parent
     for ps_parent in process_leafs:
         # 避免子循环多次访问字典
         ps_index = ps_parent.get_flow_index()
         ps_span_id = ps_parent.get_span_id()
         for net_child in network_roots:
-            if net_child.get('parent_id', -1) >= 0:
+            if net_child.get_parent_id() >= 0:
                 continue
-            if ps_index == net_child['_index']:
+            # 避免同一组 span set 首尾互连
+            if _same_span_set(ps_parent, net_child, 'network_span_set') \
+                or _same_span_set(ps_parent, net_child, 'process_span_set'):
+                continue
+            if ps_index == net_child.get_flow_index():
                 # 共享一个 c-p, net_child parent == ps_parent 的 parent
                 continue
-            elif ps_span_id and ps_span_id == net_child['span_id']:
-                # net_child 一定是 net-span 且没有 c-p, ps_parent 一定是 app-span，共享一个 span_id，则 ps_parent 是 parent
-                _set_parent(net_child, ps_parent.flow,
-                            "net-span mounted due to same span_id")
+            if ps_span_id and ps_span_id == net_child.get_span_id():
+                # net_child 一定是 net-span 且没有 c-p, ps_parent 一定是 app-span，共享一个 span_id
+                net_child.set_parent(ps_parent,
+                                     "net_span mounted due to same span_id")
 
-    #### 2. network span 的 leaf 作为 process span set root 的 parent
+    # 2. network span 的 leaf 作为 process span set root 的 parent
     for ps_child in process_roots:
-        if ps_child.flow.get('parent_id', -1) >= 0:
+        if ps_child.get_parent_id() >= 0:
             continue
         ps_index = ps_child.get_flow_index()
-        ps_span_id = ps_child.get_span_id()
+        ps_child_span_id = ps_child.get_span_id()
+        ps_child_parent_span_id = ps_child.get_parent_span_id()
         for net_parent in network_leafs:
-            if ps_index == net_parent['_index']:
+            if _same_span_set(ps_child, net_parent, 'network_span_set') \
+                or _same_span_set(ps_child, net_parent, 'process_span_set'):
+                continue
+            if ps_index == net_parent.get_flow_index():
                 # 共享一个 s-p，则 ps_child 的 parent == net_parent 的 parent
                 continue
-            elif ps_span_id and ps_span_id == net_parent['span_id']:
-                # ps_child 一定是 app-span 且没有 s-p, net_parent 一定是 net-span 且没有 s-p，则 net_parent 是 parent
-                _set_parent(
-                    ps_child.flow, net_parent,
-                    f"{ps_child.get_tap_side()} mounted due to same span_id")
+            if ps_child_span_id and ps_child_span_id == net_parent.get_span_id(
+            ) and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                # ps_child 可能是 s-p, net_parent 可能是 s
+                # 这种情况有可能 s-p 在 `flow_field_conflict` 中匹配失败，没有放到同一个 networkspanset 里
+                # 为了避免 app_span 连接上末端 net_span 产生环路，这里限制 ps_child 不能是 app_span
+                ps_child.set_parent(
+                    net_parent,
+                    f"{ps_child.tap_side} mounted due to same span_id")
+            elif ps_child_parent_span_id and ps_child_parent_span_id == net_parent.get_span_id(
+            ):
+                # ps_child 一定是 app_span 且没有 s-p，net_parent 一定是 net_span 且没有 s-p，二者构成父子关系
+                # 注意这里和 [1] 的 ps_parent 匹配 net_child 不一样，因为 net_child 不会创建一个新的 span_id，span_id 一定是相等关系
+                # ps_child 如果是 app_span，它会创建一个新的 span_id，然后通过 parent_span_id 关联
+                ps_child.set_parent(
+                    net_parent,
+                    f"{ps_child.tap_side} mounted due to parent_span_id")
 
-    #### 3. process span set 互相连接
+    # 3. process span set 互相连接
     for ps_child in process_roots:
-        if ps_child.flow.get('parent_id', -1) >= 0:
+        if ps_child.get_parent_id() >= 0:
             continue
         ps_child_index = ps_child.get_flow_index()
         ps_child_span_id = ps_child.get_span_id()
+        ps_child_parent_span_id = ps_child.get_parent_span_id()
         for ps_parent in process_leafs:
+            if _same_span_set(ps_child, ps_parent, 'network_span_set') \
+                or _same_span_set(ps_child, ps_parent, 'process_span_set'):
+                continue
             if ps_child_index == ps_parent.get_flow_index():
                 # 共享一个 c-p，则 ps_child 的 parent == ps_parent 的 parent
                 continue
-            elif ps_child_span_id and ps_child_span_id == ps_parent.get_span_id(
+            if ps_child_span_id and ps_child_span_id == ps_parent.get_span_id(
+            ) and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                # ps_child 可能是 app_span/s-p，ps_leaf 一定是 app_span，都没有 c-p, 共享一个 span_id
+                ps_child.set_parent(
+                    ps_parent,
+                    f"{ps_child.tap_side} mounted due to same span_id")
+            elif ps_child_parent_span_id and ps_child_parent_span_id == ps_parent.get_span_id(
             ):
-                # ps_child 可能是 app-span/s-p，ps_leaf 一定是 app-span，都没有 c-p, 共享一个 span_id
-                _set_parent(
-                    ps_child.flow, ps_parent.flow,
-                    f"{ps_child.get_tap_side()} mounted due to same span_id")
+                ps_child.set_parent(
+                    ps_parent,
+                    f"{ps_child.tap_side} mounted due to parent_span_id")
 
-    #### 4. network span set 互相连接
-    #### relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
+    # 4. process span set 之间，尝试连接具有同一个 span_id 的 span
+    for ps_child in process_roots:
+        if ps_child.get_parent_id() >= 0:
+            continue
+        ps_child_index = ps_child.get_flow_index()
+        ps_child_parent_span_id = ps_child.get_parent_span_id()
+        if not ps_child_parent_span_id:
+            continue
+        # 此场景 ps_parent 一定是 app_span
+        # 因为 sys_span 会在[3]中作为叶子节点关联上 ps_child
+        # 只有 app_span 才会有非叶子节点与下级 ps_child 有父子关系的场景
+        # 这种情况下关联 ps_child.parent_span_id == ps_parent.span_id 关系
+        ps_parent = process_span_dict.get(ps_child_parent_span_id, None)
+        if ps_parent is not None:
+            if _same_span_set(ps_child, ps_parent, 'network_span_set') \
+                or _same_span_set(ps_child, ps_parent, 'process_span_set'):
+                continue
+            if ps_child_index == ps_parent.get_flow_index():
+                continue
+            if not ps_parent.time_range_cover(ps_child):
+                continue
+            ps_child.set_parent(
+                ps_parent,
+                f"{ps_child.tap_side} mounted due to parent_span_id")
+
+    # 5. network span set 互相连接
+    # relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
     network_match_parent: dict[int, int] = {}
     for net_child in network_roots:
-        if net_child.get('parent_id', -1) >= 0:
+        if net_child.get_parent_id() >= 0:
             continue
-        net_child_index = net_child['_index']
-        net_child_span_id = net_child['span_id']
-        net_child_req_tcp_seq = net_child['req_tcp_seq']
-        net_child_resp_tcp_seq = net_child['resp_tcp_seq']
-        net_child_x_request_id_0 = net_child['x_request_id_0']
-        net_child_x_request_id_1 = net_child['x_request_id_1']
-        net_child_response_duration = net_child['response_duration']
+        net_child_index = net_child.get_flow_index()
+        net_child_span_id = net_child.get_span_id()
+        net_child_x_request_id_0 = net_child.get_x_request_id_0
+        net_child_x_request_id_1 = net_child.get_x_request_id_1()
+        net_child_response_duration = net_child.flow['response_duration']
         for net_parent in network_leafs:
-            # 避免同一个 tcp_seq 组内首尾相连
-            if net_parent['req_tcp_seq'] == net_child_req_tcp_seq \
-                or net_parent['resp_tcp_seq'] == net_child_resp_tcp_seq:
+            if _same_span_set(net_child, net_parent, 'network_span_set') \
+                or _same_span_set(net_child, net_parent, 'process_span_set'):
                 continue
-            if net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent[
-                    'x_request_id_1']:
+            if net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent.get_x_request_id_1(
+            ):
                 # 网关注入 x_request_id 的场景
+                net_child.set_parent(
+                    net_parent,
+                    "net_span mounted due to x_request_id_0 match to x_request_id_1"
+                )
+
                 # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
                 # fake_pss = _generate_pseudo_process_span_set(
                 #     net_child, net_parent)
                 # process_span_list.append(fake_pss)
                 # flows.extend(fake_pss.spans)
-                _set_parent(
-                    net_child, net_parent,
-                    "net-span mounted due to x_request_id_0 match to x_request_id_1"
-                )
-            elif (net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent['x_request_id_0']) \
-                    or (net_child_x_request_id_1 and net_child_x_request_id_1 == net_parent['x_request_id_1']) \
-                    or (net_child_span_id and net_child_span_id == net_parent['span_id']):
+
+            elif (net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent.get_x_request_id_0()) \
+                    or (net_child_x_request_id_1 and net_child_x_request_id_1 == net_parent.get_x_request_id_1()) \
+                    or (net_child_span_id and net_child_span_id == net_parent.get_span_id()):
                 # 网关透传 x_request_id 或透传 http header 中的 span_id
                 # 要求 parent 的所有 response_duration > child 最大的 response_duration
-                # 由于一个 net-span 内是按 c 端 agent 在前+start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
-                if net_parent[
+                # 由于 network span set 内是按 c 端 agent 在前+ start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
+                if net_parent.flow[
                         'response_duration'] < net_child_response_duration:
                     continue
                 else:
-                    # 这里不要直接设置 parent，如果找到了时延+id 满足条件的情况，都加入列表待处理
+                    # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
                     if net_child_index not in network_match_parent:
-                        network_match_parent[net_child_index] = net_parent[
-                            '_index']
+                        network_match_parent[
+                            net_child_index] = net_parent.get_flow_index()
                     else:
                         # 根据 `时延最接近` 原则找 parent
                         # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
-                        # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flows 中取 response_duration
-                        if flows[network_match_parent[net_child_index]][
-                                'response_duration'] > net_parent[
-                                    'response_duration']:
-                            network_match_parent[net_child_index] = net_parent[
-                                '_index']
+                        # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
+                        if flow_index_to_span[network_match_parent[net_child_index]].flow['response_duration'] \
+                            > net_parent.flow['response_duration']:
+                            network_match_parent[
+                                net_child_index] = net_parent.get_flow_index()
 
     for child, parent in network_match_parent.items():
         # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
-        # fake_pss = _generate_pseudo_process_span_set(flows[child],
-        #                                              flows[parent])
+        # fake_pss = _generate_pseudo_process_span_set(flow_index_to_span[child],
+        #                                              flow_index_to_span[parent])
         # process_span_list.append(fake_pss)
         # flows.extend(fake_pss.spans)
-        _set_parent(flows[child], flows[parent],
-                    "net-span mounted due to x_request_id or span_id passed")
-
-    return process_span_list, networks, flow_index_to_id0, related_flow_index_map
+        flow_index_to_span[child].set_parent(
+            flow_index_to_span[parent],
+            "net_span mounted due to x_request_id or span_id passed")
 
 
 def format_trace(services: list[ProcessSpanSet],
@@ -2630,7 +2773,7 @@ def _get_df_key(df: DataFrame, key: str):  # XXX: 待删除，nan 在最源头�
     return df[key]
 
 
-def _set_parent(flow: dict, flow_parent: dict, info: str = None):
+def _set_parent_mount_info(flow: dict, flow_parent: dict, info: str = None):
     flow['parent_id'] = flow_parent['_index']
     if flow_parent.get('childs'):
         flow_parent['childs'].append(flow['_index'])
