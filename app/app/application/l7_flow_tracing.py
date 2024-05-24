@@ -160,7 +160,6 @@ class L7FlowTracing(Base):
     async def query(self):
         max_iteration = self.args.get("max_iteration", config.max_iteration)
         network_delay_us = self.args.get("network_delay_us")
-        ntp_delay_us = self.args.get("ntp_delay_us", 10000)
         self.failed_regions = set()
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
         _id = self.args.get("_id")
@@ -180,8 +179,7 @@ class L7FlowTracing(Base):
         rst = await self.trace_l7_flow(time_filter=time_filter,
                                        base_filter=base_filter,
                                        max_iteration=max_iteration,
-                                       network_delay_us=network_delay_us,
-                                       ntp_delay_us=ntp_delay_us)
+                                       network_delay_us=network_delay_us)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -460,12 +458,12 @@ class L7FlowTracing(Base):
 
         return l7_flow_ids, app_spans_from_apm
 
-    async def trace_l7_flow(self,
-                            time_filter: str,
-                            base_filter: str,
-                            max_iteration: int = config.max_iteration,
-                            network_delay_us: int = config.network_delay_us,
-                            ntp_delay_us: int = 10000) -> dict:
+    async def trace_l7_flow(
+            self,
+            time_filter: str,
+            base_filter: str,
+            max_iteration: int = config.max_iteration,
+            network_delay_us: int = config.network_delay_us) -> dict:
         """L7 FlowLog 追踪入口
 
         参数说明：
@@ -505,7 +503,7 @@ class L7FlowTracing(Base):
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
         l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
-            l7_flows, network_delay_us, return_fields, ntp_delay_us)
+            l7_flows, network_delay_us, return_fields)
 
         return format_final_result(l7_flows_merged, networks,
                                    self.args.get('_id'), network_delay_us,
@@ -567,14 +565,22 @@ class L7FlowTracing(Base):
         return response.get("data", [])
 
     async def query_apm_for_app_span_completion(self, trace_id: str) -> list:
-        get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
-        app_spans_res, app_spans_code = await curl_perform(
-            'get', get_third_app_span_url)
-        if app_spans_code != HTTP_OK:
-            log.warning(f"Get app spans failed! url: {get_third_app_span_url}")
-        app_spans = app_spans_res.get('data', {}).get('spans', [])
-        self.complete_app_span(app_spans)
-        return app_spans
+        try:
+            # if get data error from external apm, ignore it
+            # it should not interrupt the main tracing process
+            get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
+            app_spans_res, app_spans_code = await curl_perform(
+                'get', get_third_app_span_url)
+            if app_spans_code != HTTP_OK:
+                log.warning(
+                    f"Get app spans failed! url: {get_third_app_span_url}")
+            app_spans = app_spans_res.get('data', {}).get('spans', [])
+            self.complete_app_span(app_spans)
+            return app_spans
+        except Exception as e:
+            log.error(
+                f"get apm app_span failed! trace_id: {trace_id}, error: {e}")
+            return []
 
     async def query_all_flows(self, time_filter: str, l7_flow_ids: list,
                               return_fields: list):
@@ -1098,124 +1104,127 @@ class NetworkSpanSet:
         # 标识 span_id 方便匹配 app-span
         self.span_id = None
         # 分组聚合所有 tcp_seq 相同的 flow
-        self.flows: list[dict] = []
-        self.sys_flow_index: list[int] = []
+        self.spans: list[SpanNode] = []
+        self.req_tcp_seq = 0
+        self.resp_tcp_seq = 0
 
-    def append_network_flow(self, flow: dict):
+    def __eq__(self, other: 'NetworkSpanSet') -> bool:
+        equal = True
+        if self.req_tcp_seq:
+            equal &= self.req_tcp_seq == other.req_tcp_seq
+        if self.resp_tcp_seq:
+            equal &= self.resp_tcp_seq == other.resp_tcp_seq
+        if not self.req_tcp_seq and not self.resp_tcp_seq:
+            # if both equals zero, use mem compare
+            equal = self is other
+        return equal
+
+    def __hash__(self) -> int:
+        if not self.req_tcp_seq and not self.resp_tcp_seq:
+            return super().__hash__()
+        return hash((self.req_tcp_seq, self.resp_tcp_seq))
+
+    def append_span_node(self, span: 'SpanNode'):
         """
         将 net-span 与 sys-span 按 tcp_seq 分组
+        构造 tcp_seq 分组时已通过 `flow_field_conflict` 函数确保同一组内必是同一个 span_id
         """
-        if not self.span_id and flow["span_id"]:
-            self.span_id = flow["span_id"]
-        self.flows.append(flow)
-        if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
-            # 做个标记，方便更新 sys-flow 的 response_status
-            self.sys_flow_index.append(len(self.flows) - 1)
-
-    def unify_response_status(self):
-        """
-        更新 sys-flow 的 response_status
-        """
-        # 如果状态不一致，可能是子级发生异常，而父级收不到信息被标记为未知
-        # response_status: {0: success}{2: unknown}{3: server error}{4: client error}
-        max_response_status = max(
-            self.flows, key=lambda x: x['response_status'])['response_status']
-        # 更新 sys-span's response_status
-        for i in self.sys_flow_index:
-            self.flows[i]['response_status'] = max(
-                self.flows[i]['response_status'], max_response_status)
+        if not self.span_id and span.get_span_id():
+            self.span_id = span.get_span_id()
+        if not self.req_tcp_seq and span.get_req_tcp_seq():
+            self.req_tcp_seq = span.get_req_tcp_seq()
+        if not self.resp_tcp_seq and span.get_resp_tcp_seq():
+            self.resp_tcp_seq = span.get_resp_tcp_seq()
+        span.network_span_set = self
+        self.spans.append(span)
 
     def set_parent_relation(self):
         """
-        对组内 span 设置父子关系，执行此方法前需用 `sort_network_spans` 先排序
+        对组内 span 设置父子关系
         """
-        for i in range(1, len(self.flows), 1):
-            if self.flows[i]['signal_source'] == self.flows[
-                    i - 1]['signal_source'] == L7_FLOW_SIGNAL_SOURCE_EBPF:
-                if self.flows[i][
-                        "tap_side"] == TAP_SIDE_SERVER_PROCESS and self.flows[
-                            i - 1]["tap_side"] == TAP_SIDE_CLIENT_PROCESS:
+        self._sort_network_spans()
+        for i in range(1, len(self.spans), 1):
+            if self.spans[i].signal_source == self.spans[
+                    i - 1].signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
+                if self.spans[
+                        i].tap_side == TAP_SIDE_SERVER_PROCESS and self.spans[
+                            i - 1].tap_side == TAP_SIDE_CLIENT_PROCESS:
                     # 当顺序为 [c-p, s-p] 说明中间没有 net-span，构成父子关系
-                    _set_parent(self.flows[i], self.flows[i - 1],
-                                "trace mounted due to tcp_seq")
+                    self.spans[i].set_parent(self.spans[i - 1],
+                                             "trace mounted due to tcp_seq")
                 else:
                     # 某些情况下，可能会有两个 SYS Span 拥有同样的 TCP Seq，此类情况一般是由于 eBPF 内核适配不完善导致。
                     # 例如：self.flows 数组中可能包含两个 c-p Span（拥有同样的 TCP Seq）、多个 net Span、一个 s-p Span，开头两个 c-p Span 实际上没有父子关系。
-                    # 这里做一个简单的处理，当相邻两个 Span 都是 SYS Span 时不要按照 TCP Seq 来设置他们的 Parent 关系。
+                    # 这里做一个简单的处理，当相邻两个 Span 都是同类 SYS Span 时不要按照 TCP Seq 来设置他们的 Parent 关系。
                     continue
             else:
-                _set_parent(self.flows[i], self.flows[i - 1],
-                            "trace mounted due to tcp_seq")
+                self.spans[i].set_parent(self.spans[i - 1],
+                                         "trace mounted due to tcp_seq")
 
-    def sort_network_spans(self):
+    def _sort_network_spans(self):
         """
         对网络span进行排序，排序规则：
         1. 按照TAP_SIDE_RANKS进行排序
         2. 按采集器分组排序，与入口 span 同一个采集器的前移，出口 span 同一个采集器的后移，组内按 start_time 排序
         """
-        # 先根据 tap_side 排序，方便找 client-side 和 server-side span
-        sorted_traces = sorted(
-            self.flows,
-            key=lambda x:
-            (const.TAP_SIDE_RANKS.get(x['tap_side']), x['tap_side']))
+        sorted_spans = sorted(
+            self.spans,
+            key=lambda x: (const.TAP_SIDE_RANKS.get(x.tap_side), x.tap_side))
 
         # 获取入口 agent，顺序向后扫，找遇到的第一个 c-span
         ingress_agent = ''
-        for i in range(len(sorted_traces)):
-            if sorted_traces[i]['tap_side'] in (
-                    const.TAP_SIDE_CLIENT_PROCESS, const.TAP_SIDE_CLIENT_NIC,
-                    const.TAP_SIDE_CLIENT_POD_NODE):
-                ingress_agent = sorted_traces[i]['vtap_id']
+        for i in range(len(sorted_spans)):
+            if sorted_spans[i].tap_side in (const.TAP_SIDE_CLIENT_PROCESS,
+                                            const.TAP_SIDE_CLIENT_NIC,
+                                            const.TAP_SIDE_CLIENT_POD_NODE):
+                ingress_agent = sorted_spans[i].flow['vtap_id']
                 break
 
         # 获取出口 agent，逆序向前扫，找遇到的第一个 s-span（也就是最后一个 child）
         egress_agent = ''
-        for i in range(len(sorted_traces) - 1, -1, -1):
-            if sorted_traces[i]['tap_side'] in (
-                    const.TAP_SIDE_SERVER_PROCESS, const.TAP_SIDE_SERVER_NIC,
-                    const.TAP_SIDE_SERVER_POD_NODE):
-                egress_agent = sorted_traces[i]['vtap_id']
+        for i in range(len(sorted_spans) - 1, -1, -1):
+            if sorted_spans[i].tap_side in (const.TAP_SIDE_SERVER_PROCESS,
+                                            const.TAP_SIDE_SERVER_NIC,
+                                            const.TAP_SIDE_SERVER_POD_NODE):
+                egress_agent = sorted_spans[i].flow['vtap_id']
                 break
 
-        for i in range(len(sorted_traces)):
-            if sorted_traces[i]['vtap_id'] == ingress_agent:
-                sorted_traces[i]['agent_rank'] = 0
-            elif sorted_traces[i]['vtap_id'] == egress_agent:
-                sorted_traces[i]['agent_rank'] = 2
+        for i in range(len(sorted_spans)):
+            if sorted_spans[i].flow['vtap_id'] == ingress_agent:
+                sorted_spans[i].flow['agent_rank'] = 0
+            elif sorted_spans[i].flow['vtap_id'] == egress_agent:
+                sorted_spans[i].flow['agent_rank'] = 2
             else:
-                sorted_traces[i]['agent_rank'] = 1
+                sorted_spans[i].flow['agent_rank'] = 1
 
-        sorted_traces = sorted(sorted_traces,
-                               key=lambda x: (x['agent_rank'], x['vtap_id'], x[
-                                   'start_time_us'], -x['end_time_us']))
+        sorted_spans = sorted(sorted_spans,
+                              key=lambda x:
+                              (x.flow['agent_rank'], x.flow['vtap_id'], -x.
+                               flow['response_duration'], x.flow[
+                                   'start_time_us'], -x.flow['end_time_us']))
 
         # 当 ingress_agent=egress_agent 时
         # 如果中间穿过了其他节点数据，需要将所有 server-side span 排序到末尾
         if ingress_agent == egress_agent:
             first_serverside_index = -1
-            for i in range(len(sorted_traces)):
-                if sorted_traces[i]['tap_side'] in (
-                        const.TAP_SIDE_SERVER_GATEWAY,
-                        const.TAP_SIDE_SERVER_GATEWAY_HAPERVISOR,
-                        const.TAP_SIDE_SERVER_HYPERVISOR,
-                        const.TAP_SIDE_SERVER_POD_NODE,
-                        const.TAP_SIDE_SERVER_NIC,
-                        const.TAP_SIDE_SERVER_PROCESS):
+            for i in range(len(sorted_spans)):
+                if sorted_spans[i].tap_side in const.SERVER_SIDE_TAP_SIDES:
                     first_serverside_index = i
                     break
 
             diff_agent_index = -1
-            for i in range(first_serverside_index, len(sorted_traces)):
-                if sorted_traces[i]['agent_rank'] != 0:
-                    diff_agent_index = i
-                    break
+            if first_serverside_index != -1:
+                for i in range(first_serverside_index, len(sorted_spans)):
+                    if sorted_spans[i].flow['agent_rank'] != 0:
+                        diff_agent_index = i
+                        break
 
-            if diff_agent_index > 0:
-                sorted_traces = sorted_traces[:first_serverside_index] + sorted_traces[
-                    diff_agent_index:] + sorted_traces[
+            if diff_agent_index != -1:
+                sorted_spans = sorted_spans[:first_serverside_index] + sorted_spans[
+                    diff_agent_index:] + sorted_spans[
                         first_serverside_index:diff_agent_index]
 
-        self.flows = sorted_traces
+        self.spans = sorted_spans
 
 
 class SpanNode:
