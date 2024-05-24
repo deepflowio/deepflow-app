@@ -69,6 +69,9 @@ class Base(object):
             ]:
                 app_span[tag_str] = "" if not app_span.get(
                     tag_str) else app_span[tag_str]
+            # try to recalculate response duration when it's not set
+            if app_span['start_time_us'] and app_span['end_time_us']:
+                app_span['response_duration'] = app_span['end_time_us'] - app_span['start_time_us']
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")
             app_span["_id"] = str(
                 uuid.uuid4().node) if not app_span.get('_id') else str(
