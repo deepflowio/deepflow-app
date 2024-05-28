@@ -17,15 +17,17 @@ def signal_handler(sig, frame):
         log.info('Terminating Cleaner ...')
         sys.exit(0)
     elif sig == signal.SIGHUP:
-        log.info('Reloading statistics.yaml ...')
+        log.info('Reloading config.yaml ...')
         config.is_valid()
-        log.info('statistics.yaml reloaded.')
+        log.info('config.yaml reloaded.')
 
 
+@server.server.before_server_start
 async def notify_server_started(app, loop):
-    pass
+    server.init(app, config.http_request_timeout, config.http_response_timeout)
 
 
+@server.server.before_server_stop
 async def before_server_stop(app, loop):
     pass
 
@@ -40,11 +42,6 @@ def main():
     signal.signal(signal.SIGHUP, signal_handler)
 
     log.info('Launching Deepflow-app ...')
-    server.server.register_listener(notify_server_started,
-                                    'before_server_start')
-    server.server.register_listener(before_server_stop, 'before_server_stop')
-
-    server.init(config.http_request_timeout, config.http_response_timeout)
     try:
         sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
     except OSError:
