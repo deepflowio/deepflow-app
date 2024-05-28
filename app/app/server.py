@@ -16,6 +16,10 @@ async def request_finished(request, response):
     pass
 
 
-def init(request_timeout, response_timeout):
-    server.config.REQUEST_TIMEOUT = request_timeout
-    server.config.RESPONSE_TIMEOUT = response_timeout
+def init(app: Sanic, request_timeout, response_timeout):
+    if app is None:
+        return
+    app.update_config({
+        "REQUEST_TIMEOUT": request_timeout,
+        "RESPONSE_TIMEOUT": response_timeout
+    })
