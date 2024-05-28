@@ -202,8 +202,8 @@ class L7FlowTracing(Base):
             time_filter: str,
             base_filter: str,
             max_iteration: int = config.max_iteration,
-            network_delay_us: int = config.network_delay_us
-    ) -> Tuple(list, list):
+            network_delay_us: int = config.network_delay_us,
+            app_spans_from_api: list = []) -> Tuple(list, list):
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
         time_filter: 查询的时间范围过滤条件，SQL表达式
@@ -220,7 +220,7 @@ class L7FlowTracing(Base):
         syscall_trace_ids = set()  # set(str(syscall_trace_id))
         x_request_ids = set()  # set(x_request_id)
         allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
-        app_spans_from_apm = []
+        app_spans_from_external = [] # 主动调用 APM API 或由 Tracing Completion API 传入
 
         new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
 
@@ -228,7 +228,8 @@ class L7FlowTracing(Base):
         dataframe_flowmetas = await self.query_flowmetas(
             time_filter, base_filter)
         if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
-            return [], []
+            # when app_spans_from_api got values from api, return it
+            return [], app_spans_from_api
         dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
 
@@ -237,12 +238,23 @@ class L7FlowTracing(Base):
             dataframe_flowmetas)
 
         # remember the initial trace_id
-        initial_trace_id = self.args.get("trace_id")  # For Tempo API
+        initial_trace_id = self.args.get(
+            "trace_id")  # For Tempo API & Tracing Completion API
         if not initial_trace_id:  # For normal query using _id
             initial_trace_id = dataframe_flowmetas.at[0, 'trace_id']
         if initial_trace_id:
             allowed_trace_ids.add(initial_trace_id)
             new_trace_ids_in_prev_iteration.add(initial_trace_id)
+
+        # append app_spans from Tracing Completion API
+        app_spans_from_external.extend(app_spans_from_api)
+        # for Tracing Completion API with multiple trace_id
+        if app_spans_from_api and config.allow_multiple_trace_ids_in_tracing_result:
+            for app_span in app_spans_from_api:
+                trace_id = app_span.get('trace_id', '')
+                if trace_id:
+                    allowed_trace_ids.add(trace_id)
+                    new_trace_ids_in_prev_iteration.add(trace_id)
 
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
@@ -257,7 +269,7 @@ class L7FlowTracing(Base):
                         new_app_spans_from_apm.extend(app_spans)
                     # 此处不需要将 new_app_spans_from_apm 合入 dataframe_flowmetas
                     # app_flow 对迭代查询过程没有更多的帮助
-                    app_spans_from_apm.extend(new_app_spans_from_apm)
+                    app_spans_from_external.extend(new_app_spans_from_apm)
 
                 # 1.2. Query database by trace_id
                 new_trace_ids_str = set(
@@ -457,14 +469,17 @@ class L7FlowTracing(Base):
 
             # end of `for i in range(max_iteration)`
 
-        return l7_flow_ids, app_spans_from_apm
+        return l7_flow_ids, app_spans_from_external
 
     async def trace_l7_flow(
-            self,
-            time_filter: str,
-            base_filter: str,
-            max_iteration: int = config.max_iteration,
-            network_delay_us: int = config.network_delay_us) -> dict:
+        self,
+        time_filter: str,
+        base_filter: str,
+        max_iteration: int = config.max_iteration,
+        network_delay_us: int = config.network_delay_us,
+        app_spans_from_api: list = [],
+        related_map_from_api: defaultdict(inner_defaultdict_set) = None
+    ) -> dict:
         """L7 FlowLog 追踪入口
 
         参数说明：
@@ -476,8 +491,9 @@ class L7FlowTracing(Base):
         network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
         """
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
-        l7_flow_ids, app_spans_from_apm = await self.query_and_trace_flowmetas(
-            time_filter, base_filter, max_iteration, network_delay_us)
+        l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
+            time_filter, base_filter, max_iteration, network_delay_us,
+            app_spans_from_api)
 
         if len(l7_flow_ids) == 0:
             return {}
@@ -497,7 +513,7 @@ class L7FlowTracing(Base):
 
         # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
         l7_flows = self.concat_l7_flow_log_dataframe(
-            [l7_flows, pd.DataFrame(app_spans_from_apm)])
+            [l7_flows, pd.DataFrame(app_spans_from_external)])
 
         # 将 null 转化为 None
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
@@ -505,7 +521,8 @@ class L7FlowTracing(Base):
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
         l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
             l7_flows, network_delay_us, return_fields)
-
+        if related_map_from_api:
+            related_flow_index_map.update(related_map_from_api)
         return format_final_result(l7_flows_merged, networks,
                                    self.args.get('_id'), network_delay_us,
                                    flow_index_to_id0, related_flow_index_map)
