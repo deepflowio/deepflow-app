@@ -1342,8 +1342,8 @@ class ProcessSpanSet:
         self.app_span_roots: List[SpanNode] = None
         # 用于存放 `app_span` 的所有 leaf
         self.app_span_leafs: List[SpanNode] = None
-        self.leaf_syscall_trace_id_request: Set[int] = Set[int]()
-        self.leaf_syscall_trace_id_response: Set[int] = Set[int]()
+        self.leaf_syscall_trace_id_request: Set[int] = set()
+        self.leaf_syscall_trace_id_response: Set[int] = set()
         # 用于显示调用拓扑使用
         self.subnet_id = None
         self.subnet = None
@@ -2528,7 +2528,7 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     按 service 对 flow 分组并统计时延指标
     """
     metrics_map = {}
-    services_from_process_span_set = Set[ProcessSpanSet]()
+    services_from_process_span_set = set()
     services_from_pruning_traces = set()
     # 先获取剪枝后的所有 auto_service + app_service
     for res in traces:
