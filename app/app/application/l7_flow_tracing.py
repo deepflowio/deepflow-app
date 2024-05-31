@@ -221,7 +221,8 @@ class L7FlowTracing(Base):
         syscall_trace_ids = set()  # set(str(syscall_trace_id))
         x_request_ids = set()  # set(x_request_id)
         allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
-        app_spans_from_external = [] # 主动调用 APM API 或由 Tracing Completion API 传入
+        app_spans_from_external = [
+        ]  # 主动调用 APM API 或由 Tracing Completion API 传入
 
         new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
 
@@ -935,7 +936,11 @@ class L7NetworkMeta:
                     is_http2_grpc_and_differ = True
                 continue
 
-            if key == 'request_resource' and is_http2_grpc_and_differ:
+            if is_http2_grpc_and_differ and key == 'l7_protocol_str':
+                # 当已经确认 l7_protocol 忽略差异时，不用比较 l7_protocol_str
+                continue
+
+            if is_http2_grpc_and_differ and key == 'request_resource':
                 # 某些情况下同一股流量在不同位置可能会被 Agent 分别解析为 HTTP2 和 gRPC
                 # 目前这两种协议的 request_resource 取自不同的协议字段，详见下面的文档：
                 # https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#http2
