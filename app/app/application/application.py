@@ -21,11 +21,11 @@ application_app = Blueprint(str(__name__).replace(".", "_"))
 async def application_log_l7_tracing(request):
     args = FlowLogL7Tracing(request.json)
     args.validate()
-
     status, response, failed_regions = await L7FlowTracing(
-        args, request.headers).query()
+        args, request.headers, request.ctx.span_context).query()
     response_dict, code = format_response("Flow_Log_L7_Tracing", status,
-                                          response, args.debug, failed_regions)
+                                          response, args.debug,
+                                          failed_regions)
     return Response(json_response(**response_dict),
                     content_type='application/json; charset=utf-8',
                     status=code)

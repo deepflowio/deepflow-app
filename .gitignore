@@ -1,2 +1,5 @@
 /app/output_amd64
 /app/output_arm64
+*.pyc
+app.*.yaml
+.vscode

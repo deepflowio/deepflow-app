@@ -17,6 +17,7 @@ from common.const import (HTTP_OK, L7_FLOW_SIGNAL_SOURCE_PACKET,
                           L7_FLOW_SIGNAL_SOURCE_OTEL)
 from common.disjoint_set import DisjointSet
 from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+from opentelemetry.trace import SpanKind
 
 log = logger.getLogger(__name__)
 
@@ -488,10 +489,18 @@ class L7FlowTracing(Base):
         max_iteration: 使用Flowmeta信息搜索的次数，每次搜索可认为大约能够扩充一级调用关系
         network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
         """
-        # 多次迭代，查询到所有相关的 l7_flow_log 摘要
-        l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
-            time_filter, base_filter, max_iteration, network_delay_us,
-            app_spans_from_api)
+        with self.tracer.start_as_current_span(
+                name="trace_l7_flow",
+                context=self.span_context,
+                kind=SpanKind.INTERNAL) as query_span:
+            query_span.set_attribute("time_filter", time_filter)
+            query_span.set_attribute("base_filter", base_filter)
+            # 多次迭代，查询到所有相关的 l7_flow_log 摘要
+            with self.tracer.start_as_current_span(
+                    name="query_and_trace_flowmetas"):
+                l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
+                    time_filter, base_filter, max_iteration, network_delay_us,
+                    app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
@@ -502,31 +511,50 @@ class L7FlowTracing(Base):
         if self.has_attributes:
             return_fields.append("attribute")
         l7_flows = pd.DataFrame()
-        if len(l7_flow_ids) > 0:
-            l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
-                                                  return_fields)
-            if type(l7_flows) != DataFrame or l7_flows.empty:
-                # 一般不可能发生没有 l7_flows 但有 app_spans_from_external 的情况
-                # 实际上几乎不可能发生没有 l7_flows 的情况，因为至少包含初始 flow
-                # 但由于 tracing_completion api 也调用此处追踪逻辑，接口可能传入不存在的 trace_id
-                # 所以这里兼容 len(l7_flow_ids)=0 场景，仅对: 当 len(l7_flow_ids)>0 但 `query_all_flows` 为空时返回
-                return {}
+        with self.tracer.start_as_current_span(name="query_all_flows",
+                                               context=self.span_context,
+                                               kind=SpanKind.INTERNAL):
+            if len(l7_flow_ids) > 0:
+                l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
+                                                      return_fields)
+                if type(l7_flows) != DataFrame or l7_flows.empty:
+                    # 一般不可能发生没有 l7_flows 但有 app_spans_from_external 的情况
+                    # 实际上几乎不可能发生没有 l7_flows 的情况，因为至少包含初始 flow
+                    # 但由于 tracing_completion api 也调用此处追踪逻辑，接口可能传入不存在的 trace_id
+                    # 所以这里兼容 len(l7_flow_ids)=0 场景，仅对: 当 len(l7_flow_ids)>0 但 `query_all_flows` 为空时返回
+                    return {}
 
-        # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
-        l7_flows = self.concat_l7_flow_log_dataframe(
-            [l7_flows, pd.DataFrame(app_spans_from_external)])
+            # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
+            l7_flows = self.concat_l7_flow_log_dataframe(
+                [l7_flows, pd.DataFrame(app_spans_from_external)])
 
-        # 将 null 转化为 None
-        l7_flows = l7_flows.where(l7_flows.notnull(), None)
+            # 将 null 转化为 None
+            l7_flows = l7_flows.where(l7_flows.notnull(), None)
+            query_span.set_attribute("l7_flows_count", len(l7_flows))
 
-        # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
-        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
-            l7_flows, network_delay_us, return_fields)
-        if related_map_from_api:
-            related_flow_index_map.update(related_map_from_api)
-        return format_final_result(l7_flows_merged, networks,
-                                   self.args.get('_id'), network_delay_us,
-                                   flow_index_to_id0, related_flow_index_map)
+        with self.tracer.start_as_current_span(
+                name="sort_all_flows",
+                context=self.span_context,
+                kind=SpanKind.INTERNAL) as query_span:
+            query_span.set_attribute("network_delay_us", network_delay_us)
+            # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
+            l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
+                l7_flows, network_delay_us, return_fields)
+            query_span.set_attribute("process_span_count",
+                                     len(l7_flows_merged))
+            query_span.set_attribute("networks_span_count", len(networks))
+            if related_map_from_api:
+                related_flow_index_map.update(related_map_from_api)
+        with self.tracer.start_as_current_span(
+                name="format_final_result",
+                context=self.span_context,
+                kind=SpanKind.INTERNAL) as query_span:
+            result = format_final_result(l7_flows_merged, networks,
+                                         self.args.get('_id'),
+                                         network_delay_us, flow_index_to_id0,
+                                         related_flow_index_map)
+            query_span.set_attribute("result_count", len(result['tracing']))
+        return result
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True,
@@ -575,12 +603,16 @@ class L7FlowTracing(Base):
         """.format(time_filter=time_filter,
                    base_filter=base_filter,
                    l7_tracing_limit=config.l7_tracing_limit)
-        response = await self.query_ck(sql)
-        # Hit Select Limit
-        status_discription = "Query FlowMetas"
-        if len(response.get("data", [])) == config.l7_tracing_limit:
-            status_discription += " Hit Select Limit"
-        self.status.append(status_discription, response)
+        with self.tracer.start_as_current_span(
+                name="query_flowmetas") as ck_span:
+            ck_span.set_attribute("sql", sql)
+            response = await self.query_ck(sql)
+            # Hit Select Limit
+            status_discription = "Query FlowMetas"
+            if len(response.get("data", [])) == config.l7_tracing_limit:
+                status_discription += " Hit Select Limit"
+            self.status.append(status_discription, response)
+            ck_span.set_attribute("count", len(response.get("data", [])))
         return response.get("data", [])
 
     async def query_apm_for_app_span_completion(self, trace_id: str) -> list:

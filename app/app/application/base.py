@@ -1,7 +1,9 @@
 import uuid
 
 from data.status import Status
+from opentelemetry.context.context import Context
 from common.const import L7_FLOW_SIGNAL_SOURCE_OTEL
+from opentelemetry import trace
 
 # 0: unspecified, 1: internal, 2: server, 3: client, 4: producer, 5: consumer
 TAP_SIDE_BY_SPAN_KIND = {
@@ -16,11 +18,15 @@ TAP_SIDE_BY_SPAN_KIND = {
 
 class Base(object):
 
-    def __init__(self, args, headers):
+    def __init__(self, args, headers, span_context: Context = None):
         self.args = args
         self.start_time = int(self.args.get("time_start", 0))
         self.end_time = int(self.args.get("time_end", 0))
         self.headers = headers
+        self.span_context = span_context
+        self.tracer = trace.get_tracer(
+            instrumenting_module_name=__name__,
+            tracer_provider=trace.get_tracer_provider())
         self.status = Status()
         self.region = self.args.get("region", None)
         self.signal_sources = self.args.get("signal_sources") or []
@@ -71,7 +77,8 @@ class Base(object):
                     tag_str) else app_span[tag_str]
             # try to recalculate response duration when it's not set
             if app_span['start_time_us'] and app_span['end_time_us']:
-                app_span['response_duration'] = app_span['end_time_us'] - app_span['start_time_us']
+                app_span['response_duration'] = app_span[
+                    'end_time_us'] - app_span['start_time_us']
             app_span["resource_from_vtap"] = (0, 0, "", 0, 0, "")
             app_span["_id"] = str(
                 uuid.uuid4().node) if not app_span.get('_id') else str(

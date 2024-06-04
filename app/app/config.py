@@ -5,6 +5,7 @@ CONFIG_FILE = "/etc/deepflow/app.yaml"
 
 
 class Config(object):
+
     def __init__(self):
         pass
 
@@ -35,6 +36,16 @@ class Config(object):
         self.controller_port = controller.get('port', 20417)
         self.controller_timeout = controller.get('timeout', 60)
 
+    def parse_o11y(self, cfg):
+        o11y = cfg.get('o11y', dict())
+        self.o11y_enabled = o11y.get('enabled', False)
+        self.application_name = o11y.get('application_name', 'deepflow-app')
+        self.profiler_server = o11y.get(
+            'profiler_server', 'http://deepflow-agent/api/v1/profile')
+        self.tracing_server = o11y.get('tracing_server',
+                                       'http://deepflow-agent/api/v1/trace')
+        self.tags = o11y.get('tags', {})
+
     def parse(self, config_path):
         with open(config_path, 'r') as config_file:
             cfg = yaml.safe_load(config_file).get("app", {})
@@ -45,6 +56,7 @@ class Config(object):
             self.parse_spec(cfg)
             self.parse_querier(cfg)
             self.parse_controller(cfg)
+            self.parse_o11y(cfg)
 
     def is_valid(self, config_path):
         try:
