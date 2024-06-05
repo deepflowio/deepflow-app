@@ -497,7 +497,7 @@ class L7FlowTracing(Base):
             time_filter, base_filter, max_iteration, network_delay_us,
             app_spans_from_api)
 
-        if len(l7_flow_ids) == 0:
+        if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
 
         # 查询会获取这些 _id 对应的完整 l7_flow_log 信息。
@@ -505,13 +505,17 @@ class L7FlowTracing(Base):
         return_fields = RETURN_FIELDS
         if self.has_attributes:
             return_fields.append("attribute")
-        l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
-                                              return_fields)
-        if type(l7_flows) != DataFrame or l7_flows.empty:
-            # 几乎不可能发生没有 l7_flows 但有 app_spans_from_apm 的情况
-            # 实际上几乎不可能发生没有 l7_flows 的情况，因为至少包含初始 flow
-            return {}
-        l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
+        l7_flows = pd.DataFrame()
+        if len(l7_flow_ids) > 0:
+            l7_flows = await self.query_all_flows(time_filter, l7_flow_ids,
+                                                  return_fields)
+            if type(l7_flows) != DataFrame or l7_flows.empty:
+                # 一般不可能发生没有 l7_flows 但有 app_spans_from_external 的情况
+                # 实际上几乎不可能发生没有 l7_flows 的情况，因为至少包含初始 flow
+                # 但由于 tracing_completion api 也调用此处追踪逻辑，接口可能传入不存在的 trace_id
+                # 所以这里兼容 len(l7_flow_ids)=0 场景，仅对: 当 len(l7_flow_ids)>0 但 `query_all_flows` 为空时返回
+                return {}
+            l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
         # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
         l7_flows = self.concat_l7_flow_log_dataframe(
