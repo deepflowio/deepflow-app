@@ -33,7 +33,12 @@ class TracingCompletion(L7FlowTracing):
                 "_id"]  # after `complete_app_span`, _id has been filled
             if trace_id:
                 _id = await self.get_id_by_trace_id(trace_id, time_filter)
-                base_filter += f"_id = {_id}"
+                if _id != "":
+                    base_filter += f"_id = {_id}"
+                else:
+                    # when trace_id not found, we still need to `sort_all_flows` and `format_final_result` for app_spans
+                    # so we use `1=0` filter to avoid query error
+                    base_filter = "1=0"
                 break
         self.args._id = app_span_id  # set app_span_id as args, make it never been pruning
         # build related_map inside app_spans
