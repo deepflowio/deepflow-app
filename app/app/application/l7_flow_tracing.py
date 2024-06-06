@@ -2511,13 +2511,16 @@ def pruning_trace(response, _id, network_delay_us):
 
 
 def calculate_related_ids(
-    response, flow_index_to_id0: list,
+    response, flow_index_to_id0: list, pruning_uid_index_map: dict,
     related_flow_index_map: defaultdict(inner_defaultdict_set)):
     """
     计算 flow 的 related_ids 字段。
     当 related_ids 很多时，构造这些字符串非常耗时，因此这一步放在 pruning_trace 之后进行。
 
     response: {'tracing': [flow]}
+    flow_index_to_id0: flow_index => _id
+    pruning_uid_index_map: flow_index => index of reponse.tracing
+    related_flow_index_map: flow_index => [{flow_index => related_type}]
     """
     _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _index change to id
 
@@ -2526,6 +2529,8 @@ def calculate_related_ids(
         flow['related_ids'] = []
         for _index, related_types in related_flow_index_map[
                 flow[_FLOW_INDEX_KEY]].items():
+            if pruning_uid_index_map.get(_index, -1) < 0:
+                continue
             _id = flow_index_to_id0[_index]
             flow['related_ids'].append(
                 f"{_index}-{','.join(related_types)}-{_id}")
@@ -2611,10 +2616,10 @@ def format_final_result(
     response = format_trace(services, networks)
     # after `format_trace`, _get_flow_dict convert flow to flow_dict
     pruning_trace(response, _id, network_delay_us)  # XXX: slow function
-    calculate_related_ids(response, flow_index_to_id0,
-                          related_flow_index_map)  # XXX: slow function
     traces = response.get('tracing', [])
     uid_index_map = {trace["id"]: i for i, trace in enumerate(traces)}
+    calculate_related_ids(response, flow_index_to_id0, uid_index_map,
+                          related_flow_index_map)  # XXX: slow function
     for trace in traces:
         format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
     response['services'] = merge_service(services, traces, uid_index_map)
