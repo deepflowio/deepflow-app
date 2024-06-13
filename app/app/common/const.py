@@ -1,6 +1,5 @@
 
 # API
-WORKER_NUMBER = 10
 API_VERSION = 'v1'
 API_PREFIX = '/' + API_VERSION + '/stats'
 
