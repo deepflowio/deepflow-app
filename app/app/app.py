@@ -7,7 +7,6 @@ import sys
 import server
 from config import config
 from log import logger, sanic_logger
-from common.const import WORKER_NUMBER
 
 log = logger.getLogger(__name__)
 
@@ -47,7 +46,7 @@ def main():
     except OSError:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(('', config.listen_port))
-    server.server.run(workers=WORKER_NUMBER,
+    server.server.run(workers=config.worker_numbers,
                       sock=sock,
                       protocol=sanic_logger.DFHttpProtocol)
 

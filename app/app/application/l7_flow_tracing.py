@@ -90,8 +90,6 @@ RETURN_FIELDS = list(
         "auto_instance_type_0",
         "auto_instance_id_0",
         "auto_instance_0",
-        "auto_instance_0_node_type",
-        "auto_instance_0_icon_id",
         "process_kname_0",
         "subnet_id_1",
         "subnet_1",
@@ -101,8 +99,6 @@ RETURN_FIELDS = list(
         "auto_instance_type_1",
         "auto_instance_id_1",
         "auto_instance_1",
-        "auto_instance_1_node_type",
-        "auto_instance_1_icon_id",
         "process_kname_1",
         "auto_service_type_0",
         "auto_service_id_0",
@@ -128,15 +124,6 @@ RETURN_FIELDS = list(
 FIELDS_MAP = {
     "start_time_us": "toUnixTimestamp64Micro(start_time) as start_time_us",
     "end_time_us": "toUnixTimestamp64Micro(end_time) as end_time_us",
-    "auto_instance_0_node_type":
-    "node_type(auto_instance_0) as auto_instance_0_node_type",
-    "auto_instance_0_icon_id":
-    "icon_id(auto_instance_0) as auto_instance_0_icon_id",
-    "auto_instance_1_node_type":
-    "node_type(auto_instance_1) as auto_instance_1_node_type",
-    "auto_instance_1_icon_id":
-    "icon_id(auto_instance_1) as auto_instance_1_icon_id",
-    "_id": "toString(_id) as `_id_str`"
 }
 # 请求-响应合并的 key，当找到未合并的请求-响应时如果这些 key 相同，将合并为一个 span，标记为会话
 MERGE_KEYS = [
@@ -227,16 +214,15 @@ class L7FlowTracing(Base):
         new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
 
         # Query1: 先获取 _id 对应的数据
-        dataframe_flowmetas = await self.query_flowmetas(
-            time_filter, base_filter)
+        # don't use timefilter here, querier would extract time from _id (e.g.: id>>32)
+        dataframe_flowmetas = await self.query_flowmetas("1=1", base_filter)
         if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
             # when app_spans_from_api got values from api, return it
             return [], app_spans_from_api
-        dataframe_flowmetas.rename(columns={'_id_str': '_id'}, inplace=True)
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
 
         # 用于下一轮迭代，记录元信息
-        new_trace_infos = TraceInfo.construct_from_dataframe(
+        build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids = _build_simple_trace_info_from_dataframe(
             dataframe_flowmetas)
 
         # remember the initial trace_id
@@ -288,8 +274,6 @@ class L7FlowTracing(Base):
                     time_filter, ' AND '.join(query_trace_filters))
                 if type(new_trace_id_flows
                         ) == DataFrame and not new_trace_id_flows.empty:
-                    new_trace_id_flows.rename(columns={'_id_str': '_id'},
-                                              inplace=True)
 
                     # remove duplicate or trace_id conflict flows
                     new_trace_id_flow_delete_index = []
@@ -319,8 +303,13 @@ class L7FlowTracing(Base):
                     dataframe_flowmetas = self.concat_l7_flow_log_dataframe(
                         [dataframe_flowmetas, new_trace_id_flows])
                     l7_flow_ids = set(dataframe_flowmetas['_id'])
-                    new_trace_infos += TraceInfo.construct_from_dataframe(
+
+                    new_trace_req_tcp_seqs, new_trace_resp_tcp_seqs, new_trace_x_request_ids, new_trace_syscall_trace_ids = _build_simple_trace_info_from_dataframe(
                         new_trace_id_flows)
+                    build_req_tcp_seqs += new_trace_req_tcp_seqs
+                    build_resp_tcp_seqs += new_trace_resp_tcp_seqs
+                    build_x_request_ids += new_trace_x_request_ids
+                    build_syscall_trace_ids += new_trace_syscall_trace_ids
 
                 # remove used trace_ids
                 new_trace_ids_in_prev_iteration = set()
@@ -336,13 +325,14 @@ class L7FlowTracing(Base):
             # 2.1. new tcp_seqs
             new_req_tcp_seqs = set()  # set(str(req_tcp_seq))
             new_resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
-            for nti in new_trace_infos:
-                if nti.req_tcp_seq and nti.req_tcp_seq not in req_tcp_seqs:
-                    req_tcp_seqs.add(nti.req_tcp_seq)
-                    new_req_tcp_seqs.add(str(nti.req_tcp_seq))
-                if nti.resp_tcp_seq and nti.resp_tcp_seq not in resp_tcp_seqs:
-                    resp_tcp_seqs.add(nti.resp_tcp_seq)
-                    new_resp_tcp_seqs.add(str(nti.resp_tcp_seq))
+            for nrts in build_req_tcp_seqs:
+                if nrts and nrts not in req_tcp_seqs:
+                    req_tcp_seqs.add(nrts)
+                    new_req_tcp_seqs.add(str(nrts))
+            for nrts in build_resp_tcp_seqs:
+                if nrts and nrts not in resp_tcp_seqs:
+                    resp_tcp_seqs.add(nrts)
+                    new_resp_tcp_seqs.add(str(nrts))
             # 2.1. Condition 1: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
             tcp_seq_filters = []
             if new_req_tcp_seqs:
@@ -355,15 +345,10 @@ class L7FlowTracing(Base):
                 new_filters.append(f"({' OR '.join(tcp_seq_filters)})")
             # 2.2. new syscall_trace_ids
             new_syscall_trace_ids = set()  # set(str(syscall_trace_id))
-            for nti in new_trace_infos:
-                if nti.syscall_trace_id_request and nti.syscall_trace_id_request not in syscall_trace_ids:
-                    syscall_trace_ids.add(nti.syscall_trace_id_request)
-                    new_syscall_trace_ids.add(str(
-                        nti.syscall_trace_id_request))
-                if nti.syscall_trace_id_response and nti.syscall_trace_id_response not in syscall_trace_ids:
-                    syscall_trace_ids.add(nti.syscall_trace_id_response)
-                    new_syscall_trace_ids.add(
-                        str(nti.syscall_trace_id_response))
+            for nsti in build_syscall_trace_ids:
+                if nsti and nsti not in syscall_trace_ids:
+                    syscall_trace_ids.add(nsti)
+                    new_syscall_trace_ids.add(str(nsti))
             # 2.2. Condition 2: 以 syscall_trace_id_request & syscall_trace_id_response 作为条件查询关联 flow
             syscall_trace_id_filters = []
             if new_syscall_trace_ids:
@@ -377,13 +362,10 @@ class L7FlowTracing(Base):
                     f"({' OR '.join(syscall_trace_id_filters)})")
             # 2.3. new x_request_ids
             new_x_request_ids = set()  # set(x_request_id)
-            for nti in new_trace_infos:
-                if nti.x_request_id_0 and nti.x_request_id_0 not in x_request_ids:
-                    x_request_ids.add(nti.x_request_id_0)
-                    new_x_request_ids.add(nti.x_request_id_0)
-                if nti.x_request_id_1 and nti.x_request_id_1 not in x_request_ids:
-                    x_request_ids.add(nti.x_request_id_1)
-                    new_x_request_ids.add(nti.x_request_id_1)
+            for nxri in build_x_request_ids:
+                if nxri and nxri not in x_request_ids:
+                    x_request_ids.add(nxri)
+                    new_x_request_ids.add(nxri)
             # 2.3. Condition 3: 以 x_request_id_0 & x_request_id_1 作为条件查询关联 flow
             x_request_id_filters = []
             if new_x_request_ids:
@@ -406,7 +388,6 @@ class L7FlowTracing(Base):
             if type(new_flows
                     ) != DataFrame or new_flows.empty:  # no more new flows
                 break
-            new_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
             # remove duplicate or trace_id conflict flows
             new_flow_remove_indices = []
@@ -464,7 +445,8 @@ class L7FlowTracing(Base):
                 l7_flow_ids = set(dataframe_flowmetas['_id'])
 
                 # reset new_trace_infos
-                new_trace_infos = TraceInfo.construct_from_dataframe(new_flows)
+                build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids = _build_simple_trace_info_from_dataframe(
+                    new_flows)
 
             else:  # no new_flows, no more iterations needed
                 break
@@ -515,7 +497,6 @@ class L7FlowTracing(Base):
                 # 但由于 tracing_completion api 也调用此处追踪逻辑，接口可能传入不存在的 trace_id
                 # 所以这里兼容 len(l7_flow_ids)=0 场景，仅对: 当 len(l7_flow_ids)>0 但 `query_all_flows` 为空时返回
                 return {}
-            l7_flows.rename(columns={'_id_str': '_id'}, inplace=True)
 
         # 将外部 APM 查询到的 Span 与数据库中的 Span 结果进行合并
         l7_flows = self.concat_l7_flow_log_dataframe(
@@ -574,7 +555,7 @@ class L7FlowTracing(Base):
         type, signal_source, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us,
         toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, syscall_trace_id_request,
         syscall_trace_id_response, span_id, parent_span_id, l7_protocol, trace_id, x_request_id_0,
-        x_request_id_1, toString(_id) AS `_id_str`, tap_side, auto_instance_0, auto_instance_1
+        x_request_id_1, _id, tap_side
         FROM `l7_flow_log`
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -623,8 +604,24 @@ class L7FlowTracing(Base):
                 dictGet(deepflow.pod_node_map, ('name'), (toUInt64(pod_node_id_1))) AS pod_node_name_1
         """
         ids = []
+        # time => [_ids]
+        # build _id IN (xxx) conditions, grouping _id base on the same seconds
+        iddict = dict()
         for flow_id in l7_flow_ids:
-            ids.append(f"_id={flow_id}")
+            seconds = flow_id >> 32
+            iddict.setdefault(seconds, []).append(str(flow_id))
+        # fix start_time from min to max extract from _id
+        min_start_time = list(iddict.keys())[-1] if len(
+            iddict.keys()) > 0 else 0
+        max_end_time = 0
+        for sec in iddict.keys():
+            ids.append(f"_id IN ({', '.join(iddict[sec])})")
+            if sec > max_end_time:
+                max_end_time = sec
+            if sec < min_start_time:
+                min_start_time = sec
+        if min_start_time > 0:
+            time_filter = f"time>={min_start_time} AND time<={max_end_time}"
         fields = []
         for field in return_fields:
             if field in FIELDS_MAP:
@@ -727,6 +724,16 @@ def set_all_relate(trace_infos: list,
         if fast_check and find_related: continue
 
 
+def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
+    req_tcp_seqs = df['req_tcp_seq'].tolist()
+    resp_tcp_seqs = df['resp_tcp_seq'].tolist()
+    x_request_ids = df['x_request_id_0'].tolist()
+    x_request_ids += df['x_request_id_1'].tolist()
+    syscall_trace_ids = df['syscall_trace_id_request'].tolist()
+    syscall_trace_ids += df['syscall_trace_id_response'].tolist()
+    return req_tcp_seqs, resp_tcp_seqs, x_request_ids, syscall_trace_ids
+
+
 class TraceInfo:
 
     def __init__(self, _id, signal_source, vtap_id, _type, start_time_us,
@@ -781,32 +788,33 @@ class TraceInfo:
         constructor of traceinfo from database records to build tracing keys
         """
         trace_infos = []  # [TraceInfo]
-        for index in dataframe_flowmetas.index:
+        for row in dataframe_flowmetas.itertuples():
             trace_infos.append(
                 TraceInfo(
-                    dataframe_flowmetas.at[index, '_id'],
-                    dataframe_flowmetas.at[index, 'signal_source'],
-                    dataframe_flowmetas.at[index, 'vtap_id'],
-                    dataframe_flowmetas.at[index, 'type'],
+                    # key start with '_' can not access through attr
+                    dataframe_flowmetas.at[row.Index, '_id'],
+                    getattr(row, 'signal_source'),
+                    getattr(row, 'vtap_id'),
+                    getattr(row, 'type'),
                     # time
-                    dataframe_flowmetas.at[index, 'start_time_us'],
-                    dataframe_flowmetas.at[index, 'end_time_us'],
+                    getattr(row, 'start_time_us'),
+                    getattr(row, 'end_time_us'),
                     # tcp_seq
-                    dataframe_flowmetas.at[index, 'req_tcp_seq'],
-                    dataframe_flowmetas.at[index, 'resp_tcp_seq'],
+                    getattr(row, 'req_tcp_seq'),
+                    getattr(row, 'resp_tcp_seq'),
                     # span_id
-                    dataframe_flowmetas.at[index, 'trace_id'],
-                    dataframe_flowmetas.at[index, 'span_id'],
-                    dataframe_flowmetas.at[index, 'parent_span_id'],
+                    getattr(row, 'trace_id'),
+                    getattr(row, 'span_id'),
+                    getattr(row, 'parent_span_id'),
                     # x_request_id
-                    dataframe_flowmetas.at[index, 'x_request_id_0'],
-                    dataframe_flowmetas.at[index, 'x_request_id_1'],
+                    getattr(row, 'x_request_id_0'),
+                    getattr(row, 'x_request_id_1'),
                     # syscall_trace_id
-                    dataframe_flowmetas.at[index, 'syscall_trace_id_request'],
-                    dataframe_flowmetas.at[index, 'syscall_trace_id_response'],
+                    getattr(row, 'syscall_trace_id_request'),
+                    getattr(row, 'syscall_trace_id_response'),
                     # origin_flow_list
                     dataframe_flowmetas,
-                    index))
+                    row.Index))
         return trace_infos
 
     @classmethod
@@ -917,6 +925,17 @@ class L7NetworkMeta:
                 'response_exception',
                 'response_result',
         ]:
+            if is_http2_grpc_and_differ and key == 'l7_protocol_str':
+                # 当已经确认 l7_protocol 忽略差异时，不用比较 l7_protocol_str
+                continue
+
+            if is_http2_grpc_and_differ and key == 'request_resource':
+                # 某些情况下同一股流量在不同位置可能会被 Agent 分别解析为 HTTP2 和 gRPC
+                # 目前这两种协议的 request_resource 取自不同的协议字段，详见下面的文档：
+                # https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#http2
+                # 于是，当一个协议是 HTTP2、另一个是 gRPC 时，不用比较这些差异字段
+                continue
+
             lhs_value = lhs.get_extra_field(key)
             rhs_value = rhs.get_extra_field(key)
             if not lhs_value or not rhs_value:
@@ -938,17 +957,6 @@ class L7NetworkMeta:
             ] and rhs_value in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC]:
                 if lhs_value != rhs_value:
                     is_http2_grpc_and_differ = True
-                continue
-
-            if is_http2_grpc_and_differ and key == 'l7_protocol_str':
-                # 当已经确认 l7_protocol 忽略差异时，不用比较 l7_protocol_str
-                continue
-
-            if is_http2_grpc_and_differ and key == 'request_resource':
-                # 某些情况下同一股流量在不同位置可能会被 Agent 分别解析为 HTTP2 和 gRPC
-                # 目前这两种协议的 request_resource 取自不同的协议字段，详见下面的文档：
-                # https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#http2
-                # 于是，当一个协议是 HTTP2、另一个是 gRPC 时，不用比较这些差异字段
                 continue
 
             if lhs_value != rhs_value:
