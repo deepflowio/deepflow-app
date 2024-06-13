@@ -11,6 +11,7 @@ class Config(object):
     def parse_log(self, cfg):
         self.log_level = cfg.get('log-level', 'info')
         self.log_file = cfg.get('log-file', '/etc/deepflow/app.log')
+        self.worker_numbers = cfg.get('worker_numbers', 10)
 
     def parse_spec(self, cfg):
         spec = cfg.get('spec')
