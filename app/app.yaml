@@ -8,6 +8,7 @@ app:
   # http request/response timeout
   http_request_timeout: 600
   http_response_timeout: 600
+  worker_numbers: 10
 
   querier:
     host: deepflow-server
