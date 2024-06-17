@@ -138,30 +138,13 @@ class Querier(object):
             "description": self.description
         }
 
-    async def exec_all_clusters(self,
-                                database,
-                                sql,
-                                region_name=None,
-                                datasource=None):
-        self.sql = sql
-        total_start_time = time.time()
-        headers = {}
-        if self.headers is not None and self.headers.get('X-Org-Id'):
-            headers = {"X-Org-Id": self.headers.get('X-Org-Id')}
-
-        queriers = await get_queriers(headers)
-        if not queriers:
-            return {
-                'description': "无法找到可用的查询节点",
-                'status': const.HTTP_PARTIAL_RESULT
-            }
-        if region_name:
-            if not queriers.get(region_name):
-                return {
-                    'description': "无法找到可用的查询节点",
-                    'status': const.HTTP_PARTIAL_RESULT
-                }
-
+    async def exec_query(self,
+                         queriers,
+                         database,
+                         sql,
+                         region_name=None,
+                         datasource=None,
+                         headers=None) -> list:
         querys = list()
         for name, host in queriers.items():
             if region_name and region_name != name:
@@ -175,7 +158,33 @@ class Querier(object):
             if query.host:
                 tasks.append(query.exec())
         await asyncio.wait(tasks)
+        return querys
 
+    async def exec_all_clusters(self,
+                                database,
+                                sql,
+                                region_name=None,
+                                datasource=None):
+        self.sql = sql
+        total_start_time = time.time()
+        headers = {}
+        if self.headers is not None and self.headers.get('X-Org-Id'):
+            headers = {"X-Org-Id": self.headers.get('X-Org-Id')}
+
+        queriers = await get_queriers(database, region_name, headers)
+        if not queriers:
+            return {
+                'description': "无法找到可用的查询节点",
+                'status': const.HTTP_PARTIAL_RESULT
+            }
+        if region_name:
+            if not queriers.get(region_name):
+                return {
+                    'description': "无法找到可用的查询节点",
+                    'status': const.HTTP_PARTIAL_RESULT
+                }
+        querys = await self.exec_query(queriers, database, sql, region_name,
+                                       datasource, headers)
         result_list = list()
         for query in querys:
             self.status = query.status if query.status > self.status else self.status
@@ -196,7 +205,7 @@ class Querier(object):
 QUERIERS = {}
 
 
-async def get_queriers(headers=None):
+async def get_queriers(database, region_name=None, headers=None):
     global QUERIERS
     if not QUERIERS:
         QUERIERS["time"] = time.time()
@@ -221,6 +230,30 @@ async def get_queriers(headers=None):
             else:
                 ip = f"{item['REGION_DOMAIN_PREFIX']}{config.querier_server}"
             queriers[item['REGION_NAME']] = ip
-        QUERIERS["queriers"] = queriers
+        QUERIERS["queriers"] = await _check_queriers(queriers, database,
+                                                     region_name, headers)
         QUERIERS["time"] = time.time()
     return QUERIERS["queriers"]
+
+
+async def _check_queriers(queriers, database, region_name=None, headers=None):
+    """
+    check if all queriers region are available
+    """
+    if not queriers: return queriers
+    if region_name and not queriers.get(region_name): return queriers
+
+    querier_executor = Querier(headers=headers)
+    test_db_sql = "select 1 from l7_flow_log limit 1"
+    query_result = await querier_executor.exec_query(queriers,
+                                                     database=database,
+                                                     sql=test_db_sql,
+                                                     region_name=region_name,
+                                                     headers=headers)
+    for result in query_result:
+        if result.status == 200 and result.result is not None:
+            # region is available only when get tables result
+            continue
+        # region is not available
+        del (queriers[result.region])
+    return queriers
