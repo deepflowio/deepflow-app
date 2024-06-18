@@ -2574,6 +2574,9 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
         elif service.app_service:
             service_uid = f"-{service.app_service}"
             service_uname = service.app_service
+        elif service.ip:
+            service_uid = f"{service.ip}-"
+            service_uname = service.ip
         else:
             service_uid = 'unknown-'
             service_uname = "unknown service"
