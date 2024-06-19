@@ -76,7 +76,7 @@ class Query(object):
                     'columns'):
                 result_df = self.to_dataframe(result_dict)
                 if self.region is not None:
-                    result_df['_tsdb_region_name'] = self.region
+                    result_df['_querier_region'] = self.region
                 if self.query_id is not None:
                     result_df['query_id'] = self.query_id
             if status != 200:

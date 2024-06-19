@@ -58,7 +58,7 @@ class Base(object):
             for tag_str in [
                     "x_request_id_0", "x_request_id_1", "auto_instance_0",
                     "auto_instance_1", "subnet_0", "app_service",
-                    "_tsdb_region_name", "process_kname_0",
+                    "_querier_region", "process_kname_0",
                     "http_proxy_client", "auto_instance_1_node_type",
                     "app_instance", "response_exception", "version",
                     "l7_protocol_str", "auto_instance_0_node_type",
