@@ -1886,6 +1886,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         if merge_flow(flows, flow):  # 合并单向Flow为会话
             continue
         flow['_index'] = len(flows)  # assert '_index' not in flow
+        flow['_querier_region'] = dict_flows['_querier_region'][
+            index]  # set _querier_region for multi-region
         flows.append(flow)
     # 注意：不要对 flows 再做排序，下面的代码会通过 flows[flow_index] 来反查 flow
 
@@ -2798,7 +2800,9 @@ def _get_flow_dict(flow: DataFrame):
         "tap_id":
         flow.get("tap_id", None),
         "tap":
-        flow.get("tap", None)
+        flow.get("tap", None),
+        "_querier_region":
+        flow.get("_querier_region", None)
     }
     if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
         flow_dict["subnet"] = flow.get("subnet")
