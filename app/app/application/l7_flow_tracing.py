@@ -608,7 +608,7 @@ class L7FlowTracing(Base):
         # build _id IN (xxx) conditions, grouping _id base on the same seconds
         iddict = dict()
         for flow_id in l7_flow_ids:
-            seconds = flow_id >> 32
+            seconds = _get_epochsecond(flow_id)
             iddict.setdefault(seconds, []).append(str(flow_id))
         # fix start_time from min to max extract from _id
         min_start_time = list(iddict.keys())[-1] if len(
@@ -2831,3 +2831,11 @@ def _set_parent_mount_info(flow: dict, flow_parent: dict, info: str = None):
 
 def generate_span_id():
     return hex(RandomIdGenerator().generate_span_id())
+
+
+def _get_epochsecond(id: int):
+    """
+    `id` encode with (second<<32 | extra flag)
+    so we can get epoch second from id with right shift 32 bits
+    """
+    return id >> 32
