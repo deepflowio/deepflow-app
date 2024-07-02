@@ -27,6 +27,10 @@ class FlowLogL7Tracing(Model):
                                required=False,
                                min_value=1,
                                default=config.network_delay_us)
+    host_clock_offset_us = IntType(serialized_name="HOST_CLOCK_OFFSET_US",
+                                   required=False,
+                                   min_value=1,
+                                   default=config.host_clock_offset_us)
     ntp_delay_us = IntType(serialized_name="NTP_DELAY_US",
                            required=False,
                            min_value=1,

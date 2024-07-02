@@ -4,6 +4,7 @@ from log import logger
 
 from common.utils import json_response, format_response, app_exception, curl_perform
 from common.const import API_PREFIX, HTTP_OK
+from data.status import Status
 
 from config import config
 from .l7_flow_tracing import L7FlowTracing
@@ -44,5 +45,22 @@ async def l7_flow_app_tracing(request):
         "tracing-completion-by-external-app-spans", status, response,
         args.debug, failed_regions)
     return Response(json_response(**response_dict),
+                    content_type='application/json; charset=utf-8',
+                    status=code)
+
+
+@application_app.route(API_PREFIX + '/querier' + '/TracingAlgoParams',
+                       methods=['GET'])
+@app_exception
+async def l7_flow_tracing_algor_params(request):
+    params = {
+        "network_delay_us": config.network_delay_us,
+        "host_clock_offset_us": config.host_clock_offset_us,
+        "max_iteration": config.max_iteration,
+    }
+    status = Status()
+    status.append("TracingAlgoParams", {"status": HTTP_OK})
+    response, code = format_response("TracingAlgoParams", status, params)
+    return Response(json_response(**response),
                     content_type='application/json; charset=utf-8',
                     status=code)
