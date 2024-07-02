@@ -17,7 +17,8 @@ class Config(object):
         spec = cfg.get('spec')
         self.l7_tracing_limit = spec.get('l7_tracing_limit', 100)
         self.max_iteration = spec.get('max_iteration', 30)
-        self.network_delay_us = spec.get('network_delay_us', 1000000)
+        self.network_delay_us = spec.get('network_delay_us', 50000)
+        self.host_clock_offset_us = spec.get('host_clock_offset_us', 10000)
         self.allow_multiple_trace_ids_in_tracing_result = spec.get(
             'allow_multiple_trace_ids_in_tracing_result', False)
         self.call_apm_api_to_supplement_trace = spec.get(

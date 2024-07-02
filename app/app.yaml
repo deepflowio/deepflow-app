@@ -21,8 +21,15 @@ app:
     timeout: 60
   
   spec:
+    # query trace data limit, default: 1000
     l7_tracing_limit: 1000
+    # query trace data iteration limit, default: 30
     max_iteration: 30
-    network_delay_us: 1000000
+    # network transport delay tolerance in same host, default: 50000, unit: us
+    network_delay_us: 50000
+    # host clock sync offset tolerance, default: 10000, unit: us
+    host_clock_offset_us: 10000
+    # display multiple trace_id trace data in one result, default: false
     allow_multiple_trace_ids_in_tracing_result: false
+    # use external apm data to fill trace data, default: false
     call_apm_api_to_supplement_trace: false

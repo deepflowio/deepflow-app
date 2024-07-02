@@ -149,6 +149,7 @@ class L7FlowTracing(Base):
     async def query(self):
         max_iteration = self.args.get("max_iteration", config.max_iteration)
         network_delay_us = self.args.get("network_delay_us")
+        host_clock_offset_us = self.args.get("host_clock_offset_us")
         self.failed_regions = set()
         time_filter = f"time>={self.start_time} AND time<={self.end_time}"
         _id = self.args.get("_id")
@@ -165,10 +166,12 @@ class L7FlowTracing(Base):
         if self.signal_sources == ['otel']:
             base_filter += f" and signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}"
             max_iteration = 1
-        rst = await self.trace_l7_flow(time_filter=time_filter,
-                                       base_filter=base_filter,
-                                       max_iteration=max_iteration,
-                                       network_delay_us=network_delay_us)
+        rst = await self.trace_l7_flow(
+            time_filter=time_filter,
+            base_filter=base_filter,
+            max_iteration=max_iteration,
+            network_delay_us=network_delay_us,
+            host_clock_offset_us=host_clock_offset_us)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -191,6 +194,7 @@ class L7FlowTracing(Base):
             base_filter: str,
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
+            host_clock_offset_us: int = config.host_clock_offset_us,
             app_spans_from_api: list = []) -> Tuple(list, list):
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
@@ -424,6 +428,7 @@ class L7FlowTracing(Base):
             set_all_relate(trace_infos,
                            related_flow_id_map,
                            network_delay_us,
+                           host_clock_offset_us,
                            fast_check=True,
                            skip_first_n_trace_infos=len(dataframe_flowmetas))
             # 注意上面的 new_flow_remove_indices append 了多次，此处可能去掉的数据有:
@@ -461,6 +466,7 @@ class L7FlowTracing(Base):
         base_filter: str,
         max_iteration: int = config.max_iteration,
         network_delay_us: int = config.network_delay_us,
+        host_clock_offset_us: int = config.host_clock_offset_us,
         app_spans_from_api: list = [],
         related_map_from_api: defaultdict(inner_defaultdict_set) = None
     ) -> dict:
@@ -477,7 +483,7 @@ class L7FlowTracing(Base):
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
         l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
             time_filter, base_filter, max_iteration, network_delay_us,
-            app_spans_from_api)
+            host_clock_offset_us, app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
@@ -507,7 +513,7 @@ class L7FlowTracing(Base):
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
         l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
-            l7_flows, network_delay_us, return_fields)
+            l7_flows, network_delay_us, host_clock_offset_us, return_fields)
         if related_map_from_api:
             related_flow_index_map.update(related_map_from_api)
         return format_final_result(l7_flows_merged, networks,
@@ -641,6 +647,7 @@ class L7FlowTracing(Base):
 def set_all_relate(trace_infos: list,
                    related_map: defaultdict(inner_defaultdict_set),
                    network_delay_us: int,
+                   host_clock_offset_us: int,
                    fast_check: bool = False,
                    skip_first_n_trace_infos: int = 0):
     """
@@ -698,6 +705,7 @@ def set_all_relate(trace_infos: list,
             find_related = L7NetworkMeta.set_relate(ti, related_trace_infos,
                                                     related_map,
                                                     network_delay_us,
+                                                    host_clock_offset_us,
                                                     fast_check)
             if fast_check and find_related: continue
         # span_id
@@ -969,6 +977,7 @@ class L7NetworkMeta:
                    related_trace_infos: set,
                    related_map: defaultdict(inner_defaultdict_set),
                    network_delay_us: int,
+                   host_clock_offset_us: int,
                    fast_check: bool = False) -> bool:
         """
         使用 tcp_seq 标记穿越不同网元的关联关系
@@ -984,16 +993,20 @@ class L7NetworkMeta:
         for rti in related_trace_infos:
             if trace_info._id == rti._id:
                 continue
-            # network_delay_us 用于判断网络流两两之间的时差不应大于【一定值】，
+            # network_delay_us 用于判断同一主机两两网络流之间的时间差不应大于【一定值】
+            # host_clock_offset_us 用于判断不同主机之间 ntp 同步的时间不应大于【一定值】。
+            # 对于不同主机之间的网络流，network_delay_us 和 host_clock_offset_us 同时存在
             # 否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃。
+
             # 注意：两个 Span 都是会话时，要求两侧 TCP Seq 必须都相等，即使有一侧 TCP Seq 为 0，
             #       例如 MySQL Close、RabbitMQ Connection.Blocked 等单向 SESSION 的场景。
             #       否则，只需要一侧 TCP Seq 相等即可。
+            span_time_deviation = network_delay_us if trace_info.vtap_id == rti.vtap_id else network_delay_us + host_clock_offset_us
             if trace_info.type == rti.type == L7_FLOW_TYPE_SESSION:  # req & resp
                 if abs(trace_info.start_time_us -
-                       rti.start_time_us) <= network_delay_us and abs(
+                       rti.start_time_us) <= span_time_deviation and abs(
                            trace_info.end_time_us -
-                           rti.end_time_us) <= network_delay_us:
+                           rti.end_time_us) <= span_time_deviation:
                     if trace_info.req_tcp_seq == rti.req_tcp_seq and trace_info.resp_tcp_seq == rti.resp_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
                             related_map[trace_info._id][rti._id].add(
@@ -1001,7 +1014,7 @@ class L7NetworkMeta:
                             find_related = True
             elif trace_info.type != L7_FLOW_TYPE_RESPONSE and rti.type != L7_FLOW_TYPE_RESPONSE:  # req
                 if abs(trace_info.start_time_us -
-                       rti.start_time_us) <= network_delay_us:
+                       rti.start_time_us) <= span_time_deviation:
                     if trace_info.req_tcp_seq == rti.req_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
                             related_map[trace_info._id][rti._id].add(
@@ -1009,7 +1022,7 @@ class L7NetworkMeta:
                             find_related = True
             elif trace_info.type != L7_FLOW_TYPE_REQUEST and rti.type != L7_FLOW_TYPE_REQUEST:  # resp
                 if abs(trace_info.end_time_us -
-                       rti.end_time_us) <= network_delay_us:
+                       rti.end_time_us) <= span_time_deviation:
                     if trace_info.resp_tcp_seq == rti.resp_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
                             related_map[trace_info._id][rti._id].add(
@@ -1160,12 +1173,34 @@ class NetworkSpanSet:
         span.network_span_set = self
         self.spans.append(span)
 
-    def set_parent_relation(self):
+    def set_parent_relation(self, host_clock_offset_us: int):
         """
         对组内 span 设置父子关系
         """
         self._sort_network_spans()
         for i in range(1, len(self.spans), 1):
+            child = self.spans[i]
+            parent = self.spans[i - 1]
+            if child.vtap_id != parent.vtap_id:
+                # span 在不同机器上时，如果时钟差超出 host_clock_offset_us，不应认为有关联
+                parent_type = parent.flow['type']
+                child_type = child.flow['type']
+                parent_start_time = parent.flow['start_time_us']
+                child_start_time = child.flow['start_time_us']
+                parent_end_time = parent.flow['end_time_us']
+                child_end_time = child.flow['end_time_us']
+                if child_type == parent_type == L7_FLOW_TYPE_SESSION:
+                    if abs(child_start_time - parent_start_time) > host_clock_offset_us \
+                        and abs(child_end_time - parent_end_time) > host_clock_offset_us:
+                        continue
+                elif child_type != L7_FLOW_TYPE_RESPONSE and parent_type != L7_FLOW_TYPE_RESPONSE:
+                    if abs(child_start_time -
+                           parent_start_time) > host_clock_offset_us:
+                        continue
+                elif child_type != L7_FLOW_TYPE_REQUEST and parent_type != L7_FLOW_TYPE_REQUEST:
+                    if abs(child_end_time -
+                           parent_end_time) > host_clock_offset_us:
+                        continue
             if self.spans[i].signal_source == self.spans[
                     i - 1].signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
                 if self.spans[
@@ -1213,7 +1248,7 @@ class NetworkSpanSet:
             if sorted_spans[i].tap_side in (const.TAP_SIDE_CLIENT_PROCESS,
                                             const.TAP_SIDE_CLIENT_NIC,
                                             const.TAP_SIDE_CLIENT_POD_NODE):
-                ingress_agent = sorted_spans[i].flow['vtap_id']
+                ingress_agent = sorted_spans[i].vtap_id
                 break
 
         # 获取出口 agent，逆序向前扫，找遇到的第一个 s-span（也就是最后一个 child）
@@ -1222,7 +1257,7 @@ class NetworkSpanSet:
             if sorted_spans[i].tap_side in (const.TAP_SIDE_SERVER_PROCESS,
                                             const.TAP_SIDE_SERVER_NIC,
                                             const.TAP_SIDE_SERVER_POD_NODE):
-                egress_agent = sorted_spans[i].flow['vtap_id']
+                egress_agent = sorted_spans[i].vtap_id
                 break
 
         # sort rank for ingress & egress agent
@@ -1246,18 +1281,18 @@ class NetworkSpanSet:
                 egress_agent = 0
 
         for i in range(len(sorted_spans)):
-            if sorted_spans[i].flow['vtap_id'] == ingress_agent:
+            if sorted_spans[i].vtap_id == ingress_agent:
                 sorted_spans[i].flow['agent_rank'] = ingress_rank
-            elif sorted_spans[i].flow['vtap_id'] == egress_agent:
+            elif sorted_spans[i].vtap_id == egress_agent:
                 sorted_spans[i].flow['agent_rank'] = egreass_rank
             else:
                 sorted_spans[i].flow['agent_rank'] = 1
 
-        sorted_spans = sorted(sorted_spans,
-                              key=lambda x:
-                              (x.flow['agent_rank'], x.flow['vtap_id'], -x.
-                               flow['response_duration'], x.flow[
-                                   'start_time_us'], -x.flow['end_time_us']))
+        sorted_spans = sorted(
+            sorted_spans,
+            key=lambda x:
+            (x.flow['agent_rank'], x.vtap_id, -x.flow['response_duration'], x.
+             flow['start_time_us'], -x.flow['end_time_us']))
 
         # 当 ingress_agent=egress_agent 时
         # 如果中间穿过了其他节点数据，需要将所有 server-side span 排序到末尾
@@ -1290,6 +1325,7 @@ class SpanNode:
         self.signal_source: int = -1  # overwrite by Child Class
         self.parent: SpanNode = None
         self.tap_side = flow['tap_side']
+        self.vtap_id = flow['vtap_id']
 
     def __eq__(self, other: 'SpanNode') -> bool:
         return self.get_flow_index() == other.get_flow_index()
@@ -1360,7 +1396,7 @@ class SysSpanNode(SpanNode):
         self.network_span_set: NetworkSpanSet = None
 
     def process_matched(self, other_sys_span: SpanNode) -> bool:
-        if self.flow['vtap_id'] != other_sys_span.flow['vtap_id']:
+        if self.vtap_id != other_sys_span.vtap_id:
             return False
         self_process = _get_process_id(self)
         other_process = _get_process_id(other_sys_span)
@@ -1876,7 +1912,7 @@ def merge_flow(flows: list, flow: dict) -> bool:
 
 
 def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
-                   return_fields: list) -> list:
+                   host_clock_offset_us: int, return_fields: list) -> list:
     """对应用流日志排序，用于绘制火焰图。（包含合并逻辑）
 
     1. 根据系统调用追踪信息追踪：
@@ -1936,8 +1972,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 对合并后的 flow 计算 related_flow_index_map，用于后续操作的加速
     related_flow_index_map = defaultdict(inner_defaultdict_set)
     trace_infos = TraceInfo.construct_from_dict_list(flows)
-    set_all_relate(trace_infos, related_flow_index_map,
-                   network_delay_us)  # XXX: slow function
+    set_all_relate(trace_infos, related_flow_index_map, network_delay_us,
+                   host_clock_offset_us)  # XXX: slow function
     # 构建一个 flow._index 到 flow._id(s) 的映射，方便后续 related_flow_index_map 的使用
     flow_index_to_id0 = [0] * len(flows)
     for flow in flows:
@@ -1992,7 +2028,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 
     network_span_list = _build_network_span_set(united_spans,
                                                 related_flow_index_map,
-                                                flow_index_to_span)
+                                                flow_index_to_span,
+                                                host_clock_offset_us)
 
     ### Process Span Set 分离
     process_span_list = [
@@ -2183,10 +2220,11 @@ def _union_sys_spans(
     return process_span_map
 
 
-def _build_network_span_set(
-        united_spans: List[SpanNode],
-        related_flow_index_map: defaultdict(inner_defaultdict_set),
-        flow_index_to_span: List[SpanNode]) -> List[NetworkSpanSet]:
+def _build_network_span_set(united_spans: List[SpanNode],
+                            related_flow_index_map: defaultdict(
+                                inner_defaultdict_set),
+                            flow_index_to_span: List[SpanNode],
+                            host_clock_offset_us: int) -> List[NetworkSpanSet]:
     networks: List[NetworkSpanSet] = []
 
     # 先构建一个 flow index to span 的映射
@@ -2214,7 +2252,7 @@ def _build_network_span_set(
     ### 网络span排序
     # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
-        network.set_parent_relation()
+        network.set_parent_relation(host_clock_offset_us)
     return networks
 
 

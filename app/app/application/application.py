@@ -46,3 +46,18 @@ async def l7_flow_app_tracing(request):
     return Response(json_response(**response_dict),
                     content_type='application/json; charset=utf-8',
                     status=code)
+
+
+@application_app.route(API_PREFIX + '/querier' + '/TracingAlgoParams',
+                       methods=['GET'])
+@app_exception
+async def l7_flow_tracing_algor_params(request):
+    params = {
+        "network_delay_us": config.network_delay_us,
+        "host_clock_offset_us": config.host_clock_offset_us,
+        "max_iteration": config.max_iteration
+    }
+    response, code = format_response("TracingAlgoParams", HTTP_OK, params)
+    return Response(json_response(**response),
+                    content_type='application/json; charset=utf-8',
+                    status=code)
