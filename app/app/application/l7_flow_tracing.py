@@ -55,6 +55,7 @@ RETURN_FIELDS = list(
         # 追踪Meta信息
         "signal_source",
         "l7_protocol",
+        "Enum(l7_protocol)",
         "l7_protocol_str",
         "type",
         "req_tcp_seq",
@@ -2789,6 +2790,8 @@ def _get_flow_dict(flow: DataFrame):
         flow.get("Enum(tap_side)"),
         "l7_protocol":
         flow["l7_protocol"],
+        "Enum(l7_protocol)":
+        flow.get("Enum(l7_protocol)"),
         "l7_protocol_str":
         flow["l7_protocol_str"],
         "endpoint":
