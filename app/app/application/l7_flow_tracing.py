@@ -1676,7 +1676,7 @@ class ProcessSpanSet:
                     not (span.process_matched(client_sys_span) and span.time_range_cover(client_sys_span)):
                     return None, ""
 
-                sys_span_matched = x_request_id_match = False
+                sys_span_matched = x_request_id_match = same_process_trace_match = False
                 # 优先级：syscall_trace_id > x_request_id
                 if not client_syscall_match:
                     # syscall_trace_id 判断
@@ -1691,13 +1691,19 @@ class ProcessSpanSet:
                     x_request_id_match = span.get_x_request_id_0() and (span.get_x_request_id_0() == client_sys_span.get_x_request_id_0()) \
                                         or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1()\
                                           or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
+                # for cross-thread span but in same trace_id/process and time range covered 
+                if not client_syscall_match and not sys_span_matched and not x_request_id_match:
+                    # same proces & time cover already find out above, at here we only find out trace_id match
+                    same_process_trace_match = span.flow["trace_id"] and span.flow["trace_id"] == client_sys_span.flow["trace_id"]
 
                 if sys_span_matched:
                     mounted_info = "syscall_trace_id matched to s-p root"
                 elif x_request_id_match:
                     mounted_info = "x_request_id matched to s-p root"
+                elif same_process_trace_match:
+                    mounted_info = "same process/trace_id and time cover by s-p root"
 
-                if sys_span_matched or x_request_id_match or client_syscall_match:
+                if sys_span_matched or x_request_id_match or client_syscall_match or same_process_trace_match:
                     # 同一进程下，如果既有 x_request_id 匹配关系，也有 syscall_trace_id 匹配，如果扫描 process_span_set 顺序不同，会导致挂错
                     # 对此类情况，先不要直接追加，应追加到【时间最接近】的一个 process_span_set
                     return span, f"c-p sys-span mounted due to {mounted_info}"
