@@ -2249,6 +2249,9 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
             if _same_span_set(ps_parent, net_child, 'network_span_set') \
                 or _same_span_set(ps_parent, net_child, 'process_span_set'):
                 continue
+            if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(net_child):
+                # 对同一个主机采集到的数据，不存在时差
+                continue
             if ps_index == net_child.get_flow_index():
                 # 共享一个 c-p, net_child parent == ps_parent 的 parent
                 continue
@@ -2269,6 +2272,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 continue
             if _same_span_set(ps_child, net_parent, 'network_span_set') \
                 or _same_span_set(ps_child, net_parent, 'process_span_set'):
+                continue
+            if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(ps_child):
                 continue
             if ps_index == net_parent.get_flow_index():
                 # 共享一个 s-p，则 ps_child 的 parent == net_parent 的 parent
@@ -2302,6 +2307,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 continue
             if _same_span_set(ps_child, ps_parent, 'network_span_set') \
                 or _same_span_set(ps_child, ps_parent, 'process_span_set'):
+                continue
+            if ps_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(ps_child):
                 continue
             if ps_child_index == ps_parent.get_flow_index():
                 # 共享一个 c-p，则 ps_child 的 parent == ps_parent 的 parent
