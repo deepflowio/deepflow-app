@@ -1290,6 +1290,7 @@ class SpanNode:
         self.signal_source: int = -1  # overwrite by Child Class
         self.parent: SpanNode = None
         self.tap_side = flow['tap_side']
+        self.agent_id = flow['vtap_id']
 
     def __eq__(self, other: 'SpanNode') -> bool:
         return self.get_flow_index() == other.get_flow_index()
