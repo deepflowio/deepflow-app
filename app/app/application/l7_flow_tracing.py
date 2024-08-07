@@ -2792,7 +2792,7 @@ def correct_span_time(flows: dict, host_clock_correction: dict):
     """
     for flow in flows:
         agent_id = flow.get('vtap_id')  # should be agent_id
-        if host_clock_correction.get(agent_id, 0) > 0:
+        if host_clock_correction.get(agent_id, 0) != 0:
             flow['start_time_us'] += host_clock_correction[agent_id]
             flow['end_time_us'] += host_clock_correction[agent_id]
 
@@ -3040,10 +3040,6 @@ class HostClockCorrector:
     def calculate_host_clock_correction(self, child: SpanNode,
                                         parent: SpanNode):
         if child.agent_id == parent.agent_id:
-            return
-        # 对 OTEL signal_source 作为 parent 时无法校准
-        # for OTEL signal_source, host clock correction is not available
-        if parent.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL:
             return
 
         start_time_diff = parent.flow['start_time_us'] - child.flow[
