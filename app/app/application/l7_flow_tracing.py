@@ -2,7 +2,7 @@ import math
 import uuid
 import pandas as pd
 from log import logger
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Callable
 
 from ast import Tuple
 from pandas import DataFrame
@@ -513,13 +513,14 @@ class L7FlowTracing(Base):
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
-        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map = sort_all_flows(
+        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map, host_clock_correction = sort_all_flows(
             l7_flows, network_delay_us, host_clock_offset_us, return_fields)
         if related_map_from_api:
             related_flow_index_map.update(related_map_from_api)
         return format_final_result(l7_flows_merged, networks,
                                    self.args.get('_id'), host_clock_offset_us,
-                                   flow_index_to_id0, related_flow_index_map)
+                                   flow_index_to_id0, related_flow_index_map,
+                                   host_clock_correction)
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True,
@@ -1179,7 +1180,10 @@ class NetworkSpanSet:
         span.network_span_set = self
         self.spans.append(span)
 
-    def set_parent_relation(self, host_clock_offset_us: int):
+    def set_parent_relation(
+            self, host_clock_offset_us: int,
+            host_clock_correct_callback: Callable[['SpanNode', 'SpanNode'],
+                                                  None]):
         """
         对组内 span 设置父子关系
         """
@@ -1201,7 +1205,8 @@ class NetworkSpanSet:
                             i - 1].tap_side == TAP_SIDE_CLIENT_PROCESS:
                     # 当顺序为 [c-p, s-p] 说明中间没有 net-span，构成父子关系
                     self.spans[i].set_parent(self.spans[i - 1],
-                                             "trace mounted due to tcp_seq")
+                                             "trace mounted due to tcp_seq",
+                                             host_clock_correct_callback)
                 else:
                     # 某些情况下，可能会有两个 SYS Span 拥有同样的 TCP Seq，此类情况一般是由于 eBPF 内核适配不完善导致。
                     # 例如：self.flows 数组中可能包含两个 c-p Span（拥有同样的 TCP Seq）、多个 net Span、一个 s-p Span，开头两个 c-p Span 实际上没有父子关系。
@@ -1222,7 +1227,8 @@ class NetworkSpanSet:
                         self.spans[i].get_flow_index())
 
                 self.spans[i].set_parent(self.spans[i - 1],
-                                         "trace mounted due to tcp_seq")
+                                         "trace mounted due to tcp_seq",
+                                         host_clock_correct_callback)
 
     def _sort_network_spans(self):
         """
@@ -1328,8 +1334,11 @@ class SpanNode:
 
     def set_parent(self,
                    parent: 'SpanNode',
-                   mounted_info: str = None):
-        # parent is typeof(SpanNode)
+                   mounted_info: str = None,
+                   mounted_callback: Callable[['SpanNode', 'SpanNode'],
+                                              None] = None):
+        if mounted_callback is not None:
+            mounted_callback(self, parent)
         self.parent = parent
         _set_parent_mount_info(self.flow, parent.flow, mounted_info)
 
@@ -1445,6 +1454,7 @@ class ProcessSpanSet:
         self.auto_service_type = None
         # 当只有 app_span 数据时，避免被剪枝，记录 app_service
         self.app_service = None
+        self.mounted_callback: Callable[[SpanNode, SpanNode], None] = None
 
     def __eq__(self, other: 'ProcessSpanSet') -> bool:
         return self.group_key == other.group_key
@@ -1527,6 +1537,7 @@ class ProcessSpanSet:
         self.auto_service_id = other.auto_service_id
         self.auto_service_type = other.auto_service_type
         self.app_service = other.app_service
+        self.mounted_callback = other.mounted_callback
 
     def append_app_span(self, app_span: AppSpanNode):
         app_span.process_span_set = self
@@ -1572,7 +1583,8 @@ class ProcessSpanSet:
             if parent_span_index != -1:
                 self.spans[i].set_parent(
                     self.spans[parent_span_index],
-                    "app_span mounted due to parent_span_id")
+                    "app_span mounted due to parent_span_id",
+                    self.mounted_callback)
 
     # return: List[ProcessSpanSet]
     def split_to_multiple_process_span_set(self) -> list:
@@ -1650,7 +1662,8 @@ class ProcessSpanSet:
                     self.append_sys_span(sys_span)
                     app_root.set_parent(
                         sys_span,
-                        "s-p sys_span mounted due to same span_id as parent")
+                        "s-p sys_span mounted due to same span_id as parent",
+                        self.mounted_callback)
                     return True
         else:
             syscall_trace_id_request = sys_span.get_syscall_trace_id_request()
@@ -1664,8 +1677,8 @@ class ProcessSpanSet:
                     self.append_sys_span(sys_span)
                     app_root.set_parent(
                         sys_span,
-                        "s-p sys_span mounted due to syscall_trace_id matched c-p"
-                    )
+                        "s-p sys_span mounted due to syscall_trace_id matched c-p",
+                        self.mounted_callback)
                     return True
         return False
 
@@ -1678,7 +1691,8 @@ class ProcessSpanSet:
                 self.append_sys_span(sys_span)
                 sys_span.set_parent(
                     app_leaf,
-                    "c-p sys_span mounted due to same span_id as child")
+                    "c-p sys_span mounted due to same span_id as child",
+                    self.mounted_callback)
                 return True
         return False
 
@@ -1725,10 +1739,12 @@ class ProcessSpanSet:
                     x_request_id_match = span.get_x_request_id_0() and (span.get_x_request_id_0() == client_sys_span.get_x_request_id_0()) \
                                         or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1()\
                                           or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
-                # for cross-thread span but in same trace_id/process and time range covered 
+                # for cross-thread span but in same trace_id/process and time range covered
                 if not client_syscall_match and not sys_span_matched and not x_request_id_match:
                     # same proces & time cover already find out above, at here we only find out trace_id match
-                    same_process_trace_match = span.flow["trace_id"] and span.flow["trace_id"] == client_sys_span.flow["trace_id"]
+                    same_process_trace_match = span.flow[
+                        "trace_id"] and span.flow[
+                            "trace_id"] == client_sys_span.flow["trace_id"]
 
                 if sys_span_matched:
                     mounted_info = "syscall_trace_id matched to s-p root"
@@ -1763,7 +1779,8 @@ class ProcessSpanSet:
         # 由于这里是通过兄弟 c-p 的 syscall_trace_id 匹配，直接关联，不考虑与 s-p 是否有相等关系
         self.append_sys_span(client_sys_span)
         client_sys_span.set_parent(server_sys_span,
-                                   "c-p sys-span mounted due to brother c-p")
+                                   "c-p sys-span mounted due to brother c-p",
+                                   self.mounted_callback)
         return True
 
 
@@ -2015,14 +2032,19 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             )
         flow_index_to_span[i] = span
 
+    host_clock_corrector = HostClockCorrector()
+
     # 构建 Process Span Set
     # 对 app_span 按 auto_instance_id/auto_instance 进行分组
     # auto_instance => []
     process_span_map: Dict[str, List[ProcessSpanSet]] = defaultdict(
         List[ProcessSpanSet])
-    process_span_map = _union_app_spans(process_span_map, app_spans)
-    process_span_map = _union_sys_spans(process_span_map, server_sys_spans,
-                                        client_sys_spans)
+    process_span_map = _union_app_spans(
+        process_span_map, app_spans,
+        host_clock_corrector.calculate_host_clock_correction)
+    process_span_map = _union_sys_spans(
+        process_span_map, server_sys_spans, client_sys_spans,
+        host_clock_corrector.calculate_host_clock_correction)
 
     # 构建 Network Span Set，每个 Network Span Set 里包含具有同一组 tcp_seq 的 net-span & sys-span
     # 有两个作用：1. 将 net-span 按 tcp_seq 分组，2. 提前找到与 net-span 关联的 sys-span
@@ -2030,10 +2052,10 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                           key=lambda x: x.flow.get("type"),
                           reverse=True)
 
-    network_span_list = _build_network_span_set(united_spans,
-                                                related_flow_index_map,
-                                                flow_index_to_span,
-                                                host_clock_offset_us)
+    network_span_list = _build_network_span_set(
+        united_spans, related_flow_index_map, flow_index_to_span,
+        host_clock_offset_us,
+        host_clock_corrector.calculate_host_clock_correction)
 
     ### Process Span Set 分离
     process_span_list = [
@@ -2063,20 +2085,25 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 将 process span set 和 network span set 互相连接
     # 注意这里按如下优先级连接:
     # 1. process <-> net, 2. net <-> process, 3. process <-> process, 4. net <-> net
-    _connect_process_and_networks(process_roots, process_leafs, network_roots,
-                                  network_leafs, process_span_dict,
-                                  flow_index_to_span)
+    _connect_process_and_networks(
+        process_roots, process_leafs, network_roots, network_leafs,
+        process_span_dict, flow_index_to_span,
+        host_clock_corrector.calculate_host_clock_correction)
 
-    return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map
+    return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map, host_clock_corrector.tidy_host_clock_correction(
+    )
 
 
 def _union_app_spans(
-        process_span_map: Dict[str, List[ProcessSpanSet]],
-        app_spans: List[AppSpanNode]) -> Dict[str, List[ProcessSpanSet]]:
+    process_span_map: Dict[str,
+                           List[ProcessSpanSet]], app_spans: List[AppSpanNode],
+    host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
+) -> Dict[str, List[ProcessSpanSet]]:
     for span in app_spans:
         auto_instance = _get_auto_instance(span)
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
+            sp_span_pss.mounted_callback = host_clock_correct_callback
             process_span_map[auto_instance] = [sp_span_pss]
         process_span_map[auto_instance][0].append_app_span(span)
 
@@ -2093,9 +2120,9 @@ def _union_app_spans(
 
 
 def _union_sys_spans(
-        process_span_map: Dict[str, List[ProcessSpanSet]],
-        server_sys_spans: List[SysSpanNode],
-        client_sys_spans: List[SysSpanNode]
+    process_span_map: Dict[str, List[ProcessSpanSet]],
+    server_sys_spans: List[SysSpanNode], client_sys_spans: List[SysSpanNode],
+    host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
 ) -> Dict[str, List[ProcessSpanSet]]:
 
     # 先根据 syscall_trace_id_request 构建一个映射，方便查找
@@ -2148,6 +2175,7 @@ def _union_sys_spans(
         auto_instance = _get_auto_instance(span)
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
+            sp_span_pss.mounted_callback = host_clock_correct_callback
             sp_span_pss.append_sys_span(span)
             process_span_map[auto_instance] = [sp_span_pss]
             same_process_sp[auto_instance] = 1
@@ -2155,6 +2183,7 @@ def _union_sys_spans(
             # s-p 在每个 ProcessSpanSet 中如果大于1个，说明这个进程被穿越多次，需要单独构建一个 ProcessSpanSet
             index = same_process_sp[auto_instance] + 1
             sp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
+            sp_span_pss.mounted_callback = host_clock_correct_callback
             sp_span_pss.append_sys_span(span)
             process_span_map[auto_instance].append(sp_span_pss)
             same_process_sp[auto_instance] = index
@@ -2186,7 +2215,8 @@ def _union_sys_spans(
 
         if target_sp is not None:
             target_sp.process_span_set.append_sys_span(span)
-            span.set_parent(target_sp, target_mounted_info)
+            span.set_parent(target_sp, target_mounted_info,
+                            target_sp.process_span_set.mounted_callback)
             # 如果任意一个 c-p 关联成功，则它的兄弟都尝试关联
             client_root_of_span = cp_disjoint_set.get(i)
 
@@ -2217,6 +2247,7 @@ def _union_sys_spans(
             auto_instance_index = same_process_sp[auto_instance] + 1
             group_key = f'{auto_instance}-{auto_instance_index}'
         cp_span_pss = ProcessSpanSet(group_key)
+        cp_span_pss.mounted_callback = host_clock_correct_callback
         cp_span_pss.append_sys_span(span)
         process_span_map.setdefault(auto_instance, []).append(cp_span_pss)
         same_process_sp[auto_instance] = auto_instance_index
@@ -2224,11 +2255,12 @@ def _union_sys_spans(
     return process_span_map
 
 
-def _build_network_span_set(united_spans: List[SpanNode],
-                            related_flow_index_map: defaultdict(
-                                inner_defaultdict_set),
-                            flow_index_to_span: List[SpanNode],
-                            host_clock_offset_us: int) -> List[NetworkSpanSet]:
+def _build_network_span_set(
+    united_spans: List[SpanNode],
+    related_flow_index_map: defaultdict(inner_defaultdict_set),
+    flow_index_to_span: List[SpanNode], host_clock_offset_us: int,
+    host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
+) -> List[NetworkSpanSet]:
     networks: List[NetworkSpanSet] = []
 
     # 先构建一个 flow index to span 的映射
@@ -2256,7 +2288,8 @@ def _build_network_span_set(united_spans: List[SpanNode],
     ### 网络span排序
     # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
-        network.set_parent_relation(host_clock_offset_us)
+        network.set_parent_relation(host_clock_offset_us,
+                                    host_clock_correct_callback)
     return networks
 
 
@@ -2267,18 +2300,18 @@ def _same_span_set(lhs: SpanNode, rhs: SpanNode, spanset: str) -> bool:
         return True
 
 
-def _connect_process_and_networks(process_roots: List[SpanNode],
-                                  process_leafs: List[SpanNode],
-                                  network_roots: List[SpanNode],
-                                  network_leafs: List[SpanNode],
-                                  process_span_dict: Dict[str, SpanNode],
-                                  flow_index_to_span: List[SpanNode]):
+def _connect_process_and_networks(
+        process_roots: List[SpanNode], process_leafs: List[SpanNode],
+        network_roots: List[SpanNode], network_leafs: List[SpanNode],
+        process_span_dict: Dict[str,
+                                SpanNode], flow_index_to_span: List[SpanNode],
+        host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]):
     # 1. process span set 的 leaf 作为 network span set root 的 parent
     for ps_parent in process_leafs:
         # 避免子循环多次访问字典
         ps_index = ps_parent.get_flow_index()
         ps_span_id = ps_parent.get_span_id()
-        ps_response_duration = ps_parent.get_response_duration() 
+        ps_response_duration = ps_parent.get_response_duration()
         for net_child in network_roots:
             if net_child.get_parent_id() >= 0:
                 continue
@@ -2286,13 +2319,14 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
             if _same_span_set(ps_parent, net_child, 'network_span_set') \
                 or _same_span_set(ps_parent, net_child, 'process_span_set'):
                 continue
-            if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(net_child):
+            if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
+                    net_child):
                 # 对同一个主机采集到的数据，不存在时差
                 continue
-            if net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_parent.signal_source!= L7_FLOW_SIGNAL_SOURCE_OTEL and \
+            if net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and \
                   net_child.get_response_duration() and ps_response_duration < net_child.get_response_duration():
                 # 如果能取到响应时长（请求响应完整），需要判断响应时长覆盖
-                # 由于 app span 的时长是在 sdk 中统计，如果发生子 span 异步完成，父 span 提前完成，子 span 时间可以大于父 span 
+                # 由于 app span 的时长是在 sdk 中统计，如果发生子 span 异步完成，父 span 提前完成，子 span 时间可以大于父 span
                 # 所以这里判断 response_duration 忽略 OTEL signal_source
                 continue
             if ps_index == net_child.get_flow_index():
@@ -2301,7 +2335,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
             if ps_span_id and ps_span_id == net_child.get_span_id():
                 # net_child 一定是 net-span 且没有 c-p, ps_parent 一定是 app-span，共享一个 span_id
                 net_child.set_parent(ps_parent,
-                                     "net_span mounted due to same span_id")
+                                     "net_span mounted due to same span_id",
+                                     host_clock_correct_callback)
 
     # 2. network span 的 leaf 作为 process span set root 的 parent
     for ps_child in process_roots:
@@ -2317,7 +2352,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
             if _same_span_set(ps_child, net_parent, 'network_span_set') \
                 or _same_span_set(ps_child, net_parent, 'process_span_set'):
                 continue
-            if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(ps_child):
+            if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(
+                    ps_child):
                 continue
             if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source!= L7_FLOW_SIGNAL_SOURCE_OTEL and \
                 net_parent.get_response_duration() and net_parent.get_response_duration() < ps_child_response_duration:
@@ -2332,7 +2368,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # 为了避免 app_span 连接上末端 net_span 产生环路，这里限制 ps_child 不能是 app_span
                 ps_child.set_parent(
                     net_parent,
-                    f"{ps_child.tap_side} mounted due to same span_id")
+                    f"{ps_child.tap_side} mounted due to same span_id",
+                    host_clock_correct_callback)
             elif ps_child_parent_span_id and ps_child_parent_span_id == net_parent.get_span_id(
             ):
                 # ps_child 一定是 app_span 且没有 s-p，net_parent 一定是 net_span 且没有 s-p，二者构成父子关系
@@ -2340,7 +2377,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # ps_child 如果是 app_span，它会创建一个新的 span_id，然后通过 parent_span_id 关联
                 ps_child.set_parent(
                     net_parent,
-                    f"{ps_child.tap_side} mounted due to parent_span_id")
+                    f"{ps_child.tap_side} mounted due to parent_span_id",
+                    host_clock_correct_callback)
 
     # 3. process span set 互相连接
     for ps_child in process_roots:
@@ -2356,7 +2394,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
             if _same_span_set(ps_child, ps_parent, 'network_span_set') \
                 or _same_span_set(ps_child, ps_parent, 'process_span_set'):
                 continue
-            if ps_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(ps_child):
+            if ps_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
+                    ps_child):
                 continue
             if ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source!= L7_FLOW_SIGNAL_SOURCE_OTEL and \
                 ps_parent.get_response_duration() and ps_parent.get_response_duration() < ps_child_response_duration:
@@ -2369,12 +2408,14 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # ps_child 可能是 app_span/s-p，ps_leaf 一定是 app_span，都没有 c-p, 共享一个 span_id
                 ps_child.set_parent(
                     ps_parent,
-                    f"{ps_child.tap_side} mounted due to same span_id")
+                    f"{ps_child.tap_side} mounted due to same span_id",
+                    host_clock_correct_callback)
             elif ps_child_parent_span_id and ps_child_parent_span_id == ps_parent.get_span_id(
             ):
                 ps_child.set_parent(
                     ps_parent,
-                    f"{ps_child.tap_side} mounted due to parent_span_id")
+                    f"{ps_child.tap_side} mounted due to parent_span_id",
+                    host_clock_correct_callback)
 
     # 4. process span set 之间，尝试连接具有同一个 span_id 的 span
     for ps_child in process_roots:
@@ -2399,7 +2440,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 continue
             ps_child.set_parent(
                 ps_parent,
-                f"{ps_child.tap_side} mounted due to parent_span_id")
+                f"{ps_child.tap_side} mounted due to parent_span_id",
+                host_clock_correct_callback)
 
     # 5. network span set 互相连接
     # relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
@@ -2425,8 +2467,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # 网关注入 x_request_id 的场景
                 net_child.set_parent(
                     net_parent,
-                    "net_span mounted due to x_request_id_0 match to x_request_id_1"
-                )
+                    "net_span mounted due to x_request_id_0 match to x_request_id_1",
+                    host_clock_correct_callback)
 
                 # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
                 # fake_pss = _generate_pseudo_process_span_set(
@@ -2439,7 +2481,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # 网关透传 x_request_id 或透传 http header 中的 span_id
                 # 要求 parent 的所有 response_duration > child 最大的 response_duration
                 # 由于 network span set 内是按 c 端 agent 在前+ start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
-                if net_parent.get_response_duration() < net_child_response_duration:
+                if net_parent.get_response_duration(
+                ) < net_child_response_duration:
                     continue
                 else:
                     # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
@@ -2467,7 +2510,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 # net_child.response_duration <= net_parent.response_duration 用于双方时延为0 的情况
                 # ref: https://www.deepflow.io/docs/zh/features/l7-protocols/http/#http2
                 net_child.set_parent(
-                    net_parent, "net_span mounted due to grpc request_id")
+                    net_parent, "net_span mounted due to grpc request_id",
+                    host_clock_correct_callback)
 
     for child, parent in network_match_parent.items():
         # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
@@ -2477,7 +2521,8 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
         # flows.extend(fake_pss.spans)
         flow_index_to_span[child].set_parent(
             flow_index_to_span[parent],
-            "net_span mounted due to x_request_id or span_id passed")
+            "net_span mounted due to x_request_id or span_id passed",
+            host_clock_correct_callback)
 
 
 def format_trace(services: List[ProcessSpanSet],
@@ -2741,10 +2786,22 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     return service_duration_metrics
 
 
+def correct_span_time(flows: dict, host_clock_correction: dict):
+    """
+    基于 host_clock_correction 调整 span 的时间误差
+    """
+    for flow in flows:
+        agent_id = flow.get('vtap_id')  # should be agent_id
+        if host_clock_correction.get(agent_id, 0) > 0:
+            flow['start_time_us'] += host_clock_correction[agent_id]
+            flow['end_time_us'] += host_clock_correction[agent_id]
+
+
 def format_final_result(
-    services: List[ProcessSpanSet], networks: List[NetworkSpanSet], _id,
-    host_clock_offset_us: int, flow_index_to_id0: list,
-    related_flow_index_map: defaultdict(inner_defaultdict_set)):
+        services: List[ProcessSpanSet], networks: List[NetworkSpanSet], _id,
+        host_clock_offset_us: int, flow_index_to_id0: list,
+        related_flow_index_map: defaultdict(inner_defaultdict_set),
+        host_clock_correction: dict):
     """
     格式化返回结果
     """
@@ -2758,6 +2815,9 @@ def format_final_result(
     for trace in traces:
         format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
     response['services'] = merge_service(services, traces, uid_index_map)
+    if host_clock_correction is not None:
+        correct_span_time(traces, host_clock_correction)
+        response['host_clock_correction'] = host_clock_correction
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
         for trace in response.get('tracing', [])
@@ -2963,3 +3023,159 @@ def _get_epochsecond(id: int):
     so we can get epoch second from id with right shift 32 bits
     """
     return id >> 32
+
+
+class HostClockCorrector:
+    """
+    计算 [host1][host2] 之间的时间差，并为每一个 host 生成一个唯一的修正值
+    hostX 实际上取自 agent_id，也就是以 agent 作为调整对象
+    """
+
+    def __init__(self):
+        # parent_host(agent_id) => [child_host(agent_id)]
+        self.host_relations: Dict[int, List[int]] = {}
+        # child_host(agent_id) => { min_allow_correction, max_allow_correction, avg_allow_correction}
+        self.host_clock_correction: Dict[int, Dict[str, float]] = {}
+
+    def calculate_host_clock_correction(self, child: SpanNode,
+                                        parent: SpanNode):
+        if child.agent_id == parent.agent_id:
+            return
+        # 对 OTEL signal_source 作为 parent 时无法校准
+        # for OTEL signal_source, host clock correction is not available
+        if parent.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL:
+            return
+
+        start_time_diff = parent.flow['start_time_us'] - child.flow[
+            'start_time_us']
+        end_time_diff = parent.flow['end_time_us'] - child.flow['end_time_us']
+        # XXX: 先忽略这种情况，因为如果 child 覆盖 parent 时延，但覆盖了同一个方向（即同时往左或同时往右调）那也是合理的
+        # 不合理的情况出现在【既要往左也要往右】，这会被 tidy_host_clock_correction 修正
+        # XXX: temporary ignore it
+        # if start_time_diff > 0 and end_time_diff < 0:
+            # 说明 child cover parent，时延统计存在误差
+            # if child's duration cover parent's duration, that's maybe calculation error
+            # return
+        # 除此外，如果 start_time_diff < 0 and end_time_diff > 0，说明 parent cover child
+        # 但即使是这样，也要写入 host_clock_correction 中，因为 parent 可能与 parent 的 parent 有误差，此时 child 要做重新计算
+        self._set_host_clock_correction(parent.agent_id, child.agent_id,
+                                        start_time_diff, end_time_diff)
+
+    def _set_host_clock_correction(self, host_parent: int, host_child: int,
+                                   start_time_diff: int, end_time_diff: int):
+        """
+        agent 所在主机的时间差调整以 {agent_id_1, agent_id_2} 作为一对调整对象，校准两两主机之间的时差
+        """
+
+        # 由于调整之后，子 span 应要落在父 span 的时间范围内，所以需要根据 start_time/end_time 获取最大/最小允许的调整值，避免过调整
+        min_allow_correction = min(start_time_diff, end_time_diff)
+        max_allow_correction = max(start_time_diff, end_time_diff)
+        avg_correction = (min_allow_correction + max_allow_correction) / 2
+
+        # 避免有环（即同时存在 self.host_relations[parent][child] 与 self.host_relations[child][parent]），需要反转关系
+        parent = host_parent
+        child = host_child
+        if host_parent in self.host_relations.get(host_child, []):
+            parent = host_child
+            child = host_parent
+            min_allow_correction *= -1
+            max_allow_correction *= -1
+            avg_correction *= -1
+
+        self.host_relations.setdefault(parent, []).append(child)
+        if self.host_clock_correction.get(child) is None:
+            # 使用时目前只用到了 min(abs(correction))，即这三个值中最小的一个，但仍然保留其他两个值做 debug 与检查
+            self.host_clock_correction[child] = {
+                'min_allow_correction': min_allow_correction,
+                'max_allow_correction': max_allow_correction,
+                'avg_correction': avg_correction
+            }
+        else:
+            # 注意这里不是扩大范围，而是取交集
+            correction_info = dict.copy(self.host_clock_correction[child])
+            if correction_info['min_allow_correction'] < min_allow_correction:
+                correction_info['min_allow_correction'] = min_allow_correction
+            if correction_info['max_allow_correction'] > max_allow_correction:
+                correction_info['max_allow_correction'] = max_allow_correction
+
+            # 异常情况，意味着有的 parent 要求往右调，有的 parent 要求往左调
+            # 此类情况一般出现在 child 时延 > parent 时延时
+            # 如果发生这种情况，意味着这个 host 无论怎么调整都会超出 parent 的时间覆盖，无法修正
+            # 这里只能记录此异常，且不要更新，以上一次可用的修正信息为准
+            if correction_info['min_allow_correction'] > correction_info[
+                    'max_allow_correction']:
+                log.warning(
+                    f"correction for [{host_parent},{host_child}] get invalid value: [{correction_info['min_allow_correction']},{correction_info['max_allow_correction']}]"
+                )
+                return
+
+            correction_info['avg_correction'] = (
+                correction_info['min_allow_correction'] +
+                correction_info['max_allow_correction']) / 2
+            self.host_clock_correction[child] = correction_info
+
+    def tidy_host_clock_correction(self) -> dict:
+        """
+        基于收集到的主机间时间差，对每个主机(agent_id)计算出一个调整参数
+
+        调整前提：
+        1. 基于一个 hostX 作为基准做统一调整，所有 host 对齐到该 hostX
+        2. 理论上要以 rootSpan 的 host 作为基准，这里等价于"没有成为 child"的 host
+        3. 注意可能出现多个基准 host，比如存在如下情况：[hostX, hostY], [hostY, hostZ], [hostA, hostB], [hostA, hostC], 此时应该存在 hostX/hostA 两个基准
+        
+        调整逻辑：
+        1. 基准 host 不做调整，仅对基准 host 以下的 host 做调整（准确地说是只对 child host 调整）
+        2. 对一组 [hostA, hostB]，如果存在 [hostX, hostA] 且 hostA 已被调整，则 hostB 的调整值需要加上 hostA 的调整值，以对齐到 hostX
+        3. 每一组 host 的调整值都是 min(abs(max, min))，即只做“最小调整”，但要注意保持正负
+        """
+        # host => time (microseconds)
+        host_clock_correction_dict = dict()
+        base_host = set()
+
+        for host in self.host_relations.keys():
+            if host not in self.host_clock_correction.keys():
+                base_host.add(host)
+
+        for host in base_host:
+            # base_host 不需要调整，它就是基准，调整值为0
+            host_clock_correction_dict.setdefault(host, 0)
+            stack = []
+            for child in self.host_relations.get(host, []):
+                stack.append((child, 0))
+            while stack:
+                child, parent_value = stack.pop()
+                # 默认取 min
+                child_clock_correction = self.host_clock_correction.get(child)
+                correction_value = min(
+                    child_clock_correction['max_allow_correction'],
+                    child_clock_correction['min_allow_correction'])
+                # 如果都是负数，取 max (min(abs(value)))
+                if child_clock_correction[
+                        'max_allow_correction'] < 0 and child_clock_correction[
+                            'min_allow_correction'] < 0:
+                    correction_value = child_clock_correction[
+                        'max_allow_correction']
+                # 如果一正一负或其中一个是0，说明这个 host 一定被 parent 时间完全覆盖，不需要调整
+                if child_clock_correction[
+                        'max_allow_correction'] * child_clock_correction[
+                            'min_allow_correction'] <= 0:
+                    correction_value = 0
+                # 递归调整，即: 如果存在 [HostX, hostA][hostA, hostB]，在调整 hostB 时，需要加上 hostA 相对于 hostX 的调整值
+                # 这里有可能 hostB 调整后时间接近 0，说明 hostB 与 hostX 几乎不存在时差，时差仅由 hostA 产生
+                # 所以这里不能加绝对值，要加计算值，这样才能使正负抵消
+                correction_value += parent_value
+                if host_clock_correction_dict.get(child) is None:
+                    host_clock_correction_dict[child] = correction_value
+                else:
+                    exists_value = host_clock_correction_dict[child]
+                    if correction_value < 0 and exists_value < 0:
+                        correction_value = max(correction_value, exists_value)
+                    elif correction_value > 0 and exists_value > 0:
+                        correction_value = min(correction_value, exists_value)
+                    elif correction_value * exists_value <= 0:
+                        correction_value = 0
+                    host_clock_correction_dict[child] = correction_value
+                for child in self.host_relations.get(child, []):
+                    stack.append((child, correction_value))
+
+        return host_clock_correction_dict
