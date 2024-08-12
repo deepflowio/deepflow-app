@@ -3173,5 +3173,10 @@ class HostClockCorrector:
                     host_clock_correction_dict[child] = correction_value
                 for child in self.host_relations.get(child, []):
                     stack.append((child, correction_value))
-
-        return host_clock_correction_dict
+        
+        # remove 0 value
+        non_zero_host_clock_correction = dict()
+        for host, correction in host_clock_correction_dict.items():
+            if correction != 0:
+                non_zero_host_clock_correction[host] = correction
+        return non_zero_host_clock_correction
