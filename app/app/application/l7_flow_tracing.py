@@ -3045,14 +3045,27 @@ class HostClockCorrector:
         start_time_diff = parent.flow['start_time_us'] - child.flow[
             'start_time_us']
         end_time_diff = parent.flow['end_time_us'] - child.flow['end_time_us']
-        # XXX: 先忽略这种情况，因为如果 child 覆盖 parent 时延，但覆盖了同一个方向（即同时往左或同时往右调）那也是合理的
-        # 不合理的情况出现在【既要往左也要往右】，这会被 tidy_host_clock_correction 修正
-        # XXX: temporary ignore it
-        # if start_time_diff > 0 and end_time_diff < 0:
-            # 说明 child cover parent，时延统计存在误差
-            # if child's duration cover parent's duration, that's maybe calculation error
-            # return
-        # 除此外，如果 start_time_diff < 0 and end_time_diff > 0，说明 parent cover child
+
+        if child.signal_source != parent.signal_source and (
+                child.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL
+                or parent.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL):
+            # 其中一边是 App，不计算
+            if child.tap_side == TAP_SIDE_APP or parent.tap_side == TAP_SIDE_APP:
+                return
+            # App & Sys Span 即使 agent_id 不一样，也可能是来自同一个 Pod(非本机 agent 接收数据)，这种情况下时延差异纯粹来自于统计，而不是主机误差
+            # 对这种情况不应该计算误差，但仅对 App Span 有此逻辑，其他类型的数据时差一定来自主机误差
+            parent_instance = _get_auto_instance(parent)
+            if parent_instance != 0 and parent_instance == _get_auto_instance(
+                    child):
+                return
+            # 如果其中一边是 App Span，则只计算毫秒级别的误差
+            # 正数向下取整，负数向上取整
+            start_time_diff = math.floor(start_time_diff / 1000) * 1000 \
+                if start_time_diff > 0 else math.ceil(start_time_diff / 1000) * 1000
+            end_time_diff = math.floor(end_time_diff / 1000) * 1000 \
+                if end_time_diff > 0 else math.ceil(end_time_diff / 1000) * 1000
+
+        # 如果 start_time_diff < 0 and end_time_diff > 0，说明 parent cover child
         # 但即使是这样，也要写入 host_clock_correction 中，因为 parent 可能与 parent 的 parent 有误差，此时 child 要做重新计算
         self._set_host_clock_correction(parent.agent_id, child.agent_id,
                                         start_time_diff, end_time_diff)
@@ -3074,8 +3087,10 @@ class HostClockCorrector:
         if host_parent in self.host_relations.get(host_child, []):
             parent = host_child
             child = host_parent
-            min_allow_correction *= -1
-            max_allow_correction *= -1
+            start_time_diff *= -1
+            end_time_diff *= -1
+            min_allow_correction = min(start_time_diff, end_time_diff)
+            max_allow_correction = max(start_time_diff, end_time_diff)
             avg_correction *= -1
 
         self.host_relations.setdefault(parent, []).append(child)
@@ -3173,7 +3188,7 @@ class HostClockCorrector:
                     host_clock_correction_dict[child] = correction_value
                 for child in self.host_relations.get(child, []):
                     stack.append((child, correction_value))
-        
+
         # remove 0 value
         non_zero_host_clock_correction = dict()
         for host, correction in host_clock_correction_dict.items():
