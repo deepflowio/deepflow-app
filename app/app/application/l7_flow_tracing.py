@@ -513,14 +513,14 @@ class L7FlowTracing(Base):
         l7_flows = l7_flows.where(l7_flows.notnull(), None)
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
-        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map, host_clock_correction = sort_all_flows(
+        l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map, host_clock_correction, instance_to_agent = sort_all_flows(
             l7_flows, network_delay_us, host_clock_offset_us, return_fields)
         if related_map_from_api:
             related_flow_index_map.update(related_map_from_api)
         return format_final_result(l7_flows_merged, networks,
                                    self.args.get('_id'), host_clock_offset_us,
                                    flow_index_to_id0, related_flow_index_map,
-                                   host_clock_correction)
+                                   host_clock_correction, instance_to_agent)
 
     async def query_ck(self, sql: str):
         querier = Querier(to_dataframe=True,
@@ -1181,7 +1181,7 @@ class NetworkSpanSet:
         self.spans.append(span)
 
     def set_parent_relation(
-            self, host_clock_offset_us: int,
+            self, host_clock_offset_us: int, network_delay_us: int,
             host_clock_correct_callback: Callable[['SpanNode', 'SpanNode'],
                                                   None]):
         """
@@ -1192,11 +1192,12 @@ class NetworkSpanSet:
             child = self.spans[i]
             parent = self.spans[i - 1]
             if child.agent_id != parent.agent_id:
-                if not _range_overlap(
-                        child.flow['start_time_us'], child.flow['end_time_us'],
-                        parent.flow['start_time_us'],
-                        parent.flow['end_time_us'], host_clock_offset_us):
-                    # 当 child/parent 来自不同的主机，但时差超出 host_clock_offset_us，应认为二者无关
+                if not _range_overlap(child.flow['start_time_us'],
+                                      child.flow['end_time_us'],
+                                      parent.flow['start_time_us'],
+                                      parent.flow['end_time_us'],
+                                      host_clock_offset_us + network_delay_us):
+                    # 当 child/parent 来自不同的主机，但时差超出 host_clock_offset_us + network_delay_us，应认为二者无关
                     continue
             if self.spans[i].signal_source == self.spans[
                     i - 1].signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
@@ -1325,6 +1326,7 @@ class SpanNode:
         self.parent: SpanNode = None
         self.tap_side = flow['tap_side']
         self.agent_id = flow['vtap_id']
+        self.auto_instance = _get_auto_instance(self)
 
     def __eq__(self, other: 'SpanNode') -> bool:
         return self.get_flow_index() == other.get_flow_index()
@@ -1783,8 +1785,18 @@ class ProcessSpanSet:
                                    self.mounted_callback)
         return True
 
+def _get_auto_instance_name(span: SpanNode) -> str:
+    """
+    get auto_instance name for span
+    only for Ebpf/Packet signal source
+    """
+    return span.flow["auto_instance_0"] if span.tap_side.startswith('c') and span.tap_side != "app" else span.flow["auto_instance_1"]
 
 def _get_auto_instance(span: SpanNode) -> str:
+    """
+    get auto_instance of span
+    note: incase we only get app span(maybe from tracing_completion api), we need to use app_instance to fix `instance`
+    """
     server_side_key = 'auto_instance_id_1'
     client_side_key = 'auto_instance_id_0'
     # 对 x-app 位置的 flow，有可能 auto_instance_id=0，说明是外部资源
@@ -2000,6 +2012,9 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     for flow in flows:
         flow_index_to_id0[flow['_index']] = flow['_id'][0]
 
+    # auto_instance => agent_id
+    # data from Packet,Ebpf, for OTel instance mapping
+    instance_to_agent = dict()
     network_spans: List[NetworkSpanNode] = []
     app_spans: List[AppSpanNode] = []
     server_sys_spans: List[SysSpanNode] = []
@@ -2018,9 +2033,13 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 server_sys_spans.append(span)
             else:
                 client_sys_spans.append(span)
+            if span.auto_instance != "":
+                instance_to_agent[_get_auto_instance_name(span)] = span.agent_id
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_PACKET:
             span = NetworkSpanNode(flow)
             network_spans.append(span)
+            if span.auto_instance != "":
+                instance_to_agent[_get_auto_instance_name(span)] = span.agent_id
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
             span = AppSpanNode(flow)
             app_spans.append(span)
@@ -2054,7 +2073,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 
     network_span_list = _build_network_span_set(
         united_spans, related_flow_index_map, flow_index_to_span,
-        host_clock_offset_us,
+        host_clock_offset_us, network_delay_us,
         host_clock_corrector.calculate_host_clock_correction)
 
     ### Process Span Set 分离
@@ -2091,7 +2110,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         host_clock_corrector.calculate_host_clock_correction)
 
     return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map, host_clock_corrector.tidy_host_clock_correction(
-    )
+    ), instance_to_agent
 
 
 def _union_app_spans(
@@ -2100,7 +2119,8 @@ def _union_app_spans(
     host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
 ) -> Dict[str, List[ProcessSpanSet]]:
     for span in app_spans:
-        auto_instance = _get_auto_instance(span)
+        auto_instance = span.auto_instance
+        # auto_instance = _get_auto_instance(span)
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
             sp_span_pss.mounted_callback = host_clock_correct_callback
@@ -2158,7 +2178,7 @@ def _union_sys_spans(
     # 如果没有 app_span 时，不要做无效扫描
     if len(process_span_map) > 0:
         for span in client_sys_spans + server_sys_spans:  # 先 c-p 后 s-p
-            auto_instance = _get_auto_instance(span)
+            auto_instance = span.auto_instance
             for sp_span_pss in process_span_map.get(auto_instance, []):
                 if not sp_span_pss.attach_sys_span_via_app_span(span):
                     # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
@@ -2172,7 +2192,7 @@ def _union_sys_spans(
     for span in server_sys_spans:
         if span.process_span_set is not None:
             continue
-        auto_instance = _get_auto_instance(span)
+        auto_instance = span.auto_instance
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
             sp_span_pss.mounted_callback = host_clock_correct_callback
@@ -2193,7 +2213,7 @@ def _union_sys_spans(
         span = client_sys_spans[i]
         if span.process_span_set is not None:
             continue
-        auto_instance = _get_auto_instance(span)
+        auto_instance = span.auto_instance
         # 最终需要上挂的目标 s-p
         target_sp = None
         target_mounted_info = ""
@@ -2230,7 +2250,7 @@ def _union_sys_spans(
         span = client_sys_spans[i]
         if span.process_span_set is not None:
             continue
-        auto_instance = _get_auto_instance(span)
+        auto_instance = span.auto_instance
         # 如果找不到 auto_instance，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
         # process_span_set 允许存在多个 c-p，但这些 c-p 如果没有关联关系，需要划分为多个 Process Span Set
         group_key = ''
@@ -2259,6 +2279,7 @@ def _build_network_span_set(
     united_spans: List[SpanNode],
     related_flow_index_map: defaultdict(inner_defaultdict_set),
     flow_index_to_span: List[SpanNode], host_clock_offset_us: int,
+    network_delay_us: int,
     host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
 ) -> List[NetworkSpanSet]:
     networks: List[NetworkSpanSet] = []
@@ -2288,7 +2309,7 @@ def _build_network_span_set(
     ### 网络span排序
     # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
-        network.set_parent_relation(host_clock_offset_us,
+        network.set_parent_relation(host_clock_offset_us, network_delay_us,
                                     host_clock_correct_callback)
     return networks
 
@@ -2786,12 +2807,18 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     return service_duration_metrics
 
 
-def correct_span_time(flows: dict, host_clock_correction: dict):
+def correct_span_time(flows: dict, host_clock_correction: dict,
+                      instance_to_agent: dict):
     """
     基于 host_clock_correction 调整 span 的时间误差
     """
     for flow in flows:
-        agent_id = flow.get('vtap_id')  # should be agent_id
+        if flow['signal_source'] != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            agent_id = flow['vtap_id']
+        else:
+            # OTel data maybe sent to different host and tag by different agent
+            # should verify `agent` by instance_to_agent record by Ebpf/Packet signal source
+            agent_id = instance_to_agent.get(flow['auto_instance'], flow['vtap_id'])
         if host_clock_correction.get(agent_id, 0) != 0:
             flow['start_time_us'] += host_clock_correction[agent_id]
             flow['end_time_us'] += host_clock_correction[agent_id]
@@ -2801,7 +2828,7 @@ def format_final_result(
         services: List[ProcessSpanSet], networks: List[NetworkSpanSet], _id,
         host_clock_offset_us: int, flow_index_to_id0: list,
         related_flow_index_map: defaultdict(inner_defaultdict_set),
-        host_clock_correction: dict):
+        host_clock_correction: dict, instance_to_agent: dict):
     """
     格式化返回结果
     """
@@ -2816,7 +2843,7 @@ def format_final_result(
         format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
     response['services'] = merge_service(services, traces, uid_index_map)
     if host_clock_correction is not None:
-        correct_span_time(traces, host_clock_correction)
+        correct_span_time(traces, host_clock_correction, instance_to_agent)
         response['host_clock_correction'] = host_clock_correction
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
@@ -3054,9 +3081,8 @@ class HostClockCorrector:
                 return
             # App & Sys Span 即使 agent_id 不一样，也可能是来自同一个 Pod(非本机 agent 接收数据)，这种情况下时延差异纯粹来自于统计，而不是主机误差
             # 对这种情况不应该计算误差，但仅对 App Span 有此逻辑，其他类型的数据时差一定来自主机误差
-            parent_instance = _get_auto_instance(parent)
-            if parent_instance != 0 and parent_instance == _get_auto_instance(
-                    child):
+            if parent.auto_instance != '' and parent.auto_instance != '0' \
+                and parent.auto_instance == child.auto_instance:
                 return
             # 如果其中一边是 App Span，则只计算毫秒级别的误差
             # 正数向下取整，负数向上取整
