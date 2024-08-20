@@ -1303,6 +1303,9 @@ class SpanNode:
         self.parent = parent
         _set_parent_mount_info(self.flow, parent.flow, mounted_info)
 
+    def detach_parent(self, parent: 'SpanNode'):
+        _remove_parent_relate_info(self.flow, parent.flow)
+
     # 为高频访问字段添加 getter 函数，减少出错
 
     def get_parent_id(self) -> int:
@@ -1515,6 +1518,12 @@ class ProcessSpanSet:
             self.leaf_syscall_trace_id_response.add(
                 sys_span.get_syscall_trace_id_response())
 
+    def remove_server_sys_span(self, sys_span: SysSpanNode):
+        # 这里应该要做 append_sys_span 的逆操作(但对象仅为 ServerProcess sys_span)
+        # 这里如果曾经 append 过，说明进程匹配成功，_set_extra_value_for_sys_span & _set_auto_service 是正确的，不需做逆操作
+        sys_span.process_span_set = None
+        self.spans.remove(sys_span)
+
     def get_roots(self) -> List[SpanNode]:
         return [span for span in self.spans if span.parent is None]
 
@@ -1614,14 +1623,42 @@ class ProcessSpanSet:
         span_id_of_sys_span = sys_span.get_span_id()
         if span_id_of_sys_span:
             for app_root in self.app_span_roots:
-                if app_root.get_parent_id() < 0 \
-                and span_id_of_sys_span == app_root.get_parent_span_id():
-                    # 如果 span_id 匹配成功，s-p 作为 app-span 的 parent
-                    self.append_sys_span(sys_span)
-                    app_root.set_parent(
-                        sys_span,
-                        "s-p sys_span mounted due to same span_id as parent")
-                    return True
+                if span_id_of_sys_span == app_root.get_parent_span_id():
+                    if app_root.get_parent_id() < 0:
+                        # 如果 span_id 匹配成功，s-p 作为 app-span 的 parent
+                        self.append_sys_span(sys_span)
+                        app_root.set_parent(
+                            sys_span,
+                            "s-p sys_span mounted due to same span_id as parent"
+                        )
+                        return True
+                    else:
+                        # 当上游服务基于同一个 span_id 发出多个请求时，不同的下游服务采集到的 sys span 的 span_id 会一致
+                        # 对此类场景，如果有多个 sys_span 的 span_id 符合要求，需要从中找到【时间偏差】最小的一个 span 作为 parent
+                        # 如果 parent 的时间覆盖 app_root，时间偏差=0
+                        # 如果 parent 的时间不覆盖 app_root，时间偏差=min(delta_start, delta_end)
+                        time_delta_old, time_delta_new = 0, 0
+                        if not app_root.parent.time_range_cover(app_root):
+                            time_delta_old = min(
+                                abs(app_root.parent.flow['start_time_us'] -
+                                    app_root.flow['start_time_us']),
+                                abs(app_root.parent.flow['end_time_us'] -
+                                    app_root.flow['end_time_us']))
+                        if not sys_span.time_range_cover(app_root):
+                            time_delta_new = min(
+                                abs(sys_span.flow['start_time_us'] -
+                                    app_root.flow['start_time_us']),
+                                abs(sys_span.flow['end_time_us'] -
+                                    app_root.flow['end_time_us']))
+                        if time_delta_new < time_delta_old:
+                            self.remove_server_sys_span(app_root.parent)
+                            app_root.detach_parent(app_root.parent)
+                            self.append_sys_span(sys_span)
+                            app_root.set_parent(
+                                sys_span,
+                                "s-p sys_span mounted due to same span_id as parent"
+                            )
+                        return True
         else:
             syscall_trace_id_request = sys_span.get_syscall_trace_id_request()
             syscall_trace_id_response = sys_span.get_syscall_trace_id_response(
@@ -2927,6 +2964,10 @@ def _set_parent_mount_info(flow: dict, flow_parent: dict, info: str = None):
     else:
         flow_parent['childs'] = [flow['_index']]
     flow['set_parent_info'] = info
+
+
+def _remove_parent_relate_info(flow: dict, flow_parent: dict):
+    flow_parent['childs'].remove(flow['_index'])
 
 
 def generate_span_id():
