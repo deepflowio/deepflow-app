@@ -1785,12 +1785,15 @@ class ProcessSpanSet:
                                    self.mounted_callback)
         return True
 
+
 def _get_auto_instance_name(span: SpanNode) -> str:
     """
     get auto_instance name for span
     only for Ebpf/Packet signal source
     """
-    return span.flow["auto_instance_0"] if span.tap_side.startswith('c') and span.tap_side != "app" else span.flow["auto_instance_1"]
+    return span.flow["auto_instance_0"] if span.tap_side.startswith(
+        'c') and span.tap_side != "app" else span.flow["auto_instance_1"]
+
 
 def _get_auto_instance(span: SpanNode) -> str:
     """
@@ -2034,12 +2037,14 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             else:
                 client_sys_spans.append(span)
             if span.auto_instance != "":
-                instance_to_agent[_get_auto_instance_name(span)] = span.agent_id
+                instance_to_agent[_get_auto_instance_name(
+                    span)] = span.agent_id
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_PACKET:
             span = NetworkSpanNode(flow)
             network_spans.append(span)
             if span.auto_instance != "":
-                instance_to_agent[_get_auto_instance_name(span)] = span.agent_id
+                instance_to_agent[_get_auto_instance_name(
+                    span)] = span.agent_id
         elif flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
             span = AppSpanNode(flow)
             app_spans.append(span)
@@ -2340,16 +2345,17 @@ def _connect_process_and_networks(
             if _same_span_set(ps_parent, net_child, 'network_span_set') \
                 or _same_span_set(ps_parent, net_child, 'process_span_set'):
                 continue
-            if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
-                    net_child):
-                # 对同一个主机采集到的数据，不存在时差
-                continue
-            if net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and \
-                  net_child.get_response_duration() and ps_response_duration < net_child.get_response_duration():
-                # 如果能取到响应时长（请求响应完整），需要判断响应时长覆盖
-                # 由于 app span 的时长是在 sdk 中统计，如果发生子 span 异步完成，父 span 提前完成，子 span 时间可以大于父 span
-                # 所以这里判断 response_duration 忽略 OTEL signal_source
-                continue
+            if net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
+                        net_child):
+                    # 对同一个主机采集到的数据，不存在时差
+                    continue
+                if net_child.get_response_duration(
+                ) and ps_response_duration < net_child.get_response_duration():
+                    # 如果能取到响应时长（请求响应完整），需要判断响应时长覆盖
+                    # 由于 app span 的时长是在 sdk 中统计，如果发生子 span 异步完成，父 span 提前完成，子 span 时间可以大于父 span
+                    # 所以这里判断 response_duration 忽略 OTEL signal_source
+                    continue
             if ps_index == net_child.get_flow_index():
                 # 共享一个 c-p, net_child parent == ps_parent 的 parent
                 continue
@@ -2373,12 +2379,14 @@ def _connect_process_and_networks(
             if _same_span_set(ps_child, net_parent, 'network_span_set') \
                 or _same_span_set(ps_child, net_parent, 'process_span_set'):
                 continue
-            if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(
-                    ps_child):
-                continue
-            if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source!= L7_FLOW_SIGNAL_SOURCE_OTEL and \
-                net_parent.get_response_duration() and net_parent.get_response_duration() < ps_child_response_duration:
-                continue
+            if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(
+                        ps_child):
+                    continue
+                if net_parent.get_response_duration(
+                ) and net_parent.get_response_duration(
+                ) < ps_child_response_duration:
+                    continue
             if ps_index == net_parent.get_flow_index():
                 # 共享一个 s-p，则 ps_child 的 parent == net_parent 的 parent
                 continue
@@ -2415,12 +2423,14 @@ def _connect_process_and_networks(
             if _same_span_set(ps_child, ps_parent, 'network_span_set') \
                 or _same_span_set(ps_child, ps_parent, 'process_span_set'):
                 continue
-            if ps_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
-                    ps_child):
-                continue
-            if ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source!= L7_FLOW_SIGNAL_SOURCE_OTEL and \
-                ps_parent.get_response_duration() and ps_parent.get_response_duration() < ps_child_response_duration:
-                continue
+            if ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                if ps_parent.agent_id == ps_child.agent_id and not ps_parent.time_range_cover(
+                        ps_child):
+                    continue
+                if ps_parent.get_response_duration(
+                ) and ps_parent.get_response_duration(
+                ) < ps_child_response_duration:
+                    continue
             if ps_child_index == ps_parent.get_flow_index():
                 # 共享一个 c-p，则 ps_child 的 parent == ps_parent 的 parent
                 continue
@@ -2818,7 +2828,8 @@ def correct_span_time(flows: dict, host_clock_correction: dict,
         else:
             # OTel data maybe sent to different host and tag by different agent
             # should verify `agent` by instance_to_agent record by Ebpf/Packet signal source
-            agent_id = instance_to_agent.get(flow['auto_instance'], flow['vtap_id'])
+            agent_id = instance_to_agent.get(flow['auto_instance'],
+                                             flow['vtap_id'])
         if host_clock_correction.get(agent_id, 0) != 0:
             flow['start_time_us'] += host_clock_correction[agent_id]
             flow['end_time_us'] += host_clock_correction[agent_id]
