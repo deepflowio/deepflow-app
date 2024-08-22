@@ -1,9 +1,9 @@
 FROM python:3.8.19-slim-bullseye AS runner
 RUN useradd -u 1000 -m deepflow -s /bin/bash && \
-    chmod 777 $(which apt-get)
+    echo "deepflow ALL=(ALL) NOPASSWD: /usr/bin/apt-get" >> /etc/sudoers
 USER deepflow
 ARG TARGETARCH
-RUN apt-get update && apt-get upgrade -y
+RUN sudo apt-get update && sudo apt-get upgrade -y
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local  && \
