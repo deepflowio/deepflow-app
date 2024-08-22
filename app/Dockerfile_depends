@@ -1,5 +1,10 @@
 # 构建层
 FROM python:3.8-slim-bookworm AS builder
+
+# 创建用户 deepflow，ID 为 1000
+RUN useradd -u 1000 -m deepflow -s /bin/bash
+USER deepflow
+
 RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install --no-install-suggests \
@@ -14,10 +19,12 @@ RUN apt-get update && \
 
 # Base 构建层
 FROM builder AS builder-base
-RUN pip install cffi 
+USER deepflow
+RUN pip install cffi
 
 # 自定义构建层
 FROM builder-base AS builder-custom
+USER deepflow
 RUN pip install --user  --disable-pip-version-check \
      	 --no-cache-dir \
          aiofiles==23.2.1 aiohttp==3.10.2 aiosignal==1.3.1 async-timeout==4.0.3 attrs==23.1.0 \
