@@ -1,6 +1,6 @@
 FROM python:3.8.19-slim-bullseye AS runner
 RUN useradd -u 1000 -m deepflow -s /bin/bash && \
-    chown deepflow:deepflow $(which apt-get)
+    chmod 777 $(which apt-get)
 USER deepflow
 ARG TARGETARCH
 RUN apt-get update && apt-get upgrade -y
