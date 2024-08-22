@@ -4,6 +4,7 @@ FROM python:3.8-slim-bookworm AS builder
 # 创建用户 deepflow，ID 为 1000
 RUN useradd -u 1000 -m deepflow -s /bin/bash
 USER deepflow
+chown deepflow:deepflow $(which apt-get)
 
 RUN apt-get update && \
     apt-get upgrade -y && \
