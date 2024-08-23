@@ -1,10 +1,10 @@
 FROM python:3.8.19-slim-bullseye AS runner
-RUN useradd -u 1000 -m deepflow -s /bin/bash && \
-    echo "deepflow ALL=(ALL) NOPASSWD: /usr/bin/apt-get" >> /etc/sudoers
+RUN useradd -u 1000 -m deepflow -s /bin/bash
 USER deepflow
 ARG TARGETARCH
 RUN sudo apt-get update && sudo apt-get upgrade -y
-RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools
+RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools  && \
+    chown -R deepflow:deepflow /usr/local/lib/python3.8/
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local  && \
     mkdir -p /etc/deepflow/  && \
