@@ -36,8 +36,8 @@ RUN pip install --user  --disable-pip-version-check \
          sanic==23.6.0 sanic-routing==23.6.0 schematics==2.1.1 six==1.16.0 \
          tracerite==1.1.1 typing_extensions==4.8.0 tzdata==2023.3 \
          ujson==5.8.0 uvloop==0.19.0 websockets==12.0 wrapt==1.16.0 \
-         yarl==1.9.2 zipp==3.19.2  && \
-         chown -R deepflow:deepflow /usr/local/lib/python3.8/
+         yarl==1.9.2 zipp==3.19.2
+RUN chown -R deepflow:deepflow /usr/local/lib/python3.8/
 USER deepflow
 FROM scratch
 COPY --from=builder-custom /root/.local /
