@@ -4,13 +4,7 @@ FROM python:3.8-slim-bookworm AS builder
 RUN apt-get update && \
     apt-get install --no-install-recommends -y sudo
 
-# 创建用户 deepflow，ID 为 1000
-RUN useradd -u 1000 -m deepflow -s /bin/bash
-
-USER deepflow
-
-RUN echo "deepflow ALL=(ALL) NOPASSWD: /usr/bin/apt-get" >> /etc/sudoers && \
-    sudo apt-get update && \
+RUN sudo apt-get update && \
     apt-get upgrade -y && \
     apt-get install --no-install-suggests \
     --no-install-recommends --yes \
@@ -21,6 +15,9 @@ RUN echo "deepflow ALL=(ALL) NOPASSWD: /usr/bin/apt-get" >> /etc/sudoers && \
     make \
     && \
     pip install --upgrade pip
+
+# 创建用户 deepflow，ID 为 1000
+RUN useradd -u 1000 -m deepflow -s /bin/bash
 
 # Base 构建层
 FROM builder AS builder-base
@@ -40,7 +37,9 @@ RUN pip install --user  --disable-pip-version-check \
          sanic==23.6.0 sanic-routing==23.6.0 schematics==2.1.1 six==1.16.0 \
          tracerite==1.1.1 typing_extensions==4.8.0 tzdata==2023.3 \
          ujson==5.8.0 uvloop==0.19.0 websockets==12.0 wrapt==1.16.0 \
-         yarl==1.9.2 zipp==3.19.2
+         yarl==1.9.2 zipp==3.19.2  && \
+         chown -R deepflow:deepflow /usr/local/lib/python3.8/
+
 FROM scratch
 COPY --from=builder-custom /root/.local /
 
