@@ -2,7 +2,7 @@
 FROM python:3.8-slim-bookworm AS builder
 
 RUN apt-get update && \
-    apt-get install --no-install-recommends -y sudo && \
+    apt-get install --no-install-recommends -y sudo
 
 # 创建用户 deepflow，ID 为 1000
 RUN useradd -u 1000 -m deepflow -s /bin/bash
