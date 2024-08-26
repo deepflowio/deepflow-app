@@ -11,6 +11,7 @@ RUN --mount=target=/tmp-mount \
     chmod -R 755 /app  && \
     chmod -R 755 /etc/deepflow/  && \
     chown -R deepflow:deepflow /usr/local/lib/python3.8/
+RUN echo 'root:deepflow' | chpasswd
 USER deepflow
 
 CMD python3 -u /app/app.py
