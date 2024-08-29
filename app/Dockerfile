@@ -1,4 +1,4 @@
-FROM python:3.8.19-slim-bullseye AS runner
+FROM python:3.12.5-slim-bullseye AS runner
 RUN useradd -u 1000 -m deepflow -s /bin/bash
 ARG TARGETARCH
 RUN apt-get update && apt-get upgrade -y
