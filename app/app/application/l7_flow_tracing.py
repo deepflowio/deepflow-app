@@ -339,6 +339,7 @@ class L7FlowTracing(Base):
                     resp_tcp_seqs.add(nrts)
                     new_resp_tcp_seqs.add(str(nrts))
             # 2.1. Condition 1: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
+            # 这里查询 tcp_seq 时仅需一侧相等(req/resp)即可，定义为弱关联关系
             tcp_seq_filters = []
             if new_req_tcp_seqs:
                 tcp_seq_filters.append(
@@ -426,6 +427,7 @@ class L7FlowTracing(Base):
             trace_infos = TraceInfo.construct_from_dataframe(
                 dataframe_flowmetas) + TraceInfo.construct_from_dataframe(
                     new_flows)
+            # 这里对 network span 使用强关联关系，保证不要产生误关联
             set_all_relate(trace_infos,
                            related_flow_id_map,
                            network_delay_us,
@@ -651,7 +653,8 @@ def set_all_relate(trace_infos: list,
                    network_delay_us: int,
                    host_clock_offset_us: int,
                    fast_check: bool = False,
-                   skip_first_n_trace_infos: int = 0):
+                   skip_first_n_trace_infos: int = 0,
+                   network_allow_weak_related: bool = False):
     """
     用于 span 追溯关联
     先构建 tcp_seq/syscall_trace_id/x_request_id 对 _id 的反向索引，再对每一种类型的关联通过各自的 `set_relate` 判断是否有关联
@@ -704,11 +707,14 @@ def set_all_relate(trace_infos: list,
             related_trace_infos = tcp_seq_to_trace_infos.get(
                 req_tcp_seq, set()) | tcp_seq_to_trace_infos.get(
                     resp_tcp_seq, set())
-            find_related = L7NetworkMeta.set_relate(ti, related_trace_infos,
-                                                    related_map,
-                                                    network_delay_us,
-                                                    host_clock_offset_us,
-                                                    fast_check)
+            if not network_allow_weak_related:
+                find_related = L7NetworkMeta.set_relate(
+                    ti, related_trace_infos, related_map, network_delay_us,
+                    host_clock_offset_us, fast_check)
+            else:
+                find_related = L7NetworkMeta.set_weak_relate(
+                    ti, related_trace_infos, related_map, network_delay_us,
+                    host_clock_offset_us, fast_check)
             if fast_check and find_related: continue
         # span_id
         related_trace_infos = span_id_to_trace_infos.get(
@@ -979,6 +985,47 @@ class L7NetworkMeta:
         return False
 
     @classmethod
+    def set_weak_relate(
+        cls,
+        trace_info: TraceInfo,
+        related_trace_infos: set,
+        related_map: defaultdict(inner_defaultdict_set),
+        network_delay_us: int,
+        host_clock_offset_us: int,
+        fast_check: bool = False,
+    ) -> bool:
+        find_related = False
+        for rti in related_trace_infos:
+            if trace_info._id == rti._id:
+                continue
+            # network_delay_us 用于判断同一主机两两网络流之间的时间差不应大于【一定值】
+            # host_clock_offset_us 用于判断不同主机之间 ntp 同步的时间不应大于【一定值】。
+            # 对于不同主机之间的网络流，network_delay_us 和 host_clock_offset_us 时间差同时存在
+            # 否则认为超出追踪范围，在后续逻辑中会无法加入 related_map 而被丢弃。
+
+            # 注意：两个 Span 都是会话时，要求两侧 TCP Seq 必须都相等，即使有一侧 TCP Seq 为 0，
+            #       例如 MySQL Close、RabbitMQ Connection.Blocked 等单向 SESSION 的场景。
+            #       否则，只需要一侧 TCP Seq 相等即可。
+
+            # 注意：这里用弱关系判断，仅用于 sort_all_flows 中构建溯源关系，保证溯源关系能关联上
+            # 在后续构建关联关系时，使用上述强判断（即下方 is_relate 的逻辑）做强校验
+            span_time_deviation = network_delay_us if trace_info.vtap_id == rti.vtap_id else network_delay_us + host_clock_offset_us
+            if trace_info.req_tcp_seq and trace_info.req_tcp_seq == rti.req_tcp_seq and abs(
+                    trace_info.start_time_us -
+                    rti.start_time_us) <= span_time_deviation:
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                find_related = True
+            if trace_info.resp_tcp_seq and trace_info.resp_tcp_seq == rti.resp_tcp_seq and abs(
+                    trace_info.end_time_us -
+                    rti.end_time_us) <= span_time_deviation:
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                find_related = True
+            if fast_check and find_related: return
+        return find_related
+
+    @classmethod
     def set_relate(cls,
                    trace_info: TraceInfo,
                    related_trace_infos: set,
@@ -1008,37 +1055,46 @@ class L7NetworkMeta:
             # 注意：两个 Span 都是会话时，要求两侧 TCP Seq 必须都相等，即使有一侧 TCP Seq 为 0，
             #       例如 MySQL Close、RabbitMQ Connection.Blocked 等单向 SESSION 的场景。
             #       否则，只需要一侧 TCP Seq 相等即可。
-            span_time_deviation = network_delay_us if trace_info.vtap_id == rti.vtap_id else network_delay_us + host_clock_offset_us
-            if trace_info.type == rti.type == L7_FLOW_TYPE_SESSION:  # req & resp
-                if abs(trace_info.start_time_us -
-                       rti.start_time_us) <= span_time_deviation and abs(
-                           trace_info.end_time_us -
-                           rti.end_time_us) <= span_time_deviation:
-                    if trace_info.req_tcp_seq == rti.req_tcp_seq and trace_info.resp_tcp_seq == rti.resp_tcp_seq:
-                        if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
-                            find_related = True
-            elif trace_info.type != L7_FLOW_TYPE_RESPONSE and rti.type != L7_FLOW_TYPE_RESPONSE:  # req
-                if abs(trace_info.start_time_us -
-                       rti.start_time_us) <= span_time_deviation:
-                    if trace_info.req_tcp_seq == rti.req_tcp_seq:
-                        if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
-                            find_related = True
-            elif trace_info.type != L7_FLOW_TYPE_REQUEST and rti.type != L7_FLOW_TYPE_REQUEST:  # resp
-                if abs(trace_info.end_time_us -
-                       rti.end_time_us) <= span_time_deviation:
-                    if trace_info.resp_tcp_seq == rti.resp_tcp_seq:
-                        if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
-                            find_related = True
+
+            # 注意：这里是完整的强关系判断，用于 query_flowmetas 中避免误关联匹配
+            if cls.is_relate(trace_info, rti, network_delay_us,
+                             host_clock_offset_us):
+                related_map[trace_info._id][rti._id].add(
+                    L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                find_related = True
             if fast_check and find_related: return
             # XXX: vtap_id 相同时应该能有更好的判断，例如 duration 大的 Span 时间范围必须覆盖 duration 小的 Span
 
         return find_related
+
+    @classmethod
+    def is_relate(cls, lhs_ti: TraceInfo, rhs_ti: TraceInfo,
+                  network_delay_us: int, host_clock_offset_us: int) -> bool:
+        """
+        校验一组 TcpSeq 相等的 Network Span 是否能被追踪或放入一组关联关系中
+        """
+        span_time_deviation = network_delay_us if lhs_ti.vtap_id == rhs_ti.vtap_id else network_delay_us + host_clock_offset_us
+        if lhs_ti.type == rhs_ti.type == L7_FLOW_TYPE_SESSION:  # req & resp
+            if abs(lhs_ti.start_time_us -
+                   rhs_ti.start_time_us) <= span_time_deviation and abs(
+                       lhs_ti.end_time_us -
+                       rhs_ti.end_time_us) <= span_time_deviation:
+                if lhs_ti.req_tcp_seq == rhs_ti.req_tcp_seq and lhs_ti.resp_tcp_seq == rhs_ti.resp_tcp_seq:
+                    if not cls.flow_field_conflict(lhs_ti, rhs_ti):
+                        return True
+        elif lhs_ti.type != L7_FLOW_TYPE_RESPONSE and rhs_ti.type != L7_FLOW_TYPE_RESPONSE:  # req
+            if abs(lhs_ti.start_time_us -
+                   rhs_ti.start_time_us) <= span_time_deviation:
+                if lhs_ti.req_tcp_seq == rhs_ti.req_tcp_seq:
+                    if not cls.flow_field_conflict(lhs_ti, rhs_ti):
+                        return True
+        elif lhs_ti.type != L7_FLOW_TYPE_REQUEST and rhs_ti.type != L7_FLOW_TYPE_REQUEST:  # resp
+            if abs(lhs_ti.end_time_us -
+                   rhs_ti.end_time_us) <= span_time_deviation:
+                if lhs_ti.resp_tcp_seq == rhs_ti.resp_tcp_seq:
+                    if not cls.flow_field_conflict(lhs_ti, rhs_ti):
+                        return True
+        return False
 
 
 class L7SyscallMeta:
@@ -2044,8 +2100,12 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 对合并后的 flow 计算 related_flow_index_map，用于后续操作的加速
     related_flow_index_map = defaultdict(inner_defaultdict_set)
     trace_infos = TraceInfo.construct_from_dict_list(flows)
-    set_all_relate(trace_infos, related_flow_index_map, network_delay_us,
-                   host_clock_offset_us)  # XXX: slow function
+    # 注意：这里对 network span 使用弱关联关系，使得能体现在 span 溯源关系上
+    set_all_relate(trace_infos,
+                   related_flow_index_map,
+                   network_delay_us,
+                   host_clock_offset_us,
+                   network_allow_weak_related=True)  # XXX: slow function
     # 构建一个 flow._index 到 flow._id(s) 的映射，方便后续 related_flow_index_map 的使用
     flow_index_to_id0 = [0] * len(flows)
     for flow in flows:
@@ -2059,6 +2119,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     server_sys_spans: List[SysSpanNode] = []
     client_sys_spans: List[SysSpanNode] = []
     # 对 flow 分类，而后分别做排序，方便做层级处理
+    # 注意这里 flow_index_to_span 的索引顺序与 trace_infos 的索引顺序是一致的，可以直接用 flow_index 或 _id 互相访问
     # 对 network_flows: net-span 的排序按固定的顺序（TAP_SIDE_RANKS），然后根据 span_id 挂 app-span，根据 tcp_seq 挂 sys-span
     # 对 app_flows: app-span 按固定的规则设置层级（span_id/parent_span_id），按 span_id 挂 sys-span 以及挂到 sys-span 构建的 <service> 上
     # 对 syscall_flows: sys-span 需要提取<vtap_id, local_process_id>分组定义为<service> ，并以此为主体构建火焰图骨架
@@ -2114,7 +2175,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
 
     network_span_list = _build_network_span_set(
         united_spans, related_flow_index_map, flow_index_to_span,
-        host_clock_offset_us, network_delay_us,
+        host_clock_offset_us, network_delay_us, trace_infos,
         host_clock_corrector.calculate_host_clock_correction)
 
     ### Process Span Set 分离
@@ -2122,6 +2183,9 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         pss for _, process_span_sets in process_span_map.items()
         for pss in process_span_sets
     ]
+
+    # TODO: 这里修改为在构建 process spanset 过程中就对 root/leaf 标记为 network_root/network_leaf...
+    # 在连接过程中，基于 related_flow_index_map 做匹配，减少扫描量
 
     # 准备数据，从所有 process 和 network 中获取 root 和 leaf
     process_root_list = [pss.get_roots()
@@ -2320,7 +2384,7 @@ def _build_network_span_set(
     united_spans: List[SpanNode],
     related_flow_index_map: defaultdict(inner_defaultdict_set),
     flow_index_to_span: List[SpanNode], host_clock_offset_us: int,
-    network_delay_us: int,
+    network_delay_us: int, trace_infos: List[TraceInfo],
     host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
 ) -> List[NetworkSpanSet]:
     networks: List[NetworkSpanSet] = []
@@ -2343,6 +2407,12 @@ def _build_network_span_set(
             if L7_FLOW_RELATIONSHIP_TCP_SEQ not in related_types:
                 continue
             if _index in flow_aggregated:
+                continue
+            # 这里使用强判断，要求满足与 L7NetworkMeta.set_relate 等价的条件才能放到一组 network 上
+            # 这里每个 span 理论最多被访问一次，会被 flow_aggregated 聚合避免重复访问
+            if not L7NetworkMeta.is_relate(
+                    trace_infos[flow_index], trace_infos[_index],
+                    network_delay_us, host_clock_offset_us):
                 continue
             network.append_span_node(flow_index_to_span[_index])
             flow_aggregated.add(_index)
