@@ -11,7 +11,7 @@ from data.querier_client import Querier
 from config import config
 from .base import Base
 from common import const
-from common.utils import curl_perform, inner_defaultdict_set
+from common.utils import curl_perform, inner_defaultdict_int
 from common.const import (HTTP_OK, L7_FLOW_SIGNAL_SOURCE_PACKET,
                           L7_FLOW_SIGNAL_SOURCE_EBPF,
                           L7_FLOW_SIGNAL_SOURCE_OTEL)
@@ -41,10 +41,44 @@ TAP_SIDE_SPAN_ID_RANKS = {
     TAP_SIDE_SERVER_PROCESS: 4,
 }
 
-L7_FLOW_RELATIONSHIP_TCP_SEQ = 'network'
-L7_FLOW_RELATIONSHIP_X_REQUEST_ID = 'xrequestid'
-L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID = 'syscall'
-L7_FLOW_RELATIONSHIP_SPAN_ID = 'app'
+L7_FLOW_RELATIONSHIP_TCP_SEQ = 1
+L7_FLOW_RELATIONSHIP_X_REQUEST_ID = 1 << 1
+L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID = 1 << 2
+L7_FLOW_RELATIONSHIP_SPAN_ID = 1 << 3
+
+# NOTE: 这里为了方便理解，不用数组而用 map
+L7_FLOW_RELATIONSHIP_MAP = {
+    L7_FLOW_RELATIONSHIP_TCP_SEQ:
+    'network',
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID:
+    'xrequestid',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID:
+    'network,xrequestid',
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:
+    'syscall',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:
+    'network,syscall',
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:
+    'xrequestid,syscall',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:
+    'network,xrequestid,syscall',
+    L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'app',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'network,app',
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'xrequestid,app',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'network,xrequestid,app',
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'syscall,app',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'network,syscall,app',
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'xrequestid,syscall,app',
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:
+    'network,xrequestid,syscall,app',
+}
 
 CAPTURE_CLOUD_NETWORK_TYPE = 3
 IP_AUTO_SERVICE = 255
@@ -417,7 +451,7 @@ class L7FlowTracing(Base):
             # check relationship, and remove unrelated data
             # 先标记可能存在的关联关系，在 related_flow_id_map 中通过多次迭代标记上有关联的 _id
             # 如果一个 _id 没有标记到 related_flow_id_map 中，flow 会被删掉，后续逻辑不再处理
-            related_flow_id_map = defaultdict(inner_defaultdict_set)
+            related_flow_id_map = defaultdict(inner_defaultdict_int)
             trace_infos = TraceInfo.construct_from_dataframe(
                 dataframe_flowmetas) + TraceInfo.construct_from_dataframe(
                     new_flows)
@@ -462,7 +496,7 @@ class L7FlowTracing(Base):
         max_iteration: int = config.max_iteration,
         network_delay_us: int = config.network_delay_us,
         app_spans_from_api: list = [],
-        related_map_from_api: defaultdict(inner_defaultdict_set) = None
+        related_map_from_api: defaultdict(inner_defaultdict_int) = None
     ) -> dict:
         """L7 FlowLog 追踪入口
 
@@ -604,22 +638,18 @@ class L7FlowTracing(Base):
                 dictGet(deepflow.pod_node_map, ('name'), (toUInt64(pod_node_id_1))) AS pod_node_name_1
         """
         ids = []
-        # time => [_ids]
-        # build _id IN (xxx) conditions, grouping _id base on the same seconds
-        iddict = dict()
-        for flow_id in l7_flow_ids:
-            seconds = _get_epochsecond(flow_id)
-            iddict.setdefault(seconds, []).append(str(flow_id))
+        # build _id IN (xxx) conditions
         # fix start_time from min to max extract from _id
-        min_start_time = list(iddict.keys())[-1] if len(
-            iddict.keys()) > 0 else 0
+        min_start_time = _get_epochsecond(
+            list(l7_flow_ids)[0]) if len(l7_flow_ids) > 0 else 0
         max_end_time = 0
-        for sec in iddict.keys():
-            ids.append(f"_id IN ({', '.join(iddict[sec])})")
-            if sec > max_end_time:
-                max_end_time = sec
-            if sec < min_start_time:
-                min_start_time = sec
+        for flow_id in l7_flow_ids:
+            second = _get_epochsecond(flow_id)
+            if second > max_end_time:
+                max_end_time = second
+            if second < min_start_time:
+                min_start_time = second
+            ids.append(str(flow_id))
         if min_start_time > 0:
             time_filter = f"time>={min_start_time} AND time<={max_end_time}"
         fields = []
@@ -630,16 +660,18 @@ class L7FlowTracing(Base):
                 fields.append(field)
         sql = """
         SELECT {fields} FROM `l7_flow_log` WHERE (({time_filter}) AND ({l7_flow_ids})) ORDER BY start_time_us asc
-        """.format(time_filter=time_filter,
-                   l7_flow_ids=' OR '.join(ids),
-                   fields=",".join(fields))
+        """.format(
+            time_filter=time_filter,
+            l7_flow_ids=f'_id IN ({", ".join(ids)})',
+            #    l7_flow_ids=' OR '.join(ids),
+            fields=",".join(fields))
         response = await self.query_ck(sql)
         self.status.append("Query All Flows", response)
         return response["data"]
 
 
 def set_all_relate(trace_infos: list,
-                   related_map: defaultdict(inner_defaultdict_set),
+                   related_map: defaultdict(inner_defaultdict_int),
                    network_delay_us: int,
                    fast_check: bool = False,
                    skip_first_n_trace_infos: int = 0):
@@ -857,7 +889,7 @@ class L7XrequestMeta:
     def set_relate(cls,
                    trace_info: TraceInfo,
                    related_trace_infos: set,
-                   related_map: defaultdict(inner_defaultdict_set),
+                   related_map: defaultdict(inner_defaultdict_int),
                    fast_check: bool = False) -> bool:
         """
         当请求穿越网关(可能是 ingress 或云托管 LB)，网关内部生成 x_request_id 标记同一个请求
@@ -879,15 +911,15 @@ class L7XrequestMeta:
             # 由于先发生【被请求】，再发生【转发】，所以 x_request_id_1 一定在 x_request_id_0 之上
             # x_request_id_0
             if trace_info.x_request_id_0 and trace_info.x_request_id_0 == rti.x_request_id_1:
-                related_map[trace_info._id][rti._id].add(
-                    L7_FLOW_RELATIONSHIP_X_REQUEST_ID)
+                related_map[trace_info._id][
+                    rti._id] |= L7_FLOW_RELATIONSHIP_X_REQUEST_ID
                 find_related = True
                 if fast_check: return True
                 continue
             # x_request_id_1
             if trace_info.x_request_id_1 and trace_info.x_request_id_1 == rti.x_request_id_0:
-                related_map[trace_info._id][rti._id].add(
-                    L7_FLOW_RELATIONSHIP_X_REQUEST_ID)
+                related_map[trace_info._id][
+                    rti._id] |= L7_FLOW_RELATIONSHIP_X_REQUEST_ID
                 find_related = True
                 if fast_check: return True
                 continue
@@ -967,7 +999,7 @@ class L7NetworkMeta:
     def set_relate(cls,
                    trace_info: TraceInfo,
                    related_trace_infos: set,
-                   related_map: defaultdict(inner_defaultdict_set),
+                   related_map: defaultdict(inner_defaultdict_int),
                    network_delay_us: int,
                    fast_check: bool = False) -> bool:
         """
@@ -1027,7 +1059,7 @@ class L7SyscallMeta:
     def set_relate(cls,
                    trace_info: TraceInfo,
                    related_trace_infos: set,
-                   related_map: defaultdict(inner_defaultdict_set),
+                   related_map: defaultdict(inner_defaultdict_int),
                    fast_check: bool = False) -> bool:
         """
         syscall_trace_id_x 关联关系连接同一个线程内出入请求
@@ -1063,8 +1095,8 @@ class L7SyscallMeta:
                         rti.syscall_trace_id_request,
                         rti.syscall_trace_id_response
                 ]:
-                    related_map[trace_info._id][rti._id].add(
-                        L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID)
+                    related_map[trace_info._id][
+                        rti._id] |= L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID
                     find_related = True
                     if fast_check: return True
                     continue
@@ -1074,8 +1106,8 @@ class L7SyscallMeta:
                         rti.syscall_trace_id_request,
                         rti.syscall_trace_id_response
                 ]:
-                    related_map[trace_info._id][rti._id].add(
-                        L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID)
+                    related_map[trace_info._id][
+                        rti._id] |= L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID
                     find_related = True
                     if fast_check: return True
                     continue
@@ -1089,7 +1121,7 @@ class L7AppMeta:
     def set_relate(cls,
                    trace_info: TraceInfo,
                    related_trace_infos: set,
-                   related_map: defaultdict(inner_defaultdict_set),
+                   related_map: defaultdict(inner_defaultdict_int),
                    fast_check: bool = False) -> bool:
         """
         app-span 通过 trace_id/span_id 关联 span，其中，上游的 span_id 到达下游服务后会成为下游服务发起请求的 parent_span_id
@@ -1111,16 +1143,16 @@ class L7AppMeta:
                 continue
             # span_id
             if trace_info.span_id in [rti.span_id, rti.parent_span_id]:
-                related_map[trace_info._id][rti._id].add(
-                    L7_FLOW_RELATIONSHIP_SPAN_ID)
+                related_map[trace_info._id][
+                    rti._id] |= L7_FLOW_RELATIONSHIP_SPAN_ID
                 find_related = True
                 if fast_check: return True
                 continue
             # parent_span_id
             if trace_info.parent_span_id:
                 if trace_info.parent_span_id == rti.span_id:
-                    related_map[trace_info._id][rti._id].add(
-                        L7_FLOW_RELATIONSHIP_SPAN_ID)
+                    related_map[trace_info._id][
+                        rti._id] |= L7_FLOW_RELATIONSHIP_SPAN_ID
                     find_related = True
                     if fast_check: return True
                     continue
@@ -1281,6 +1313,9 @@ class NetworkSpanSet:
                         first_serverside_index:diff_agent_index]
 
         self.spans = sorted_spans
+        # 有可能既是 root 也是 leaf
+        self.spans[0].is_net_root = True
+        self.spans[-1].is_net_leaf = True
 
 
 class SpanNode:
@@ -1291,6 +1326,10 @@ class SpanNode:
         self.parent: SpanNode = None
         self.tap_side = flow['tap_side']
         self.agent_id = flow['vtap_id']
+        self.is_ps_root = False
+        self.is_ps_leaf = False
+        self.is_net_root = False
+        self.is_net_leaf = False
 
     def __eq__(self, other: 'SpanNode') -> bool:
         return self.get_flow_index() == other.get_flow_index()
@@ -1524,8 +1563,17 @@ class ProcessSpanSet:
         sys_span.process_span_set = None
         self.spans.remove(sys_span)
 
-    def get_roots(self) -> List[SpanNode]:
-        return [span for span in self.spans if span.parent is None]
+    def mark_root_and_leaf(self):
+        has_child: Set[int] = set()
+        for span in self.spans:
+            if span.parent is None:
+                span.is_ps_root = True
+            else:
+                has_child.add(span.parent)
+
+        for span in self.spans:
+            if span not in has_child:
+                span.is_ps_leaf = True
 
     def get_leafs(self) -> List[SpanNode]:
         has_child: Set[int] = set()
@@ -1983,7 +2031,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         flow['selftime'] = flow['response_duration']
 
     # 对合并后的 flow 计算 related_flow_index_map，用于后续操作的加速
-    related_flow_index_map = defaultdict(inner_defaultdict_set)
+    related_flow_index_map = defaultdict(inner_defaultdict_int)
     trace_infos = TraceInfo.construct_from_dict_list(flows)
     set_all_relate(trace_infos, related_flow_index_map,
                    network_delay_us)  # XXX: slow function
@@ -2049,31 +2097,35 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         for pss in process_span_sets
     ]
 
-    # 准备数据，从所有 process 和 network 中获取 root 和 leaf
-    process_root_list = [pss.get_roots()
-                         for pss in process_span_list]  # list of list
-    process_roots = [item for roots in process_root_list
-                     for item in roots]  # flat list
-    process_leafs = [
-        item for i in range(len(process_span_list))
-        for item in process_span_list[i].get_leafs()
-    ]
-    # span_id => span
-    process_span_dict = {
-        span.get_span_id(): span
-        for i in range(len(process_span_list))
-        for span in process_span_list[i].spans if span.get_span_id() != ''
-        and span.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL
-    }
+    # 准备数据，从所有 process 和 network 获取 root 和 leaf
+    for pss in process_span_list:
+        pss.mark_root_and_leaf()
+
+    process_root_list: List[SpanNode] = []
+    process_leaf_list: List[SpanNode] = []
+    for pss in process_span_list:
+        for item in pss.spans:
+            if item.is_ps_root:
+                process_root_list.append(item)
+            if item.is_ps_leaf:
+                process_leaf_list.append(item)
+
     network_leafs = [network.spans[-1] for network in network_span_list]
-    network_roots = [network.spans[0] for network in network_span_list]
+    # network_roots = [network.spans[0] for network in network_span_list]
+    # request_id => network_roots
+    network_roots_with_req_id = {}
+    for network in network_span_list:
+        req_id = network.spans[0].get_request_id()
+        if req_id is not None and req_id > 0:
+            network_roots_with_req_id.setdefault(req_id,
+                                                 []).append(network.spans[0])
 
     # 将 process span set 和 network span set 互相连接
     # 注意这里按如下优先级连接:
     # 1. process <-> net, 2. net <-> process, 3. process <-> process, 4. net <-> net
-    _connect_process_and_networks(process_roots, process_leafs, network_roots,
-                                  network_leafs, process_span_dict,
-                                  flow_index_to_span)
+    _connect_process_and_networks(process_root_list, process_leaf_list,
+                                  network_roots_with_req_id, network_leafs,
+                                  flow_index_to_span, related_flow_index_map)
 
     return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map
 
@@ -2234,7 +2286,7 @@ def _union_sys_spans(
 
 def _build_network_span_set(
         united_spans: List[SpanNode],
-        related_flow_index_map: defaultdict(inner_defaultdict_set),
+        related_flow_index_map: defaultdict(inner_defaultdict_int),
         flow_index_to_span: List[SpanNode]) -> List[NetworkSpanSet]:
     networks: List[NetworkSpanSet] = []
 
@@ -2253,7 +2305,7 @@ def _build_network_span_set(
         # aggregate other spans to this network
         for _index, related_types in related_flow_index_map[flow_index].items(
         ):
-            if L7_FLOW_RELATIONSHIP_TCP_SEQ not in related_types:
+            if related_types & L7_FLOW_RELATIONSHIP_TCP_SEQ != L7_FLOW_RELATIONSHIP_TCP_SEQ:
                 continue
             if _index in flow_aggregated:
                 continue
@@ -2274,26 +2326,33 @@ def _same_span_set(lhs: SpanNode, rhs: SpanNode, spanset: str) -> bool:
         return True
 
 
-def _connect_process_and_networks(process_roots: List[SpanNode],
-                                  process_leafs: List[SpanNode],
-                                  network_roots: List[SpanNode],
-                                  network_leafs: List[SpanNode],
-                                  process_span_dict: Dict[str, SpanNode],
-                                  flow_index_to_span: List[SpanNode]):
+def _connect_process_and_networks(
+    process_roots: List[SpanNode], process_leafs: List[SpanNode],
+    network_roots_with_req_id: Dict[int, SpanNode],
+    network_leafs: List[SpanNode], flow_index_to_span: List[SpanNode],
+    related_flow_index_map: defaultdict(inner_defaultdict_int)):
     # 1. process span set 的 leaf 作为 network span set root 的 parent
     for ps_parent in process_leafs:
         # 避免子循环多次访问字典
         ps_index = ps_parent.get_flow_index()
         ps_span_id = ps_parent.get_span_id()
         ps_response_duration = ps_parent.get_response_duration()
-        for net_child in network_roots:
+        for _index, related_types in related_flow_index_map.get(ps_index,
+                                                                {}).items():
+            if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
+                continue
+            net_child: SpanNode = flow_index_to_span[_index]
+            # NOTE: 这里替代了遍历 net_root 的操作，is_net_root 在 network_span_set 排序后赋值
+            if not net_child.is_net_root:
+                continue
             if net_child.get_parent_id() >= 0:
                 continue
             # 避免同一组 span set 首尾互连
             if _same_span_set(ps_parent, net_child, 'network_span_set') \
                 or _same_span_set(ps_parent, net_child, 'process_span_set'):
                 continue
-            if net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            # net_child 只会是 net span / sys span
+            if ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 if net_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
                         net_child):
                     # 对同一个主机采集到的数据，不存在时差
@@ -2304,94 +2363,93 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                     # 由于 app span 的时长是在 sdk 中统计，如果发生子 span 异步完成，父 span 提前完成，子 span 时间可以大于父 span
                     # 所以这里判断 response_duration 忽略 OTEL signal_source
                     continue
-            if ps_index == net_child.get_flow_index():
-                # 共享一个 c-p, net_child parent == ps_parent 的 parent
-                continue
             if ps_span_id and ps_span_id == net_child.get_span_id():
                 # net_child 一定是 net-span 且没有 c-p, ps_parent 一定是 app-span，共享一个 span_id
                 net_child.set_parent(ps_parent,
                                      "net_span mounted due to same span_id")
 
     # 2. network span 的 leaf 作为 process span set root 的 parent
-    for ps_child in process_roots:
-        if ps_child.get_parent_id() >= 0:
-            continue
-        ps_index = ps_child.get_flow_index()
-        ps_child_span_id = ps_child.get_span_id()
-        ps_child_parent_span_id = ps_child.get_parent_span_id()
-        ps_child_response_duration = ps_child.get_response_duration()
-        for net_parent in network_leafs:
+    for net_parent in network_leafs:
+        net_index = net_parent.get_flow_index()
+        net_span_id = net_parent.get_span_id()
+        net_response_duration = net_parent.get_response_duration()
+        for _index, related_types in related_flow_index_map.get(net_index,
+                                                                {}).items():
+            if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
+                continue
+            ps_child: SpanNode = flow_index_to_span[_index]
+            if not ps_child.is_ps_root:
+                continue
             if ps_child.get_parent_id() >= 0:
                 continue
-            if _same_span_set(ps_child, net_parent, 'network_span_set') \
-                or _same_span_set(ps_child, net_parent, 'process_span_set'):
+            if _same_span_set(net_parent, ps_child, 'network_span_set') \
+                or _same_span_set(net_parent, ps_child, 'process_span_set'):
                 continue
-            if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            # net_parent 一定不是 OTEL source
+            if ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 if ps_child.agent_id == net_parent.agent_id and not net_parent.time_range_cover(
                         ps_child):
                     continue
-                if net_parent.get_response_duration(
-                ) and net_parent.get_response_duration(
-                ) < ps_child_response_duration:
+                if net_response_duration and net_response_duration < ps_child.get_response_duration(
+                ):
                     continue
-            if ps_index == net_parent.get_flow_index():
+            if ps_index == net_index:
                 # 共享一个 s-p，则 ps_child 的 parent == net_parent 的 parent
                 continue
-            if ps_child_span_id and ps_child_span_id == net_parent.get_span_id(
-            ) and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+            if net_span_id and ps_child.get_span_id(
+            ) == net_span_id and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 # ps_child 可能是 s-p, net_parent 可能是 s
                 # 这种情况有可能 s-p 在 `flow_field_conflict` 中匹配失败，没有放到同一个 networkspanset 里
                 # 为了避免 app_span 连接上末端 net_span 产生环路，这里限制 ps_child 不能是 app_span
                 ps_child.set_parent(
                     net_parent,
                     f"{ps_child.tap_side} mounted due to same span_id")
-            elif ps_child_parent_span_id and ps_child_parent_span_id == net_parent.get_span_id(
-            ):
+            elif net_span_id and ps_child.get_parent_span_id() == net_span_id:
                 # ps_child 一定是 app_span 且没有 s-p，net_parent 一定是 net_span 且没有 s-p，二者构成父子关系
                 # 注意这里和 [1] 的 ps_parent 匹配 net_child 不一样，因为 net_child 不会创建一个新的 span_id，span_id 一定是相等关系
-                # ps_child 如果是 app_span，它会创建一个新的 span_id，然后通过 parent_span_id 关联
+                # ps_child 如果是 app_span，[apm 规范使用时]它会创建一个新的 span_id，然后通过 parent_span_id 关联
                 ps_child.set_parent(
                     net_parent,
                     f"{ps_child.tap_side} mounted due to parent_span_id")
 
     # 3. process span set 互相连接
-    for ps_child in process_roots:
-        if ps_child.get_parent_id() >= 0:
-            continue
-        ps_child_index = ps_child.get_flow_index()
-        ps_child_span_id = ps_child.get_span_id()
-        ps_child_parent_span_id = ps_child.get_parent_span_id()
-        ps_child_response_duration = ps_child.get_response_duration()
-        for ps_parent in process_leafs:
+    for ps_parent in process_leafs:
+        ps_parent_index = ps_parent.get_flow_index()
+        ps_parent_span_id = ps_parent.get_span_id()
+        ps_parent_response_duartion = ps_parent.get_response_duration()
+        for _index, related_types in related_flow_index_map.get(
+                ps_parent_index, {}).items():
+            if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
+                continue
+            ps_child: SpanNode = flow_index_to_span[_index]
+            if not ps_child.is_ps_root:
+                continue
             if ps_child.get_parent_id() >= 0:
                 continue
-            if _same_span_set(ps_child, ps_parent, 'network_span_set') \
-                or _same_span_set(ps_child, ps_parent, 'process_span_set'):
+            if _same_span_set(ps_parent, ps_child, 'network_span_set') \
+                or _same_span_set(ps_parent, ps_child, 'process_span_set'):
                 continue
             if ps_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 if ps_child.agent_id == ps_parent.agent_id and not ps_parent.time_range_cover(
                         ps_child):
                     continue
-                if ps_parent.get_response_duration(
-                ) and ps_parent.get_response_duration(
-                ) < ps_child_response_duration:
+                if ps_parent_response_duartion and ps_parent_response_duartion < ps_child.get_response_duration(
+                ):
                     continue
-            if ps_child_index == ps_parent.get_flow_index():
-                # 共享一个 c-p，则 ps_child 的 parent == ps_parent 的 parent
-                continue
-            if ps_child_span_id and ps_child_span_id == ps_parent.get_span_id(
+            if ps_parent_span_id == ps_child.get_span_id(
             ) and ps_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 # ps_child 可能是 app_span/s-p，ps_leaf 一定是 app_span，都没有 c-p, 共享一个 span_id
+                # 这里排除 OTEL source 是因为 OTEL source 不应该在这连接，应在 parent_span_id 关系中连接
                 ps_child.set_parent(
                     ps_parent,
                     f"{ps_child.tap_side} mounted due to same span_id")
-            elif ps_child_parent_span_id and ps_child_parent_span_id == ps_parent.get_span_id(
-            ):
+            elif ps_parent_span_id and ps_child.get_parent_span_id(
+            ) == ps_parent_span_id:
                 ps_child.set_parent(
                     ps_parent,
                     f"{ps_child.tap_side} mounted due to parent_span_id")
 
-    # 4. process span set 之间，尝试连接具有同一个 span_id 的 span
+    # 4. process span set 之间，对 process_roots 尝试连接具有同一个 span_id 的 span
     for ps_child in process_roots:
         if ps_child.get_parent_id() >= 0:
             continue
@@ -2399,43 +2457,52 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
         ps_child_parent_span_id = ps_child.get_parent_span_id()
         if not ps_child_parent_span_id:
             continue
-        # 此场景 ps_parent 一定是 app_span
+        # 此场景 related_span 一定是 app_span
         # 因为 sys_span 会在[3]中作为叶子节点关联上 ps_child
         # 只有 app_span 才会有非叶子节点与下级 ps_child 有父子关系的场景
         # 这种情况下关联 ps_child.parent_span_id == ps_parent.span_id 关系
-        ps_parent = process_span_dict.get(ps_child_parent_span_id, None)
-        if ps_parent is not None:
-            if _same_span_set(ps_child, ps_parent, 'network_span_set') \
-                or _same_span_set(ps_child, ps_parent, 'process_span_set'):
+        for _index, related_types in related_flow_index_map.get(
+                ps_child_index, {}).items():
+            if ps_child.get_parent_id() >= 0:
                 continue
-            if ps_child_index == ps_parent.get_flow_index():
+            if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
                 continue
-            if not ps_parent.time_range_cover(ps_child):
+            ps_app_parent: SpanNode = flow_index_to_span[_index]
+            if ps_app_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
                 continue
-            ps_child.set_parent(
-                ps_parent,
-                f"{ps_child.tap_side} mounted due to parent_span_id")
+            if _same_span_set(ps_child, ps_app_parent, 'network_span_set') \
+                or _same_span_set(ps_child, ps_app_parent, 'process_span_set'):
+                continue
+            if not ps_app_parent.time_range_cover(ps_child):
+                continue
+            if ps_child_parent_span_id == ps_app_parent.get_span_id():
+                ps_child.set_parent(
+                    ps_app_parent,
+                    f"{ps_child.tap_side} mounted due to same span_id")
 
     # 5. network span set 互相连接
     # relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
     network_match_parent: Dict[int, int] = {}
-    for net_child in network_roots:
-        if net_child.get_parent_id() >= 0:
-            continue
-        net_child_index = net_child.get_flow_index()
-        net_child_span_id = net_child.get_span_id()
-        net_child_x_request_id_0 = net_child.get_x_request_id_0()
-        net_child_x_request_id_1 = net_child.get_x_request_id_1()
-        net_child_request_id = net_child.get_request_id()
-        net_child_l7_protocol = net_child.flow['l7_protocol']
-        net_child_response_duration = net_child.get_response_duration()
-        for net_parent in network_leafs:
+    for net_parent in network_leafs:
+        net_parent_index = net_parent.get_flow_index()
+        net_parent_span_id = net_parent.get_span_id()
+        net_parent_x_request_id_0 = net_parent.get_x_request_id_0()
+        net_parent_x_request_id_1 = net_parent.get_x_request_id_1()
+        net_parent_response_duration = net_parent.get_response_duration()
+        for _index, related_types in related_flow_index_map.get(
+                net_parent_index, {}).items():
+            if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID \
+                and related_types & L7_FLOW_RELATIONSHIP_X_REQUEST_ID != L7_FLOW_RELATIONSHIP_X_REQUEST_ID:
+                continue
+            net_child: SpanNode = flow_index_to_span[_index]
+            if not net_child.is_net_root:
+                continue
             if net_child.get_parent_id() >= 0:
                 continue
-            if _same_span_set(net_child, net_parent, 'network_span_set') \
-                or _same_span_set(net_child, net_parent, 'process_span_set'):
+            if _same_span_set(net_parent, net_child, 'network_span_set') \
+                or _same_span_set(net_parent, net_child, 'process_span_set'):
                 continue
-            if net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent.get_x_request_id_1(
+            if net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0(
             ):
                 # 网关注入 x_request_id 的场景
                 net_child.set_parent(
@@ -2448,42 +2515,53 @@ def _connect_process_and_networks(process_roots: List[SpanNode],
                 #     net_child, net_parent)
                 # process_span_list.append(fake_pss)
                 # flows.extend(fake_pss.spans)
-            elif (net_child_x_request_id_0 and net_child_x_request_id_0 == net_parent.get_x_request_id_0()) \
-                    or (net_child_x_request_id_1 and net_child_x_request_id_1 == net_parent.get_x_request_id_1()) \
-                    or (net_child_span_id and net_child_span_id == net_parent.get_span_id()):
+            elif (net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0()) \
+                or (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_1()) \
+                or (net_parent_span_id and net_parent_span_id == net_child.get_span_id()):
                 # 网关透传 x_request_id 或透传 http header 中的 span_id
                 # 要求 parent 的所有 response_duration > child 最大的 response_duration
                 # 由于 network span set 内是按 c 端 agent 在前+ start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
-                if net_parent.get_response_duration(
-                ) < net_child_response_duration:
+                if net_parent_response_duration < net_child.get_response_duration(
+                ):
                     continue
                 else:
                     # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
-                    if net_child_index not in network_match_parent:
-                        network_match_parent[
-                            net_child_index] = net_parent.get_flow_index()
+                    if _index not in network_match_parent:
+                        network_match_parent[_index] = net_parent_index
                     else:
                         # 根据 `时延最接近` 原则找 parent
                         # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
                         # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
-                        if flow_index_to_span[network_match_parent[net_child_index]].get_response_duration() \
-                            > net_parent.get_response_duration():
-                            network_match_parent[
-                                net_child_index] = net_parent.get_flow_index()
+                        if flow_index_to_span[network_match_parent[_index]].get_response_duration() \
+                            > net_parent_index:
+                            network_match_parent[_index] = net_parent_index
+        # end of L7_FLOW_RELATIONSHIP_SPAN_ID and L7_FLOW_RELATION_SHIP_X_REQUEST_ID match
 
-            elif net_child_request_id and net_child_request_id == net_parent.get_request_id() \
-                and net_child_l7_protocol in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC] \
-                    and net_child_l7_protocol == net_parent.flow['l7_protocol'] \
-                        and net_child_response_duration <= net_parent.get_response_duration():
-                # grpc protocol: request_id get from `stream_id`, means different network_span_set share same stream, it should be connected
-                # but other protocol may re-use request_id, so only support grpc now
-                # net_child.response_duration <= net_parent.response_duration for case both duration is 0
-                # grpc 的 request_id 来源于 `stream_id`, 意味着不同的 network_span_set 在同一个 stream 里，应被连接
-                # 但其他协议的 request_id 有可能短时内被多次重用，容易误连接，比如 MySQL 的 StatementID，所以目前仅支持 grpc
-                # net_child.response_duration <= net_parent.response_duration 用于双方时延为0 的情况
-                # ref: https://www.deepflow.io/docs/zh/features/l7-protocols/http/#http2
-                net_child.set_parent(
-                    net_parent, "net_span mounted due to grpc request_id")
+        net_parent_request_id = net_parent.get_request_id()
+        net_parent_l7_protocol = net_parent.flow['l7_protocol']
+        # XXX: grpc stream here mostly only got 0 response_duration, which makes it difficult to understand in flame graph
+        # grpc protocol: request_id get from `stream_id`, means different network_span_set share same stream, it should be connected
+        # but other protocol may re-use request_id, so only support grpc now
+        # net_child.response_duration <= net_parent.response_duration for case both duration is 0
+        # grpc 的 request_id 来源于 `stream_id`, 意味着不同的 network_span_set 在同一个 stream 里，应被连接
+        # 但其他协议的 request_id 有可能短时内被多次重用，容易误连接，比如 MySQL 的 StatementID，所以目前仅支持 grpc
+        # net_child.response_duration <= net_parent.response_duration 用于双方时延为0 的情况
+        # ref: https://www.deepflow.io/docs/zh/features/l7-protocols/http/#http2
+        if net_parent_request_id:
+            for net_child in network_roots_with_req_id.get(
+                    net_parent_request_id, []):
+                if net_parent_index == net_child.get_flow_index():
+                    continue
+                if net_child.get_parent_id() >= 0:
+                    continue
+                if _same_span_set(net_parent, net_child, 'network_span_set') \
+                    or _same_span_set(net_parent, net_child, 'process_span_set'):
+                    continue
+                if net_parent_l7_protocol in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC] \
+                    and net_parent_l7_protocol == net_child.flow['l7_protocol'] \
+                        and net_child.get_response_duration() <= net_parent_response_duration:
+                    net_child.set_parent(
+                        net_parent, "net_span mounted due to grpc request_id")
 
     for child, parent in network_match_parent.items():
         # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
@@ -2659,7 +2737,7 @@ def pruning_trace(response, _id, network_delay_us):
 
 def calculate_related_ids(
     response, flow_index_to_id0: list, pruning_uid_index_map: dict,
-    related_flow_index_map: defaultdict(inner_defaultdict_set)):
+    related_flow_index_map: defaultdict(inner_defaultdict_int)):
     """
     计算 flow 的 related_ids 字段。
     当 related_ids 很多时，构造这些字符串非常耗时，因此这一步放在 pruning_trace 之后进行。
@@ -2680,7 +2758,7 @@ def calculate_related_ids(
                 continue
             _id = flow_index_to_id0[_index]
             flow['related_ids'].append(
-                f"{_index}-{','.join(related_types)}-{_id}")
+                f"{_index}-{L7_FLOW_RELATIONSHIP_MAP[related_types]}-{_id}")
 
 
 def merge_service(services: List[ProcessSpanSet], traces: list,
@@ -2759,7 +2837,7 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
 def format_final_result(
     services: List[ProcessSpanSet], networks: List[NetworkSpanSet], _id,
     network_delay_us: int, flow_index_to_id0: list,
-    related_flow_index_map: defaultdict(inner_defaultdict_set)):
+    related_flow_index_map: defaultdict(inner_defaultdict_int)):
     """
     格式化返回结果
     """
