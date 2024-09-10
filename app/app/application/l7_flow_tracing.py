@@ -282,6 +282,12 @@ class L7FlowTracing(Base):
                 if trace_id:
                     allowed_trace_ids.add(trace_id)
                     new_trace_ids_in_prev_iteration.add(trace_id)
+                
+        # max_iterations set to 0 means only query data with trace_id
+        only_query_trace_id = False
+        if max_iteration == 0:
+            max_iteration = 1
+            only_query_trace_id = True
 
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
@@ -357,6 +363,8 @@ class L7FlowTracing(Base):
                 pass
 
             if only_query_app_spans:  # no more iterations needed
+                break
+            if only_query_trace_id:  # no more iterations needed
                 break
 
             # 2. Query by tcp_seq / syscall_trace_id / x_request_id
