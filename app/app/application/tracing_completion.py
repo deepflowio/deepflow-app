@@ -3,7 +3,7 @@ from log import logger
 
 from .l7_flow_tracing import (L7_FLOW_RELATIONSHIP_SPAN_ID)
 from .l7_flow_tracing import (L7FlowTracing)
-from common.utils import inner_defaultdict_set
+from common.utils import inner_defaultdict_int
 
 log = logger.getLogger(__name__)
 
@@ -42,13 +42,12 @@ class TracingCompletion(L7FlowTracing):
                 break
         self.args._id = app_span_id  # set app_span_id as args, make it never been pruning
         # build related_map inside app_spans
-        related_map_from_api = defaultdict(inner_defaultdict_set)
+        related_map_from_api = defaultdict(inner_defaultdict_int)
         for i in range(len(self.app_spans)):
             for j in range(len(self.app_spans)):
                 if i == j:
                     continue
-                related_map_from_api[self.app_spans[i]['_id']][
-                    self.app_spans[j]['_id']].add(L7_FLOW_RELATIONSHIP_SPAN_ID)
+                related_map_from_api[self.app_spans[i]['_id']][self.app_spans[j]['_id']] |= L7_FLOW_RELATIONSHIP_SPAN_ID
         rst = await self.trace_l7_flow(
             time_filter,
             base_filter,

@@ -139,3 +139,6 @@ def app_exception(function):
 
 def inner_defaultdict_set():
     return defaultdict(set)
+
+def inner_defaultdict_int():
+    return defaultdict(int)
