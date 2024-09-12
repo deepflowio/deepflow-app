@@ -1028,24 +1028,24 @@ class L7NetworkMeta:
                            rti.end_time_us) <= network_delay_us:
                     if trace_info.req_tcp_seq == rti.req_tcp_seq and trace_info.resp_tcp_seq == rti.resp_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            related_map[trace_info._id][
+                                rti._id] |= L7_FLOW_RELATIONSHIP_TCP_SEQ
                             find_related = True
             elif trace_info.type != L7_FLOW_TYPE_RESPONSE and rti.type != L7_FLOW_TYPE_RESPONSE:  # req
                 if abs(trace_info.start_time_us -
                        rti.start_time_us) <= network_delay_us:
                     if trace_info.req_tcp_seq == rti.req_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            related_map[trace_info._id][
+                                rti._id] |= L7_FLOW_RELATIONSHIP_TCP_SEQ
                             find_related = True
             elif trace_info.type != L7_FLOW_TYPE_REQUEST and rti.type != L7_FLOW_TYPE_REQUEST:  # resp
                 if abs(trace_info.end_time_us -
                        rti.end_time_us) <= network_delay_us:
                     if trace_info.resp_tcp_seq == rti.resp_tcp_seq:
                         if not cls.flow_field_conflict(trace_info, rti):
-                            related_map[trace_info._id][rti._id].add(
-                                L7_FLOW_RELATIONSHIP_TCP_SEQ)
+                            related_map[trace_info._id][
+                                rti._id] |= L7_FLOW_RELATIONSHIP_TCP_SEQ
                             find_related = True
             if fast_check and find_related: return
             # XXX: vtap_id 相同时应该能有更好的判断，例如 duration 大的 Span 时间范围必须覆盖 duration 小的 Span
