@@ -2491,7 +2491,7 @@ def _same_span_set(lhs: SpanNode, rhs: SpanNode, spanset: str) -> bool:
 
 def _connect_process_and_networks(
         process_roots: List[SpanNode], process_leafs: List[SpanNode],
-        network_roots_with_req_id: dict[int, SpanNode],
+        network_roots_with_req_id: Dict[int, SpanNode],
         network_leafs: List[SpanNode], flow_index_to_span: List[SpanNode],
         related_flow_index_map: defaultdict(inner_defaultdict_int),
         host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]):
