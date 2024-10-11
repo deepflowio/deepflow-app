@@ -1,5 +1,5 @@
 # 构建层
-FROM python:3.12.5-slim-bookworm AS builder
+FROM python:3.8-slim-bookworm AS builder
 
 RUN apt-get update && \
     apt-get upgrade -y && \
