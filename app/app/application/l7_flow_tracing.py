@@ -282,7 +282,7 @@ class L7FlowTracing(Base):
                 if trace_id:
                     allowed_trace_ids.add(trace_id)
                     new_trace_ids_in_prev_iteration.add(trace_id)
-                
+
         # max_iterations set to 0 means only query data with trace_id
         only_query_trace_id = False
         if max_iteration == 0:
@@ -2014,10 +2014,16 @@ def merge_flow(flows: list, flow: dict) -> bool:
     DNS sys span 的特殊场景：
     一次 DNS 请求会触发多次 DNS 应答的系统调用，因此这个 DNS 请求需要和后续多个 DNS 响应合并到一起。
     合并条件为：请求的 cap_seq_0 或会话的 cap_seq_1 == 响应的cap_seq_1 - 1
+
+    grpc frame 合并场景：
+    grpc stream 模式会在请求或响应时同步触发单向 frame 调用，request_type=_REQUEST_DATA/_RESPONSE_HEADER/_RESPONSE_DATA
+    由于 frame 是单向的，无法计算时延，因此将它合并到同观测点、同一个 stream_id 的 Span 里
     """
     # flows 是按照时间顺序从小到大插入的，因此合并过程中只可能出现 RESPONSE 合并到 REQUEST 或 SESSION 中的情况，
     # 而且其中 RESPONSE 合并到 SESSION 的情况只出现在 is_dns_sys_span 的场景。
-    if flow['type'] != L7_FLOW_TYPE_RESPONSE:
+    if flow['type'] != L7_FLOW_TYPE_RESPONSE and flow['l7_protocol'] not in [
+            L7_PROTOCOL_GRPC, L7_PROTOCOL_HTTP2
+    ]:
         return False
 
     # for special case: DNS sys span
@@ -2025,16 +2031,23 @@ def merge_flow(flows: list, flow: dict) -> bool:
         TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
     ]
     is_dns_sys_span = flow['l7_protocol'] == L7_PROTOCOL_DNS and is_sys_span
+    # 这里仅要求 frame 合并到会话中，只过滤 duration=0
+    is_grpc_frame_span = flow['l7_protocol'] in [
+        L7_PROTOCOL_GRPC, L7_PROTOCOL_HTTP2
+    ] and flow['response_duration'] == 0
 
     # 当存在 request_id 时，一般意味着同一个 L4 Flow 中的请求是并发的（不会等待响应返回就发下一个请求）
     # 但有一个特殊是 MySQL，参考：https://deepflow.io/docs/zh/features/universal-map/l7-protocols/#mysql
     need_compare_request_id = flow['request_id'] and flow[
         'l7_protocol'] != L7_PROTOCOL_MYSQL
 
+    # 对 is_dns_sys_span 和 is_grpc_frame_span，允许合并到非 Request 中
+    allow_merge_type = is_dns_sys_span or is_grpc_frame_span
+
     for i in range(len(flows) - 1, -1, -1):
-        if not is_dns_sys_span:  # 仅需要合并至 REQUEST
-            if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
-                continue
+        if flows[i][
+                'type'] != L7_FLOW_TYPE_REQUEST and not allow_merge_type:  # 不满足条件的仅需要合并至 REQUEST
+            continue
 
         # 通过 vtap_id + flow_id + request_id 匹配到同一个 Request
         # vtap_id + flow_id：唯一确定一条 L4 Flow
@@ -2047,14 +2060,17 @@ def merge_flow(flows: list, flow: dict) -> bool:
         if important_field_not_match:
             continue
 
-        if flows[i]['l7_protocol'] != flow['l7_protocol']:
+        if flows[i]['l7_protocol'] != flow[
+                'l7_protocol'] and not is_grpc_frame_span:
             # 一个 L4 Flow 中的前序 flow 是异种协议时，暂不考虑合并，避免误匹配
+            # 目前允许 gRPC/HTTP2 frame 合并
             # 可能出现多种协议的情况：HTTP2 和 gRPC、TLS 和应用协议、Service Mesh Sidecar 所有流量
             return False
 
         if need_compare_request_id:
             # request_id 匹配成功即可合并，下面主要排除一些（不可能发生）的异常场景
-            if not is_dns_sys_span and flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+            if flows[i][
+                    'type'] != L7_FLOW_TYPE_REQUEST and not allow_merge_type:
                 # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
                 return False
         else:
@@ -2085,11 +2101,14 @@ def merge_flow(flows: list, flow: dict) -> bool:
                 flows[i][key].extend(flow[key])
             elif not flows[i].get(key):  # attention: L7_FLOW_TYPE_REQUEST = 0
                 flows[i][key] = flow[key]
-        flows[i]['end_time_us'] = flow['end_time_us']
-        flows[i]['response_duration'] = flows[i]['end_time_us'] - flows[i][
-            'start_time_us']
-        flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
-        flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
+        if flows[i]['end_time_us'] < flow['end_time_us']:
+            flows[i]['end_time_us'] = flow['end_time_us']
+            flows[i]['response_duration'] = flows[i]['end_time_us'] - flows[i][
+                'start_time_us']
+        # 对 grpc_frame_span，更新 resp_tcp_seq 和 cap_seq_1 会破坏原来的流信息，这里只做 _id 与 end_time 合并即可
+        if not is_grpc_frame_span:
+            flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+            flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
         return True
 
     return False
