@@ -3437,7 +3437,9 @@ class HostClockCorrector:
                         correction_value = 0
                     host_clock_correction_dict[child] = correction_value
                 for sub in self.host_relations.get(child, set()):
-                    stack.append((sub, correction_value))
+                    # XXX: 暂时只修正一次，避免 host 成环无法 escape loop
+                    if sub not in host_clock_correction_dict.keys():
+                        stack.append((sub, correction_value))
 
         # remove 0 value
         non_zero_host_clock_correction = dict()
