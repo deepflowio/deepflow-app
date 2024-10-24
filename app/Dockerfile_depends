@@ -1,7 +1,7 @@
 # 构建层
 FROM alpine:3.20.3 AS builder
 
-COPY./python /usr/bin/python
+COPY ./python /usr/bin/python
 RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
     /usr/bin/python get-pip.py
 
