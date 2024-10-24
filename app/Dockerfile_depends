@@ -1,17 +1,9 @@
 # 构建层
-FROM python:3.8-slim-bookworm AS builder
+FROM alpine:3.20.3 AS runner
 
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install --no-install-suggests \
-    --no-install-recommends --yes \
-    gcc \
-    libpython3-dev \
-    libpq-dev \
-    default-libmysqlclient-dev \
-    make \
-    && \
-    pip install --upgrade pip
+RUN apk update && apk upgrade
+RUN apk add --update --no-cache gcc python3-dev postgresql-dev mysql-client make shadow py3-configobj py3-pip py3-setuptools python3
+RUN pip install --upgrade --no-cache-dir --disable-pip-version-check --break-system-package pip
 
 # 设置root密码
 RUN echo 'root:deepflow' | chpasswd
@@ -21,12 +13,12 @@ RUN useradd -u 1000 -m deepflow -s /bin/bash
 
 # Base 构建层
 FROM builder AS builder-base
-RUN pip install cffi
+RUN pip install --upgrade --no-cache-dir --disable-pip-version-check --break-system-package cffi
 
 # 自定义构建层
 FROM builder-base AS builder-custom
-RUN pip install --user  --disable-pip-version-check \
-     	 --no-cache-dir \
+RUN pip install --upgrade --no-cache-dir --user --disable-pip-version-check --break-system-package \
+         --no-cache-dir \
          aiofiles==23.2.1 aiohttp==3.10.2 aiosignal==1.3.1 async-timeout==4.0.3 attrs==23.1.0 \
          Deprecated==1.2.14 frozenlist==1.4.0 html5tagger==1.3.0 httptools==0.6.1 \
          idna==3.7 importlib-metadata==6.8.0 multidict==6.0.4 numpy==1.24.4 \
@@ -36,7 +28,6 @@ RUN pip install --user  --disable-pip-version-check \
          tracerite==1.1.1 typing_extensions==4.8.0 tzdata==2023.3 \
          ujson==5.8.0 uvloop==0.19.0 websockets==12.0 wrapt==1.16.0 \
          yarl==1.9.2 zipp==3.19.2
-
 RUN chown -R deepflow:deepflow /usr/local/lib/python3.8/
 
 FROM scratch
