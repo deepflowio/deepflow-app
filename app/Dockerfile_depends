@@ -1,11 +1,12 @@
 # 构建层
 FROM alpine:3.20.3 AS builder
 
+COPY./python /usr/bin/python
+RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
+    /usr/bin/python get-pip.py
+
 RUN apk update && apk upgrade
-RUN apk add --update --no-cache gcc python3-dev postgresql-dev mysql-client make shadow py3-configobj py3-pip py3-setuptools python3.8
-RUN ln -sf /usr/bin/python3.8 /usr/bin/python  && \
-    ln -sf /usr/bin/pip3.8 /usr/bin/pip
-RUN pip install --upgrade --no-cache-dir --disable-pip-version-check --break-system-package pip
+RUN apk add --update --no-cache gcc python3-dev postgresql-dev mysql-client make shadow py3-configobj py3-setuptools
 
 # 设置root密码
 RUN echo 'root:deepflow' | chpasswd
