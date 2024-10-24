@@ -6,6 +6,7 @@ RUN apk update && apk upgrade
 RUN apk add --update --no-cache curl jq shadow py3-configobj py3-setuptools python3-dev
 COPY ./python /usr/bin/python
 RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
+    chmod 777 /usr/bin/python  && \
     /usr/bin/python get-pip.py
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir --break-system-packages setuptools
 RUN --mount=target=/tmp-mount \
