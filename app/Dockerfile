@@ -2,9 +2,12 @@ FROM alpine:3.20.3 AS runner
 
 ARG TARGETARCH
 
+COPY ./python /usr/bin/python
+RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
+    /usr/bin/python get-pip.py
 RUN apk update && apk upgrade
-RUN apk add --update --no-cache curl jq shadow py3-configobj py3-pip py3-setuptools python3 python3-dev
-RUN pip install --upgrade --disable-pip-version-check --no-cache-dir --break-system-packages pip setuptools
+RUN apk add --update --no-cache curl jq shadow py3-configobj py3-setuptools python3-dev
+RUN pip install --upgrade --disable-pip-version-check --no-cache-dir --break-system-packages setuptools
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local  && \
     mkdir -p /etc/deepflow/  && \
