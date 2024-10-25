@@ -13,16 +13,12 @@ RUN ln -s /usr/local/bin/python3 /usr/local/bin/python
 RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
     python get-pip.py
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir --break-system-packages setuptools
-#RUN useradd -u 1000 -m deepflow -s /bin/bash
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local  && \
     mkdir -p /etc/deepflow/  && \
     cp -a /tmp-mount/app.yaml /etc/deepflow/  && \
     cp -a /tmp-mount/app /  && \
     chmod -R 755 /app  && \
-    chmod -R 755 /etc/deepflow/  && \
-    chown -R deepflow:deepflow /usr/local/lib/python3.8/
-#RUN echo 'root:deepflow' | chpasswd
-#USER deepflow
+    chmod -R 755 /etc/deepflow/
 
 CMD python3 -u /app/app.py
