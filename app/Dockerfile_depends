@@ -12,12 +12,6 @@ RUN ln -s /usr/local/bin/python3 /usr/local/bin/python
 RUN curl -s https://bootstrap.pypa.io/get-pip.py -o /get-pip.py  && \
     python get-pip.py
 
-# 设置root密码
-RUN echo 'root:deepflow' | chpasswd
-
-# 创建用户 deepflow，ID 为 1000
-RUN useradd -u 1000 -m deepflow -s /bin/bash
-
 # Base 构建层
 FROM builder AS builder-base
 RUN pip install --upgrade --no-cache-dir --disable-pip-version-check --break-system-package cffi
