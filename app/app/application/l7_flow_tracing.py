@@ -1725,8 +1725,8 @@ class ProcessSpanSet:
 
         # 构建一个并查集，将 spans 按 root 划分成多个子树
         disjoint_set = DisjointSet()
-        # 避免 parent_index out of range
-        disjoint_set.disjoint_set = [-1] * max_flow_index
+        # 这里会跳索引，不是连续顺序，避免 index out of range，预分配大小
+        disjoint_set.disjoint_set = [-1] * (max_flow_index + 1)
         for i in range(len(self.spans)):
             parent_span_index = flow_index_to_span_index.get(
                 self.spans[i].get_parent_id(), -1)
@@ -2336,7 +2336,7 @@ def _union_sys_spans(
 
     # 对 client_sys_spans 按 syscall_trace_id 划分为一个个集合
     cp_disjoint_set = DisjointSet()
-    cp_disjoint_set.disjoint_set = [-1] * len(client_sys_spans)
+    cp_disjoint_set.disjoint_set = [-1] * (len(client_sys_spans) + 1)
     for i in range(len(client_sys_spans)):
         span = client_sys_spans[i]
         if span.get_syscall_trace_id_response() > 0:
