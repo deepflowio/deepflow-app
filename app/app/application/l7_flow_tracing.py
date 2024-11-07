@@ -1285,11 +1285,10 @@ class NetworkSpanSet:
             else:
                 sorted_spans[i].flow['agent_rank'] = 1
 
-        sorted_spans = sorted(sorted_spans,
-                              key=lambda x:
-                              (x.flow['agent_rank'], x.flow['vtap_id'], -x.
-                               flow['response_duration'], x.flow[
-                                   'start_time_us'], -x.flow['end_time_us']))
+        sorted_spans = sorted(
+            sorted_spans,
+            key=lambda x: (x.flow['agent_rank'], -x.flow['response_duration'],
+                           x.flow['start_time_us'], -x.flow['end_time_us']))
 
         # 当 ingress_agent=egress_agent 时
         # 如果中间穿过了其他节点数据，需要将所有 server-side span 排序到末尾
