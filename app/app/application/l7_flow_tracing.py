@@ -81,8 +81,6 @@ L7_FLOW_RELATIONSHIP_MAP = {
 }
 
 CAPTURE_CLOUD_NETWORK_TYPE = 3
-IP_AUTO_SERVICE = 255
-INTERNET_IP_AUTO_SERVICE = 0
 
 RETURN_FIELDS = list(
     set([
@@ -1508,6 +1506,7 @@ class SysSpanNode(SpanNode):
         self.signal_source = L7_FLOW_SIGNAL_SOURCE_EBPF
         self.process_span_set: ProcessSpanSet = None
         self.network_span_set: NetworkSpanSet = None
+        self.process_id = _get_process_id(self)
 
     def process_matched(self, other_sys_span: SpanNode) -> bool:
         if self.agent_id != other_sys_span.agent_id:
@@ -1605,7 +1604,8 @@ class ProcessSpanSet:
                 # 资源匹配后，同一 IP 会被矫正为匹配后的资源(i.e.: 云服务器/Service Cluster IP)
                 # 对此类情况，尝试更新 self.auto_service 信息，直到 auto_service_type 不再被识别为 IP/Internet IP
                 if self.auto_service_type in [
-                        IP_AUTO_SERVICE, INTERNET_IP_AUTO_SERVICE
+                        const.AUTO_SERVICE_IP,
+                        const.AUTO_SERVICE_INTERNET_IP,
                 ]:
                     setattr(self, key, span.flow[direction_key])
                 span.flow[key] = getattr(self, key)
@@ -2417,37 +2417,46 @@ def _union_sys_spans(
     # 按 s-p/c-p 的顺序执行关联，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
 
     # 标记同一进程的 process 数量，同一个 process_span_set 内只允许存在最多一个 s-p
-    # auto_instance => same auto_instance span_set count
-    same_process_sp: Dict[str, int] = dict.fromkeys(process_span_map.keys(), 1)
+    # sys span 使用 agent_id + process_id 标识唯一进程
+    # agent_id + process_id => same process span set
+    same_process_sp: Dict[int, int] = defaultdict(int)
     for span in server_sys_spans:
         if span.process_span_set is not None:
             continue
         auto_instance = span.auto_instance
+        uniq_process_id = span.agent_id << 32 | span.process_id
+        # 可能同一进程被标识为不同的 auto_instance(i.e. 进程内转发，ip 标识为 127.0.0.1)，构建一个映射关系以查找正确的进程关系
+        if uniq_process_id not in same_process_sp:
+            same_process_sp[uniq_process_id] = auto_instance
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
             sp_span_pss.mounted_callback = host_clock_correct_callback
             sp_span_pss.append_sys_span(span)
             process_span_map[auto_instance] = [sp_span_pss]
-            same_process_sp[auto_instance] = 1
         else:
             # s-p 在每个 ProcessSpanSet 中如果大于1个，说明这个进程被穿越多次，需要单独构建一个 ProcessSpanSet
-            index = same_process_sp[auto_instance] + 1
+            index = len(
+                process_span_map.get(same_process_sp.get(uniq_process_id, -1),
+                                     [])) + 1
             sp_span_pss = ProcessSpanSet(f'{auto_instance}-{index}')
             sp_span_pss.mounted_callback = host_clock_correct_callback
             sp_span_pss.append_sys_span(span)
             process_span_map[auto_instance].append(sp_span_pss)
-            same_process_sp[auto_instance] = index
 
     # 这里可以认为所有 s-p 已经构建了 ProcessSpanSet
     for i in range(len(client_sys_spans)):
         span = client_sys_spans[i]
         if span.process_span_set is not None:
             continue
-        auto_instance = span.auto_instance
+        uniq_process_id = span.agent_id << 32 | span.process_id
         # 最终需要上挂的目标 s-p
         target_sp = None
         target_mounted_info = ""
-        for sp_process_span_set in process_span_map.get(auto_instance, []):
+        # 优先级：process_id > auto_instance
+        target_sp_list = process_span_map.get(
+            same_process_sp.get(uniq_process_id, -1),
+            process_span_map.get(span.auto_instance, []))
+        for sp_process_span_set in target_sp_list:
             # 检查 c-p 是否在同一进程的 s-p 覆盖范围内，若不在，它应是独立的 ProcessSpanSet
             matched_sp, mounted_info = sp_process_span_set.try_attach_client_sys_span_via_sys_span(
                 span)
@@ -2481,26 +2490,31 @@ def _union_sys_spans(
         if span.process_span_set is not None:
             continue
         auto_instance = span.auto_instance
-        # 如果找不到 auto_instance，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
-        # process_span_set 允许存在多个 c-p，但这些 c-p 如果没有关联关系，需要划分为多个 Process Span Set
+        uniq_process_id = span.agent_id << 32 | span.process_id
+        # Process Span Set 允许存在多个 c-p，但这些 c-p 如果没有关联关系，需要划分为多个 Process Span Set
         group_key = ''
         auto_instance_index = 0
-        if auto_instance not in process_span_map:
+        if uniq_process_id not in same_process_sp and auto_instance not in process_span_map:
+            # 如果找不到 auto_instance，说明没有 s-p，c-p 应作为独立的 ProcessSpanSet
             auto_instance_index = 1
             group_key = auto_instance
+            same_process_sp[uniq_process_id] = auto_instance
         else:
             # 如果找到了 auto_instance，但第一轮匹配中没有匹配上任何一个 s-p
             # 此时可能包含两种情况：
             # 1. c-p 无关联关系，或有关系但不在同一个进程的 s-p 时间范围内
             # 2. c-p 同进程的 ProcessSpanSet 内无 s-p
-            # 这两种情况都作为一个独立的 ProcessSpanSet
-            auto_instance_index = same_process_sp[auto_instance] + 1
+            # xxx: 对情况 2，可以考虑构建一个 pseudo s-p 将所有 c-p 挂接为子
+            # 目前这两种情况都作为一个独立的 ProcessSpanSet
+            auto_instance_index = len(
+                process_span_map.get(same_process_sp.get(uniq_process_id, -1),
+                                     process_span_map.get(auto_instance,
+                                                          []))) + 1
             group_key = f'{auto_instance}-{auto_instance_index}'
         cp_span_pss = ProcessSpanSet(group_key)
         cp_span_pss.mounted_callback = host_clock_correct_callback
         cp_span_pss.append_sys_span(span)
         process_span_map.setdefault(auto_instance, []).append(cp_span_pss)
-        same_process_sp[auto_instance] = auto_instance_index
     # end of client_sys_span match
     return process_span_map
 
@@ -3289,6 +3303,7 @@ def _get_flow_dict(flow: DataFrame):
         flow_dict["ip"] = flow.get("ip")
         flow_dict["auto_service"] = flow.get("auto_service")
         flow_dict["auto_service_id"] = flow.get("auto_service_id")
+        flow_dict["auto_service_type"] = flow.get("auto_service_type")
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
