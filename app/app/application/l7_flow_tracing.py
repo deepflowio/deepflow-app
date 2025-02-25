@@ -1561,6 +1561,7 @@ class ProcessSpanSet:
         self.auto_service_id = None  # 在结果集中作为 service_uid，i.e. 111
         self.ip = None  # service_uname 的第二优先级
         self.auto_service_type = None
+        self.auto_instance_type = None
         # 当只有 app_span 数据时，避免被剪枝，记录 app_service
         self.app_service = None
         self.mounted_callback: Callable[[SpanNode, SpanNode], None] = None
@@ -1593,6 +1594,7 @@ class ProcessSpanSet:
                 'auto_service_id',
                 'auto_service',
                 'auto_service_type',
+                'auto_instance_type',
         ]:
             direction_key = f'{key}_{direction}'
             if span.tap_side == TAP_SIDE_APP and not span.flow[direction_key]:
@@ -1606,6 +1608,8 @@ class ProcessSpanSet:
                 if self.auto_service_type in [
                         const.AUTO_SERVICE_IP,
                         const.AUTO_SERVICE_INTERNET_IP,
+                ] or self.auto_instance_type in [
+                        const.AUTO_INSTANCE_IP, const.AUTO_INSTANCE_INTERNET_IP
                 ]:
                     setattr(self, key, span.flow[direction_key])
                 span.flow[key] = getattr(self, key)
@@ -3024,6 +3028,7 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     metrics_map = {}
     services_from_process_span_set = set()
     services_from_pruning_traces = set()
+    service_to_subprocess = {}
     # 先获取剪枝后的所有 auto_service + app_service
     for res in traces:
         # res: dict after _get_flow_dict()
@@ -3039,6 +3044,10 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
         if (service.auto_service_id, service.auto_service) in services_from_pruning_traces \
             or service.app_service in services_from_pruning_traces:
             services_from_process_span_set.add(service)
+            if service.process_id:
+                service_to_subprocess.setdefault(
+                    (service.auto_service_id, service.app_service), set()).add(
+                        (service.process_id, service.process_kname))
         else:
             log.warning(
                 f"service: {service.app_service}/{service.auto_service} dropped"
@@ -3046,8 +3055,9 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
 
     # 前两者取交集，对剩下的 `auto_service` 做统计
     for service in services_from_process_span_set:
-        service_uid = ""
-        service_uname = ""
+        service_uid, service_uname = "", ""
+        process_id = service.process_id
+        process_kname = service.process_kname
         if service.auto_service_id:
             service_uid = f"{service.auto_service_id}-"
             service_uname = service.auto_service if service.auto_service else service.ip
@@ -3063,6 +3073,16 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             log.warning(
                 f"service has no auto_service_id or app_service, group_index: {service.group_key}, subnet: {service.subnet}, process: {service.process_id}"
             )
+
+        # 只对这几种类型按 process 划分进程，否则直接聚合为同一个服务
+        if len(
+                service_to_subprocess.get(
+                    (service.auto_service_id, service.app_service))
+        ) > 1 and service.auto_instance_type in (const.AUTO_INSTANCE_CHOST,
+                                                 const.AUTO_INSTANCE_POD_NODE,
+                                                 const.AUTO_INSTANCE_POD):
+            service_uid = f'{service_uid}{process_id}-{process_kname}'
+            service_uname = f'{service_uname}:{process_kname}'
 
         if service_uid not in metrics_map:
             metrics_map[service_uid] = {
@@ -3303,7 +3323,7 @@ def _get_flow_dict(flow: DataFrame):
         flow_dict["ip"] = flow.get("ip")
         flow_dict["auto_service"] = flow.get("auto_service")
         flow_dict["auto_service_id"] = flow.get("auto_service_id")
-        flow_dict["auto_service_type"] = flow.get("auto_service_type")
+        flow_dict["auto_instance_type"] = flow.get("auto_instance_type")
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
