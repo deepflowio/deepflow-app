@@ -3077,10 +3077,10 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
         # 只对这几种类型按 process 划分进程，否则直接聚合为同一个服务
         if len(
                 service_to_subprocess.get(
-                    (service.auto_service_id, service.app_service))
-        ) > 1 and service.auto_instance_type in (const.AUTO_INSTANCE_CHOST,
-                                                 const.AUTO_INSTANCE_POD_NODE,
-                                                 const.AUTO_INSTANCE_POD):
+                    (service.auto_service_id, service.app_service),
+                    set())) > 1 and service.auto_instance_type in (
+                        const.AUTO_INSTANCE_CHOST,
+                        const.AUTO_INSTANCE_POD_NODE, const.AUTO_INSTANCE_POD):
             service_uid = f'{service_uid}{process_id}-{process_kname}'
             service_uname = f'{service_uname}:{process_kname}'
 
