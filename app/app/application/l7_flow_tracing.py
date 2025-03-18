@@ -3311,6 +3311,9 @@ def _get_flow_dict(flow: DataFrame):
         "auto_instance":
         flow["auto_instance_0"] if flow["tap_side"].startswith('c')
         and flow["tap_side"] != "app" else flow["auto_instance_1"],
+        "auto_instance_type":
+        flow["auto_instance_type_0"] if flow["tap_side"].startswith('c')
+        and flow["tap_side"] != "app" else flow["auto_instance_type_1"],
         "tap_id":
         flow.get("tap_id", None),
         "tap":
@@ -3323,7 +3326,6 @@ def _get_flow_dict(flow: DataFrame):
         flow_dict["ip"] = flow.get("ip")
         flow_dict["auto_service"] = flow.get("auto_service")
         flow_dict["auto_service_id"] = flow.get("auto_service_id")
-        flow_dict["auto_instance_type"] = flow.get("auto_instance_type")
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
