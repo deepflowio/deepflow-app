@@ -1793,6 +1793,8 @@ class ProcessSpanSet:
             return self._attach_server_sys_span(sys_span)
         elif sys_span.tap_side == TAP_SIDE_CLIENT_PROCESS:
             return self._attach_client_sys_span(sys_span)
+        else:
+            return False
 
     def _attach_server_sys_span(self, sys_span: SysSpanNode) -> bool:
         # connection priority: span_id > syscall_trace_id > x_request_id
@@ -2035,11 +2037,13 @@ def _get_auto_instance(span: SpanNode) -> str:
         return ""
 
 
-def _get_process_id(span: SpanNode) -> str:
+def _get_process_id(span: SpanNode) -> int:
     if span.tap_side == TAP_SIDE_SERVER_PROCESS:
-        return span.flow['process_id_1']
+        return span.flow.get('process_id_1', 0)
     elif span.tap_side == TAP_SIDE_CLIENT_PROCESS:
-        return span.flow['process_id_0']
+        return span.flow.get('process_id_0', 0)
+    else:
+        return 0
 
 
 def _generate_pseudo_process_span_set(network_leaf: dict,
