@@ -2762,22 +2762,14 @@ def _connect_process_and_networks(
             if _same_span_set(net_parent, net_child, 'network_span_set') \
                 or _same_span_set(net_parent, net_child, 'process_span_set'):
                 continue
-            if net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0(
-            ):
-                # 网关注入 x_request_id 的场景
-                net_child.set_parent(
-                    net_parent,
-                    f"net_span mounted due to x_request_id_0 match to x_request_id_1",
-                    host_clock_correct_callback)
 
-                # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
-                # fake_pss = _generate_pseudo_process_span_set(
-                #     net_child, net_parent)
-                # process_span_list.append(fake_pss)
-                # flows.extend(fake_pss.spans)
-            elif (net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0()) \
+            # 由于 x_request_id 没有 parent_id 这类设计，容易发生环路，故 net span 都要根据时延判断先后顺序
+            if (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0())\
+                or (net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0()) \
                 or (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_1()) \
                 or (net_parent_span_id and net_parent_span_id == net_child.get_span_id()):
+
+                # 网关注入 x_request_id 的场景: net_parent_x_request_id_1 == net_child.get_x_request_id_0()
                 # 网关透传 x_request_id 或透传 http header 中的 span_id
                 # 要求 parent 的所有 response_duration > child 最大的 response_duration
                 # 由于 network span set 内是按 c 端 agent 在前+ start_time 排序的，可以认为 net_child(root) 就是一组内时延最大的
