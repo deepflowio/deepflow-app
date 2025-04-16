@@ -1514,7 +1514,16 @@ class SysSpanNode(SpanNode):
         self_process = _get_process_id(self)
         other_process = _get_process_id(other_sys_span)
 
-        return self_process != 0 and other_process != 0 and self_process == other_process
+        process_id_match = self_process != 0 and other_process != 0 and self_process == other_process
+
+        # when auto_instance_type is k8s pod, allow auto_instance match instead of process_id match
+
+        self_auto_instance_type = _get_auto_instance_type(self)
+        other_auto_instance_type = _get_auto_instance_type(other_sys_span)
+        auto_instance_match = self_auto_instance_type == other_auto_instance_type == const.AUTO_INSTANCE_POD \
+                            and self.auto_instance != 0 and self.auto_instance == other_sys_span.auto_instance
+
+        return process_id_match or auto_instance_match
 
 
 class NetworkSpanNode(SpanNode):
@@ -1947,6 +1956,7 @@ class ProcessSpanSet:
                 # for cross-thread span but in same trace_id/process and time range covered
                 if not client_syscall_match and not sys_span_matched and not x_request_id_match:
                     # same proces & time cover already find out above, at here we only find out trace_id match
+                    # NOTE: this scenario means not only `trace_id`, also maybe have a global sequence id through all services in 1 request
                     same_process_trace_match = span.flow[
                         "trace_id"] and span.flow[
                             "trace_id"] == client_sys_span.flow["trace_id"]
@@ -1987,6 +1997,15 @@ class ProcessSpanSet:
                                    "c-p sys-span mounted due to brother c-p",
                                    self.mounted_callback)
         return True
+
+
+def _get_auto_instance_type(span: SpanNode) -> str:
+    """
+    get auto_instance type for span
+    only for Ebpf/Packet signal source
+    """
+    return span.flow["auto_instance_type_0"] if span.tap_side.startswith(
+        'c') and span.tap_side != "app" else span.flow["auto_instance_type_1"]
 
 
 def _get_auto_instance_name(span: SpanNode) -> str:
