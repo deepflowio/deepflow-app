@@ -7,6 +7,7 @@ on:
       - v6.[1-9]
       - v7.[1-9]
       - 'feature-**'
+      - v7.[0-9].[0-9]
     tags:
       - '*'
   workflow_dispatch:
