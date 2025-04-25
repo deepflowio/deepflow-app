@@ -1942,9 +1942,12 @@ class ProcessSpanSet:
                 # 优先级：syscall_trace_id > x_request_id
                 if not client_syscall_match:
                     # syscall_trace_id 判断
-                    # 对 s-p 与 c-p，只能同侧相等（s-p 接收请求后作为 c-p 发出请求）/（c-p 接收响应后作为 s-p 回应请求）
+                    # 绝大多数情况下，s-p 跟 c-p 只会同侧相等(syscall_req = syscall_req/syscall_resp = syscall_resp)
+                    # 但在 MySQL Quit/Close 这类单向会话的情况下，有可能 s-p.syscall_resp = c-p.syscall_req，即最后的线程关闭连接后响应 client
                     sys_span_matched = span.get_syscall_trace_id_request() == client_sys_span.get_syscall_trace_id_request() \
-                        or span.get_syscall_trace_id_response() == client_sys_span.get_syscall_trace_id_response()
+                        or span.get_syscall_trace_id_response() == client_sys_span.get_syscall_trace_id_response() \
+                        or span.get_syscall_trace_id_request() == client_sys_span.get_syscall_trace_id_response() \
+                        or span.get_syscall_trace_id_response() == client_sys_span.get_syscall_trace_id_request()
 
                 if not client_syscall_match and not sys_span_matched:
                     # x_request_id 判断
@@ -2404,11 +2407,12 @@ def _union_sys_spans(
 
     # 先根据 syscall_trace_id_request 构建一个映射，方便查找
     # syscall_trace_id_request => index
-    syscall_req_to_index: Dict[int, int] = {}
+    syscall_req_to_index: Dict[int, List[int]] = {}
     for i in range(len(client_sys_spans)):
         span = client_sys_spans[i]
         if span.get_syscall_trace_id_request() > 0:
-            syscall_req_to_index[span.get_syscall_trace_id_request()] = i
+            syscall_req_to_index.setdefault(
+                span.get_syscall_trace_id_request(), []).append(i)
 
     # 对 client_sys_spans 按 syscall_trace_id 划分为一个个集合
     cp_disjoint_set = DisjointSet()
@@ -2417,10 +2421,25 @@ def _union_sys_spans(
         span = client_sys_spans[i]
         if span.get_syscall_trace_id_response() > 0:
             # 对任意一个 c-p 的 request，如果它有兄弟 c-p，则 syscall_trace_id_request = 兄弟 c-p 的 syscall_trace_id_response，即为`上一跳`
-            parent_index = syscall_req_to_index.get(
-                span.get_syscall_trace_id_response(), -1)
-            cp_disjoint_set.put(i, parent_index)
-            cp_disjoint_set.get(i)  # compress
+            parent_indices = syscall_req_to_index.get(
+                span.get_syscall_trace_id_response(), [])
+            for parent_index in parent_indices:
+                cp_disjoint_set.put(i, parent_index)
+                cp_disjoint_set.get(i)  # compress
+        else:
+            # 当有单向 session 的场景（比如 MySQL Quit/Close）时，c-p 的 syscall_trace_id_response = 0，需要根据 syscall_trace_id_request 尝试找到兄弟 c-p
+            parent_indices = syscall_req_to_index.get(
+                span.get_syscall_trace_id_request(), [])
+            for parent_index in parent_indices:
+                # 忽略自身
+                # 当兄弟 c-p 没有 syscall_trace_id_response 时，避免成环
+                if i == parent_index or client_sys_spans[
+                        parent_index].get_syscall_trace_id_response() == 0:
+                    continue
+                # 要把兄弟 c-p 设置为 parent，即：将`下一跳`设置为 parent
+                # 当兄弟 c-p 有 syscall_trace_id_response 时，它的 parent 也是下一跳
+                cp_disjoint_set.put(i, parent_index)
+                cp_disjoint_set.get(i)
 
     # 构建一个 cp_infos 的关系，计算 syscall_trace_id_response 对应的所有有关联的 c-p 的索引
     # root_index => { child_indexes }
