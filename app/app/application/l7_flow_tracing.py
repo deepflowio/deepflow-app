@@ -1423,6 +1423,7 @@ class SpanNode:
         self.tap_side = flow['tap_side']
         self.agent_id = flow['vtap_id']
         self.auto_instance = _get_auto_instance(self)
+        self.auto_instance_type = _get_auto_instance_type(self)
         self.is_ps_root = False
         self.is_ps_leaf = False
         self.is_net_root = False
@@ -1517,10 +1518,7 @@ class SysSpanNode(SpanNode):
         process_id_match = self_process != 0 and other_process != 0 and self_process == other_process
 
         # when auto_instance_type is k8s pod, allow auto_instance match instead of process_id match
-
-        self_auto_instance_type = _get_auto_instance_type(self)
-        other_auto_instance_type = _get_auto_instance_type(other_sys_span)
-        auto_instance_match = self_auto_instance_type == other_auto_instance_type == const.AUTO_INSTANCE_POD \
+        auto_instance_match = self.auto_instance_type == other_sys_span.auto_instance_type == const.AUTO_INSTANCE_POD \
                             and self.auto_instance != 0 and self.auto_instance == other_sys_span.auto_instance
 
         return process_id_match or auto_instance_match
@@ -1898,9 +1896,10 @@ class ProcessSpanSet:
 
     def _attach_client_sys_span(self, sys_span: SysSpanNode) -> bool:
         span_id_of_sys_span = sys_span.get_span_id()
+        if not span_id_of_sys_span:
+            return False
         for app_leaf in self.app_span_leafs:
-            if span_id_of_sys_span and span_id_of_sys_span == app_leaf.get_span_id(
-            ):
+            if span_id_of_sys_span == app_leaf.get_span_id():
                 # app_span 作为 sys_span 的 parent
                 self.append_sys_span(sys_span)
                 sys_span.set_parent(
@@ -2378,14 +2377,36 @@ def _union_app_spans(
                            List[ProcessSpanSet]], app_spans: List[AppSpanNode],
     host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]
 ) -> Dict[str, List[ProcessSpanSet]]:
+    # 对 auto_instance_type != pod 类型的 app span，有可能所有的 app 都在同一个 instance(i.e.: node) 上
+    # 此类情况，允许按照 app_service 划分找到 leaf/root app span
+    # 但注意不一定有 app_service attribute，这里只能尽力尝试
+    # app_service => index of process_span_map[auto_instance]
+    app_service_to_index: Dict[str, int] = {}
     for span in app_spans:
         auto_instance = span.auto_instance
-        # auto_instance = _get_auto_instance(span)
+        app_service = span.flow.get("app_service", "")
+        split_by_app_service = span.auto_instance_type != const.AUTO_INSTANCE_POD and app_service
         if auto_instance not in process_span_map:
             sp_span_pss = ProcessSpanSet(auto_instance)
             sp_span_pss.mounted_callback = host_clock_correct_callback
+            if split_by_app_service:
+                app_service_to_index[app_service] = 0
             process_span_map[auto_instance] = [sp_span_pss]
-        process_span_map[auto_instance][0].append_app_span(span)
+        if split_by_app_service and app_service_to_index.get(app_service,
+                                                             -1) == -1:
+            # 构建一个新的 app_service 分组
+            sp_span_pss = ProcessSpanSet(auto_instance)
+            sp_span_pss.mounted_callback = host_clock_correct_callback
+            app_service_to_index[app_service] = len(
+                process_span_map[auto_instance])
+            process_span_map[auto_instance].append(sp_span_pss)
+
+        if split_by_app_service:
+            # app_service_to_index.get() 默认值使用 0，避免出错丢弃，即使父子关系挂错也不要少 span
+            process_span_map[auto_instance][app_service_to_index.get(
+                app_service, 0)].append_app_span(span)
+        else:
+            process_span_map[auto_instance][0].append_app_span(span)
 
     # 一组 app-span 构成的 ProcessSpanSet 可能会有多个 root
     # 如果这些 root 有同一个 parent_span_id: 说明只是还没关联 s-p 作为 parent，不需处理，后续逻辑会关联
