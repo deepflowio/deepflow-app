@@ -1486,10 +1486,18 @@ class SpanNode:
     def get_response_duration(self) -> int:
         return self.flow.get('response_duration', 0)
 
-    def time_range_cover(self, other_sys_span: 'SpanNode') -> bool:
-        return self.flow['start_time_us'] <= other_sys_span.flow[
-            'start_time_us'] and self.flow[
-                'end_time_us'] >= other_sys_span.flow['end_time_us']
+    def time_range_cover(self,
+                         other_sys_span: 'SpanNode',
+                         allow_lost_resp=False) -> bool:
+        if not allow_lost_resp:
+            return self.flow['start_time_us'] <= other_sys_span.flow[
+                'start_time_us'] and self.flow[
+                    'end_time_us'] >= other_sys_span.flow['end_time_us']
+        else:
+            # 允许 self 只校验一半，即可能 server_span 由于发生异常没有响应，导致时延为 0 ，此时 start_time=end_time
+            # XXX: 20250523: 注意此场景要求严格校验，即必须存在 syscall_trace_id_request 相等，其他场景暂不允许，否则容易误关联
+            return self.flow['start_time_us'] <= other_sys_span.flow[
+                'start_time_us'] and self.flow['response_duration'] == 0
 
 
 class AppSpanNode(SpanNode):
@@ -1933,8 +1941,9 @@ class ProcessSpanSet:
                 # isinstance: 类型安全检查，避免调用函数失败
                 # process_matched 防错: 避免 auto_instance 匹配到 host 但实际进程不同的情况
                 # time_range_cover: 校验 client_sys_flow 是否落入 s-p 时间范围内
+                # 这里假设 c-p 正常完成，但 s-p 后续有异常导致没有响应，允许时间仅校验一半，对应参数 allow_lost_resp
                 if isinstance(span, SysSpanNode) and \
-                    not (span.process_matched(client_sys_span) and span.time_range_cover(client_sys_span)):
+                    not (span.process_matched(client_sys_span) and span.time_range_cover(client_sys_span, allow_lost_resp=True)):
                     return None, ""
 
                 sys_span_matched = x_request_id_match = same_process_trace_match = False
@@ -1986,8 +1995,9 @@ class ProcessSpanSet:
         if server_sys_span is None:
             return False
 
+        # 这里是通过兄弟 client_sys_span 关联上的，即兄弟 c-p 存在 syscall_trace_id 相等，支持 allow_lost_resp
         if isinstance(server_sys_span, SysSpanNode) and \
-            not (server_sys_span.process_matched(client_sys_span) and server_sys_span.time_range_cover(client_sys_span)):
+            not (server_sys_span.process_matched(client_sys_span) and server_sys_span.time_range_cover(client_sys_span, allow_lost_resp=True)):
             return False
 
         if client_sys_span.parent is not None:
