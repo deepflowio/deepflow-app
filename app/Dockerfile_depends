@@ -20,7 +20,7 @@ RUN pip install cffi
 FROM builder-base AS builder-custom
 RUN pip install --user  --disable-pip-version-check \
      	 --no-cache-dir \
-         aiofiles==23.2.1 aiohttp==3.10.2 aiosignal==1.3.1 async-timeout==4.0.3 attrs==23.1.0 \
+         aiofiles==23.2.1 aiohttp==3.10.11 aiosignal==1.3.1 async-timeout==4.0.3 attrs==23.1.0 \
          Deprecated==1.2.14 frozenlist==1.4.0 html5tagger==1.3.0 httptools==0.6.1 \
          idna==3.7 importlib-metadata==6.8.0 multidict==6.0.4 numpy==1.24.4 \
          opentelemetry-api==1.21.0 opentelemetry-sdk==1.21.0 opentelemetry-semantic-conventions==0.42b0 \
@@ -28,7 +28,7 @@ RUN pip install --user  --disable-pip-version-check \
          sanic==23.6.0 sanic-routing==23.6.0 schematics==2.1.1 six==1.16.0 \
          tracerite==1.1.1 typing_extensions==4.8.0 tzdata==2023.3 \
          ujson==5.8.0 uvloop==0.19.0 websockets==12.0 wrapt==1.16.0 \
-         yarl==1.9.2 zipp==3.19.2
+         yarl==1.12.1 zipp==3.19.2
 FROM scratch
 COPY --from=builder-custom /root/.local /
 
