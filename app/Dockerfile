@@ -1,6 +1,6 @@
-FROM python:3.8.19-slim-bullseye AS runner
+FROM python:3.8-alpine AS runner
 ARG TARGETARCH
-RUN apt-get update && apt-get upgrade -y
+RUN apk update && apk upgrade
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools
 RUN --mount=target=/tmp-mount \
     cp -a /tmp-mount/output_${TARGETARCH}/* /usr/local && \
