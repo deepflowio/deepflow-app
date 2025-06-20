@@ -1,4 +1,4 @@
-FROM python:3.8-alpine AS runner
+FROM python:3.12-alpine AS runner
 ARG TARGETARCH
 RUN apk update && apk upgrade && apk add --no-cache libstdc++
 RUN pip install --upgrade --disable-pip-version-check --no-cache-dir pip setuptools
