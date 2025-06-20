@@ -63,8 +63,8 @@ jobs:
           file: app/Dockerfile_depends
           platforms: linux/amd64
           outputs: type=local,dest=./app/output_amd64
-          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd54
-          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd4
+          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd64
+          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd64
 
       - name: Package code build results
         run: |
