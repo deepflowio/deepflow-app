@@ -466,21 +466,23 @@ class L7FlowTracing(Base):
                     f"x_request_id_1 IN ({','.join(new_x_request_ids_str)})")
                 new_filters.append(f"({' OR '.join(x_request_id_filters)})")
             # 2.4. new dns request_ids
-            new_dns_request_ids = set()
-            for ndri in build_request_ids:
-                if ndri and ndri not in dns_request_ids:
-                    dns_request_ids.add(ndri)
-                    new_dns_request_ids.add(str(ndri))
-            # 2.4. Condition 4: 仅对 DNS 协议，以 request_id 与五元组作为条件查询关联 flow
-            dns_request_id_filters = []
-            if new_dns_request_ids:
-                # 由于 request_id 在不同协议中处理方式不一样，为免错误关联，这里限制仅 DNS 支持此关联查询场景
-                # XXX: 这里可能会有性能 issue，增加了基于 DNS request_id 的查询后需要查询的数据多了不少
-                dns_request_id_filters.append(
-                    f"l7_protocol = {L7_PROTOCOL_DNS}")
-                dns_request_id_filters.append(
-                    f"request_id in ({','.join(new_dns_request_ids)})")
-                new_filters.append(f"({' AND '.join(dns_request_id_filters)})")
+            if config.allow_dns_tracing:
+                new_dns_request_ids = set()
+                for ndri in build_request_ids:
+                    if ndri and ndri not in dns_request_ids:
+                        dns_request_ids.add(ndri)
+                        new_dns_request_ids.add(str(ndri))
+                # 2.4. Condition 4: 仅对 DNS 协议，以 request_id 与五元组作为条件查询关联 flow
+                dns_request_id_filters = []
+                if new_dns_request_ids:
+                    # 由于 request_id 在不同协议中处理方式不一样，为免错误关联，这里限制仅 DNS 支持此关联查询场景
+                    # XXX: 这里可能会有性能 issue，增加了基于 DNS request_id 的查询后需要查询的数据多了不少
+                    dns_request_id_filters.append(
+                        f"l7_protocol = {L7_PROTOCOL_DNS}")
+                    dns_request_id_filters.append(
+                        f"request_id in ({','.join(new_dns_request_ids)})")
+                    new_filters.append(
+                        f"({' AND '.join(dns_request_id_filters)})")
 
             if not new_filters:  # no more iterations needed
                 break
@@ -793,7 +795,7 @@ def set_all_relate(trace_infos: list,
         if ti.syscall_trace_id_response:
             syscall_trace_id_to_trace_infos[ti.syscall_trace_id_response].add(
                 ti)
-        if ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
+        if config.allow_dns_tracing and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
             dns_request_id_to_trace_infos[ti.request_id].add(ti)
 
     for ti in trace_infos[skip_first_n_trace_infos:]:
@@ -840,12 +842,14 @@ def set_all_relate(trace_infos: list,
                                                 related_map, fast_check)
         if fast_check and find_related: continue
         # dns request_id
-        related_trace_infos = dns_request_id_to_trace_infos.get(
-            ti.request_id, set())
-        find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
-                                            related_map, network_delay_us,
-                                            host_clock_offset_us, fast_check)
-        if fast_check and find_related: continue
+        if config.allow_dns_tracing:
+            related_trace_infos = dns_request_id_to_trace_infos.get(
+                ti.request_id, set())
+            find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
+                                                related_map, network_delay_us,
+                                                host_clock_offset_us,
+                                                fast_check)
+            if fast_check and find_related: continue
 
 
 def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
@@ -2320,25 +2324,25 @@ def merge_flow(flows: list, flow: dict) -> bool:
                     'type'] != L7_FLOW_TYPE_REQUEST and not allow_merge_type:
                 # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
                 return False
-        else:
-            if is_dns_sys_span:
-                # DNS sys span，要求 cap_seq 一定要连续才能合并
-                if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
-                    if flows[i]['syscall_cap_seq_0'] + 1 != flow[
-                            'syscall_cap_seq_1']:
-                        continue
-                else:
-                    if flows[i]['syscall_cap_seq_1'] + 1 != flow[
-                            'syscall_cap_seq_1']:
-                        continue
-            else:
-                if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
-                    # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
-                    return False
-                if is_sys_span and (flows[i]['syscall_cap_seq_0'] + 1
-                                    != flow['syscall_cap_seq_1']):
-                    # 对于 sys span，要求 cap_seq 一定要连续
+
+        if is_dns_sys_span:
+            # DNS sys span，要求 cap_seq 一定要连续才能合并
+            if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
+                if flows[i]['syscall_cap_seq_0'] + 1 != flow[
+                        'syscall_cap_seq_1']:
                     continue
+            else:
+                if flows[i]['syscall_cap_seq_1'] + 1 != flow[
+                        'syscall_cap_seq_1']:
+                    continue
+        else:
+            if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
+                return False
+            if is_sys_span and (flows[i]['syscall_cap_seq_0'] + 1
+                                != flow['syscall_cap_seq_1']):
+                # 对于 sys span，要求 cap_seq 一定要连续
+                continue
 
         # merge flow
         if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
