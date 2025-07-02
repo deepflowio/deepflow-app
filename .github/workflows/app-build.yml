@@ -63,8 +63,8 @@ jobs:
           file: app/Dockerfile_depends
           platforms: linux/amd64
           outputs: type=local,dest=./app/output_amd64
-          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd54
-          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-amd4
+          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-amd64
+          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-amd64
 
       - name: Package code build results
         run: |
@@ -116,8 +116,8 @@ jobs:
           file: app/Dockerfile_depends
           platforms: linux/arm64
           outputs: type=local,dest=./app/output_arm64
-          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-arm64
-          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:${{ github.ref_name }}-cache-arm64
+          cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-arm64
+          cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-arm64
 
       - name: Package code build results
         run: |
@@ -132,7 +132,8 @@ jobs:
 
 
   build_app_image:
-    runs-on: "cirun-aws-amd64-16c--${{ github.run_id }}"
+    # runs-on: "cirun-aws-amd64-16c--${{ github.run_id }}"
+    runs-on: "ubuntu-latest"
     needs:
     - build_app
     - build_app_arm64
