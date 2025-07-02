@@ -5,6 +5,7 @@ CONFIG_FILE = "/etc/deepflow/app.yaml"
 
 
 class Config(object):
+
     def __init__(self):
         pass
 
@@ -23,6 +24,7 @@ class Config(object):
             'allow_multiple_trace_ids_in_tracing_result', False)
         self.call_apm_api_to_supplement_trace = spec.get(
             'call_apm_api_to_supplement_trace', False)
+        self.allow_dns_tracing = spec.get('allow_dns_tracing', True)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
