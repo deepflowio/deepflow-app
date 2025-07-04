@@ -215,6 +215,9 @@ L7_PROTOCOL_DNS = 120
 L4_PROTOCOL_TCP = 6
 L4_PROTOCOL_UDP = 17
 
+# XXX: 目前是一个人为规定的设计，非协议捕获值
+UNIX_SOCKET_SERVER_PORT = 1
+
 
 class L7FlowTracing(Base):
 
@@ -466,21 +469,23 @@ class L7FlowTracing(Base):
                     f"x_request_id_1 IN ({','.join(new_x_request_ids_str)})")
                 new_filters.append(f"({' OR '.join(x_request_id_filters)})")
             # 2.4. new dns request_ids
-            new_dns_request_ids = set()
-            for ndri in build_request_ids:
-                if ndri and ndri not in dns_request_ids:
-                    dns_request_ids.add(ndri)
-                    new_dns_request_ids.add(str(ndri))
-            # 2.4. Condition 4: 仅对 DNS 协议，以 request_id 与五元组作为条件查询关联 flow
-            dns_request_id_filters = []
-            if new_dns_request_ids:
-                # 由于 request_id 在不同协议中处理方式不一样，为免错误关联，这里限制仅 DNS 支持此关联查询场景
-                # XXX: 这里可能会有性能 issue，增加了基于 DNS request_id 的查询后需要查询的数据多了不少
-                dns_request_id_filters.append(
-                    f"l7_protocol = {L7_PROTOCOL_DNS}")
-                dns_request_id_filters.append(
-                    f"request_id in ({','.join(new_dns_request_ids)})")
-                new_filters.append(f"({' AND '.join(dns_request_id_filters)})")
+            if config.allow_dns_tracing:
+                new_dns_request_ids = set()
+                for ndri in build_request_ids:
+                    if ndri and ndri not in dns_request_ids:
+                        dns_request_ids.add(ndri)
+                        new_dns_request_ids.add(str(ndri))
+                # 2.4. Condition 4: 仅对 DNS 协议，以 request_id 与五元组作为条件查询关联 flow
+                dns_request_id_filters = []
+                if new_dns_request_ids:
+                    # 由于 request_id 在不同协议中处理方式不一样，为免错误关联，这里限制仅 DNS 支持此关联查询场景
+                    # XXX: 这里可能会有性能 issue，增加了基于 DNS request_id 的查询后需要查询的数据多了不少
+                    dns_request_id_filters.append(
+                        f"l7_protocol = {L7_PROTOCOL_DNS}")
+                    dns_request_id_filters.append(
+                        f"request_id in ({','.join(new_dns_request_ids)})")
+                    new_filters.append(
+                        f"({' AND '.join(dns_request_id_filters)})")
 
             if not new_filters:  # no more iterations needed
                 break
@@ -793,7 +798,7 @@ def set_all_relate(trace_infos: list,
         if ti.syscall_trace_id_response:
             syscall_trace_id_to_trace_infos[ti.syscall_trace_id_response].add(
                 ti)
-        if ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
+        if config.allow_dns_tracing and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
             dns_request_id_to_trace_infos[ti.request_id].add(ti)
 
     for ti in trace_infos[skip_first_n_trace_infos:]:
@@ -840,12 +845,14 @@ def set_all_relate(trace_infos: list,
                                                 related_map, fast_check)
         if fast_check and find_related: continue
         # dns request_id
-        related_trace_infos = dns_request_id_to_trace_infos.get(
-            ti.request_id, set())
-        find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
-                                            related_map, network_delay_us,
-                                            host_clock_offset_us, fast_check)
-        if fast_check and find_related: continue
+        if config.allow_dns_tracing:
+            related_trace_infos = dns_request_id_to_trace_infos.get(
+                ti.request_id, set())
+            find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
+                                                related_map, network_delay_us,
+                                                host_clock_offset_us,
+                                                fast_check)
+            if fast_check and find_related: continue
 
 
 def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
@@ -1645,6 +1652,12 @@ class SpanNode:
     def get_response_duration(self) -> int:
         return self.flow.get('response_duration', 0)
 
+    def get_trace_id(self) -> int:
+        return self.flow.get('trace_id', '')
+
+    def get_server_port(self) -> int:
+        return self.flow.get('server_port', 0)
+
     def time_range_cover(self,
                          other_sys_span: 'SpanNode',
                          allow_lost_resp=False) -> bool:
@@ -2144,6 +2157,57 @@ class ProcessSpanSet:
                     return span, f"c-p sys-span mounted due to {mounted_info}"
         return None, ""
 
+    def try_append_to_client_sys_span_via_sys_span(
+            self, client_sys_span: SysSpanNode):
+        '''
+        此为 try_attach_client_sys_span_via_sys_span 的反向操作，即尝试用 client_span 吸引 server_span 作为子 span
+        此场景目前出现在同一个 auto_instance(pod/chost) 下，通过非 TCP 方式跨进程调用(e.g.: unix socket)
+        条件: self 有 s-p: c-p 时间必须覆盖 s-p, 且通过 trace_id/x_request_id 关联
+        如果是同进程调用一般不会产生【额外】的 span, 所以这里 syscall_trace_id 【一定】没有关联关系，不需检查
+        return: SysSpanNode(s-p span), str(mounted_info)
+        '''
+        mounted_info = ""
+        # NOTE: 由于目前只有 unix socket 有此场景，保持硬限制
+        if not client_sys_span.get_server_port() == UNIX_SOCKET_SERVER_PORT:
+            return None, ""
+        for span in self.spans:
+            if not span.get_server_port() == UNIX_SOCKET_SERVER_PORT or \
+                not span.parent is None or \
+                    span.tap_side != TAP_SIDE_SERVER_PROCESS:
+                continue
+            # span is SysSpanNode
+            # isinstance: 类型安全检查，避免调用函数失败
+            # process_matched 防错: 避免 auto_instance 匹配到 host 但实际进程不同的情况
+            # time_range_cover: 校验 s-p 是否落入 c-p 时间范围内
+            # allow_lost_resp = False: 由于这里关联关系比较弱，必须要求 req/resp 完整避免误关联
+            if isinstance(span, SysSpanNode) and \
+                not (span.process_matched(client_sys_span) and client_sys_span.time_range_cover(span, allow_lost_resp=False)):
+                return None, ""
+
+            # x_request_id 判断
+            # s-p.x_req_id_1 = c-p.x_req_id_0: 注入 x_req_id
+            # s-p.x_req_id_1 = c-p.x_req_id_1: 透传 x_req_id (x_req_id_0 同理)
+            x_request_id_match = span.get_x_request_id_0() and (span.get_x_request_id_0() == client_sys_span.get_x_request_id_0()) \
+                                or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1()\
+                                    or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
+
+            same_process_trace_match = False
+            # for cross-thread span but in same trace_id/process and time range covered
+            if not x_request_id_match:
+                # same proces & time cover already find out above, at here we only find out trace_id match
+                # NOTE: this scenario means not only `trace_id`, also maybe have a global sequence id through all services in 1 request
+                same_process_trace_match = span.flow["trace_id"] and \
+                                            span.flow["trace_id"] == client_sys_span.flow["trace_id"]
+
+            if x_request_id_match:
+                mounted_info = "x_request_id matched to c-p root"
+            elif same_process_trace_match:
+                mounted_info = "same process/trace_id and time cover by c-p root"
+
+            if x_request_id_match or same_process_trace_match:
+                return span, f"s-p sys-span mounted due to {mounted_info}"
+        return None, ""
+
     def indirect_attach_client_sys_span_via_sys_span(
             self, server_sys_span: SpanNode,
             client_sys_span: SysSpanNode) -> bool:
@@ -2320,25 +2384,25 @@ def merge_flow(flows: list, flow: dict) -> bool:
                     'type'] != L7_FLOW_TYPE_REQUEST and not allow_merge_type:
                 # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
                 return False
-        else:
-            if is_dns_sys_span:
-                # DNS sys span，要求 cap_seq 一定要连续才能合并
-                if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
-                    if flows[i]['syscall_cap_seq_0'] + 1 != flow[
-                            'syscall_cap_seq_1']:
-                        continue
-                else:
-                    if flows[i]['syscall_cap_seq_1'] + 1 != flow[
-                            'syscall_cap_seq_1']:
-                        continue
-            else:
-                if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
-                    # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
-                    return False
-                if is_sys_span and (flows[i]['syscall_cap_seq_0'] + 1
-                                    != flow['syscall_cap_seq_1']):
-                    # 对于 sys span，要求 cap_seq 一定要连续
+
+        if is_dns_sys_span:
+            # DNS sys span，要求 cap_seq 一定要连续才能合并
+            if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
+                if flows[i]['syscall_cap_seq_0'] + 1 != flow[
+                        'syscall_cap_seq_1']:
                     continue
+            else:
+                if flows[i]['syscall_cap_seq_1'] + 1 != flow[
+                        'syscall_cap_seq_1']:
+                    continue
+        else:
+            if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+                # 前序 flow 不是 REQUEST：不可合并，并停止合并以避免误匹配
+                return False
+            if is_sys_span and (flows[i]['syscall_cap_seq_0'] + 1
+                                != flow['syscall_cap_seq_1']):
+                # 对于 sys span，要求 cap_seq 一定要连续
+                continue
 
         # merge flow
         if flows[i]['type'] == L7_FLOW_TYPE_REQUEST:
@@ -2686,38 +2750,53 @@ def _union_sys_spans(
             continue
         uniq_process_id = span.agent_id << 32 | span.process_id
         # 最终需要上挂的目标 s-p
-        target_sp = None
-        target_mounted_info = ""
+        target_parent = target_child = None
+        target_parent_info = target_child_info = ""
         # 优先级：process_id > auto_instance
         target_sp_list = process_span_map.get(
             same_process_sp.get(uniq_process_id, -1),
             process_span_map.get(span.auto_instance, []))
         for sp_process_span_set in target_sp_list:
             # 检查 c-p 是否在同一进程的 s-p 覆盖范围内，若不在，它应是独立的 ProcessSpanSet
-            matched_sp, mounted_info = sp_process_span_set.try_attach_client_sys_span_via_sys_span(
+            matched_parent, mounted_info = sp_process_span_set.try_attach_client_sys_span_via_sys_span(
                 span)
-            if matched_sp is None:
-                continue
-            if target_sp is None:
-                target_sp = matched_sp
-                target_mounted_info = mounted_info
-            else:
-                # 在有多个 s-p 都满足匹配条件的情况下，选开始时间最大的(在满足时间覆盖的情况下，这说明此 s-p 最接近 c-p)，它更有可能是直接的【上一跳】
-                if matched_sp.flow['start_time_us'] > target_sp.flow[
+            if matched_parent is not None:
+                if target_parent is None:
+                    target_parent = matched_parent
+                    target_parent_info = mounted_info
+                elif matched_parent.flow['start_time_us'] > target_parent.flow[
                         'start_time_us']:
-                    target_sp = matched_sp
-                    target_mounted_info = mounted_info
+                    # 在有多个 s-p 都满足匹配条件的情况下，选开始时间最大的(在满足时间覆盖的情况下，这说明此 s-p 最接近 c-p)，它更有可能是直接的【上一跳】
+                    target_parent = matched_parent
+                    target_parent_info = mounted_info
 
-        if target_sp is not None:
-            target_sp.process_span_set.append_sys_span(span)
-            span.set_parent(target_sp, target_mounted_info,
-                            target_sp.process_span_set.mounted_callback)
+            matched_child, matched_child_info = sp_process_span_set.try_append_to_client_sys_span_via_sys_span(
+                span)
+            if matched_child is not None:
+                if target_child is None:
+                    target_child = matched_child
+                    target_child_info = matched_child_info
+                elif matched_child.flow['start_time_us'] > target_child.flow[
+                        'start_time_us']:
+                    target_child = matched_child
+                    target_child_info = matched_child_info
+
+        if target_parent is not None:
+            target_parent.process_span_set.append_sys_span(span)
+            span.set_parent(target_parent, target_parent_info,
+                            target_parent.process_span_set.mounted_callback)
             # 如果任意一个 c-p 关联成功，则它的兄弟都尝试关联
             client_root_of_span = cp_disjoint_set.get(i)
-
             for child in cp_related_infos.get(client_root_of_span, []):
-                target_sp.process_span_set.indirect_attach_client_sys_span_via_sys_span(
-                    target_sp, client_sys_spans[child])
+                target_parent.process_span_set.indirect_attach_client_sys_span_via_sys_span(
+                    target_parent, client_sys_spans[child])
+
+        if target_child is not None:
+            # 不要改变原 process_span_set
+            if span.process_span_set is None:
+                target_child.process_span_set.append_sys_span(span)
+            target_child.set_parent(span, target_child_info,
+                                    span.process_span_set.mounted_callback)
     # end of client_sys_span match to server_sys_span
 
     # 这里分开两次循环，避免[c-p-a 找不到关联关系，先建立了一个 process_span_set，但是 c-p-a 的兄弟 c-p-b 有关联，并将 c-p-a 关联上 s-p，导致重复]的情况
@@ -3009,17 +3088,15 @@ def _connect_process_and_networks(
                 if net_parent_response_duration < net_child.get_response_duration(
                 ):
                     continue
-                else:
-                    # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
-                    if _index not in network_match_parent:
-                        network_match_parent[_index] = net_parent_index
-                    else:
-                        # 根据 `时延最接近` 原则找 parent
-                        # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
-                        # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
-                        if flow_index_to_span[network_match_parent[_index]].get_response_duration() \
-                            > net_parent_index:
-                            network_match_parent[_index] = net_parent_index
+                # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
+                if _index not in network_match_parent:
+                    network_match_parent[_index] = net_parent_index
+                elif flow_index_to_span[network_match_parent[_index]].get_response_duration() \
+                    > net_parent_response_duration:
+                    # 根据 `时延最接近` 原则找 parent
+                    # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
+                    # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
+                    network_match_parent[_index] = net_parent_index
         # end of L7_FLOW_RELATIONSHIP_SPAN_ID and L7_FLOW_RELATION_SHIP_X_REQUEST_ID match
 
         net_parent_request_id = net_parent.get_request_id()
