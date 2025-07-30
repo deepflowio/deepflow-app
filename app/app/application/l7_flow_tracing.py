@@ -3617,6 +3617,9 @@ def _get_flow_dict(flow: DataFrame):
         "auto_instance":
         flow["auto_instance_0"] if flow["tap_side"].startswith('c')
         and flow["tap_side"] != "app" else flow["auto_instance_1"],
+        "auto_instance_id":
+        flow["auto_instance_id_0"] if flow["tap_side"].startswith('c')
+        and flow["tap_side"] != "app" else flow["auto_instance_id_1"],
         "auto_instance_type":
         flow["auto_instance_type_0"] if flow["tap_side"].startswith('c')
         and flow["tap_side"] != "app" else flow["auto_instance_type_1"],
@@ -3627,11 +3630,13 @@ def _get_flow_dict(flow: DataFrame):
         "_querier_region":
         flow.get("_querier_region", None)
     }
+    # 这里不知道为什么只有 eBPF 返回这些数据，可能会影响界面显示或服务分组，如果要修改先找前端确认
     if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
         flow_dict["subnet"] = flow.get("subnet")
         flow_dict["ip"] = flow.get("ip")
         flow_dict["auto_service"] = flow.get("auto_service")
         flow_dict["auto_service_id"] = flow.get("auto_service_id")
+        flow_dict["auto_service_type"] = flow["auto_service_type"]
         flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
