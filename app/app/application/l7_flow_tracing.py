@@ -228,7 +228,14 @@ class L7FlowTracing(Base):
         network_delay_us = self.args.get("network_delay_us")
         host_clock_offset_us = self.args.get("host_clock_offset_us")
         self.failed_regions = set()
-        time_filter = f"time>={self.start_time} AND time<={self.end_time}"
+        # 临时功能，如果配置了这个，取配置时间范围
+        if config.l7_tracing_time_range > 0:
+            mid_time = (self.start_time + self.end_time) // 2
+            start_time = mid_time - config.l7_tracing_time_range
+            end_time = mid_time + config.l7_tracing_time_range
+            time_filter = f"time>={start_time} AND time<={end_time}"
+        else:
+            time_filter = f"time>={self.start_time} AND time<={self.end_time}"
         _id = self.args.get("_id")
         self.has_attributes = self.args.get("has_attributes", 0)
         if not _id:
