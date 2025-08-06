@@ -25,6 +25,7 @@ class Config(object):
         self.call_apm_api_to_supplement_trace = spec.get(
             'call_apm_api_to_supplement_trace', False)
         self.allow_dns_tracing = spec.get('allow_dns_tracing', True)
+        self.l7_tracing_time_range = spec.get('l7_tracing_time_range', 15)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
