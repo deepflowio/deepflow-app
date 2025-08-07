@@ -631,7 +631,7 @@ class L7FlowTracing(Base):
         querier = Querier(to_dataframe=True,
                           debug=self.args.debug,
                           headers=self.headers)
-        response = await querier.exec_all_clusters(DATABASE, sql)
+        response = await querier.exec_all_clusters(DATABASE, sql, self.region)
         '''
         database = 'flow_log'  # database
         host = '10.1.20.22'  # ck ip
