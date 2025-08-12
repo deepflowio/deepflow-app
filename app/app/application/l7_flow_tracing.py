@@ -3380,6 +3380,13 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
                 f"service has no auto_service_id or app_service, group_index: {service.group_key}, subnet: {service.subnet}, process: {service.process_id}"
             )
 
+        # 由于 service_uid 标识可能基于进程划分开同一服务下两个实例
+        # 这里单独增加 auto_service_ux 标识，用于拓扑图合并同一个服务节点
+        # due to service_uid maybe used for split by processes in the same service
+        # here, add auto_service_ux just for the topo to identify the same service
+        auto_service_uid = service_uid
+        auto_service_uname = service_uname
+
         # 只对这几种类型按 process 划分进程，否则直接聚合为同一个服务
         if len(
                 service_to_subprocess.get(
@@ -3394,12 +3401,19 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             metrics_map[service_uid] = {
                 "service_uid": service_uid,
                 "service_uname": service_uname,
+                # 注：仅用于拓扑图，无法匹配 span
+                # NOTE: only for topo, unable to match span
+                "auto_service_uid": auto_service_uid,
+                "auto_service_uname": auto_service_uname,
                 "duration": 0,
             }
         else:
             if metrics_map[service_uid].get('service_uname', '') == '':
                 metrics_map[service_uid]['service_uname'] = service_uname
+            if metrics_map[service_uid].get('auto_service_uname', '') == '':
+                metrics_map[service_uid]['auto_service_uname'] = auto_service_uname
 
+        # 这里 auto_service_ux 不用赋值 span，基于 service_uid 进行实例划分
         # 分组之后对 service 底下的所有 flow 设置对应的服务名称，并统计时延
         for span in service.spans:
             span.flow['service_uid'] = service_uid
