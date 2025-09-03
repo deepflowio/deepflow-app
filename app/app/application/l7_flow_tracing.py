@@ -517,6 +517,17 @@ class L7FlowTracing(Base):
                         new_flow_remove_indices.append(index)
                         deleted_trace_ids.add(new_trace_id)
                         continue
+                # allow extra_trace_ids use for query trace_id in next iteration
+                # now, we can only get 1 string value from `extra_trace_ids`
+                if config.allow_extra_trace_ids:
+                    new_extra_trace_id = new_flows.at[index, 'extra_trace_ids']
+                    if new_extra_trace_id and new_extra_trace_id not in allowed_trace_ids:
+                        if not allowed_trace_ids or config.allow_multiple_trace_ids_in_tracing_result:
+                            allowed_trace_ids.add(new_trace_id)
+                            new_trace_ids_in_prev_iteration.add(new_trace_id)
+                        else:
+                            new_flow_remove_indices.append(index)
+                            deleted_trace_ids.add(new_trace_id)
             if new_flow_remove_indices:
                 new_flows = new_flows.drop(
                     new_flow_remove_indices).reset_index(drop=True)
@@ -668,7 +679,7 @@ class L7FlowTracing(Base):
         type, signal_source, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us,
         toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, protocol, syscall_trace_id_request, 
         syscall_trace_id_response, span_id, parent_span_id, request_id, l7_protocol, trace_id, x_request_id_0,
-        x_request_id_1, _id, tap_side
+        x_request_id_1, _id, tap_side, extra_trace_ids
         FROM `l7_flow_log`
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
@@ -3351,9 +3362,10 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             or service.app_service in services_from_pruning_traces:
             services_from_process_span_set.add(service)
             if service.process_id:
-                service_to_subprocess.setdefault(
-                    (service.auto_service_id, service.app_service), set()).add(
-                        (service.process_id, service.process_kname))
+                service_to_subprocess.setdefault(service.auto_service_id,
+                                                 set()).add(
+                                                     (service.process_id,
+                                                      service.process_kname))
         else:
             log.warning(
                 f"service: {service.app_service}/{service.auto_service} dropped"
@@ -3388,12 +3400,11 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
         auto_service_uname = service_uname
 
         # 只对这几种类型按 process 划分进程，否则直接聚合为同一个服务
-        if len(
-                service_to_subprocess.get(
-                    (service.auto_service_id, service.app_service),
-                    set())) > 1 and service.auto_instance_type in (
-                        const.AUTO_INSTANCE_CHOST,
-                        const.AUTO_INSTANCE_POD_NODE, const.AUTO_INSTANCE_POD):
+        if len(service_to_subprocess.get(
+                service.auto_service_id,
+                set())) > 1 and service.auto_instance_type in (
+                    const.AUTO_INSTANCE_CHOST, const.AUTO_INSTANCE_POD_NODE,
+                    const.AUTO_INSTANCE_POD):
             service_uid = f'{service_uid}{process_id}-{process_kname}'
             service_uname = f'{service_uname}:{process_kname}'
 
@@ -3411,7 +3422,8 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             if metrics_map[service_uid].get('service_uname', '') == '':
                 metrics_map[service_uid]['service_uname'] = service_uname
             if metrics_map[service_uid].get('auto_service_uname', '') == '':
-                metrics_map[service_uid]['auto_service_uname'] = auto_service_uname
+                metrics_map[service_uid][
+                    'auto_service_uname'] = auto_service_uname
 
         # 这里 auto_service_ux 不用赋值 span，基于 service_uid 进行实例划分
         # 分组之后对 service 底下的所有 flow 设置对应的服务名称，并统计时延

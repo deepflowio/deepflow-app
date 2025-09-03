@@ -38,3 +38,5 @@ app:
     # due to transaction-id reused, it may leads to big data query and causes query performance issue
     # it also possibly leads to unwanted tracing results
     allow_dns_tracing: true
+    # allow extra_trace_ids for trace_id query in iterations, default: true
+    allow_extra_trace_ids: true
