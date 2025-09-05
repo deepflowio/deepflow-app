@@ -157,6 +157,7 @@ RETURN_FIELDS = list(
         "auto_instance_id_0",
         "auto_instance_0",
         "process_kname_0",
+        "gprocess_0",
         "subnet_id_1",
         "subnet_1",
         "ip_1",
@@ -166,6 +167,7 @@ RETURN_FIELDS = list(
         "auto_instance_id_1",
         "auto_instance_1",
         "process_kname_1",
+        "gprocess_1",
         "auto_service_type_0",
         "auto_service_id_0",
         "auto_service_0",
@@ -1795,6 +1797,7 @@ class ProcessSpanSet:
         # 用于关联 event
         self.process_id = None
         self.process_kname = None
+        self.gprocess = None
         # 用于聚合包含 sys-span 的服务的时延
         self.auto_service = None  # 在结果集中作为 service_uname，i.e. user-service
         self.auto_service_id = None  # 在结果集中作为 service_uid，i.e. 111
@@ -1869,6 +1872,7 @@ class ProcessSpanSet:
                 'ip',
                 'process_kname',
                 'process_id',
+                'gprocess',
         ]:
             direction_key = f'{key}_{direction}'
             if getattr(self, key):
@@ -1885,6 +1889,7 @@ class ProcessSpanSet:
         self.subnet_id = other.subnet_id
         self.process_id = other.process_id
         self.process_kname = other.process_kname
+        self.gprocess = other.gprocess
         self.ip = other.ip
         self.auto_service = other.auto_service
         self.auto_service_id = other.auto_service_id
@@ -3381,7 +3386,28 @@ def calculate_related_ids(
 def merge_service(services: List[ProcessSpanSet], traces: list,
                   uid_to_trace_index: Dict[int, int]) -> list:
     """
-    按 service 对 flow 分组并统计时延指标
+    按 service 对 flow 分组并统计时延指标，先基于剪枝后的 trace span 过滤服务，对剩下的服务统计时延
+ 
+    服务分组的依据是：「保持一定的抽象粒度的情况下，尽量找到最小粒度的应用服务」
+    通常情况下，service 直接按 auto_service/app_service 分组做合并
+    当同一个 auto_service_id 下有多个进程时，执行进程分组逻辑
+    同一个 auto_service_id 下有多个进程的场景指的是：
+    - k8s: pod 下有多个进程，这些进程互相请求，即为「多个进程」（例如 sidecar 场景）
+           否则，即使 k8s service 下匹配多个 pod，只要是同一个进程名(process_kname)，都属于「同一进程」
+    - host: 开启「gprocess 同步」的情况下，同一个机器上，有多个不同的进程互相发请求，即为「多个进程」
+            否则，如果没有开启 「gprocess 同步」，而刚好他们的 process_kname 一样（比如都叫 python/java）
+            那也会认为是「同一个进程」被聚合到一起
+            也即虚拟机部署情况下想要看到最优效果必须开启「gprocess 同步」
+
+    在以上逻辑基础上，当有 gprocess 时，使用 (auto_service + gprocess) 作为分组维度
+    否则，使用 (auto_service + process_kname) 作为分组维度
+
+    注: gprocess 有值的前提是：
+    1. 仅 eBPF 的一侧有
+    2. 采集器开启 inputs.proc.enabled
+    3. 采集器通过 inputs.proc.process_mathcer 规则匹配到进程
+ 
+    这里 2+3 步骤称为「gprocess 同步」
     """
     metrics_map = {}
     services_from_process_span_set = set()
@@ -3400,12 +3426,16 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     # 在 `sort_all_flows` 函数中分组的 process_span_set 与 services_from_pruning_traces 做匹配，找出最终需要保留的 `service`
     for service in services:
         if (service.auto_service_id, service.auto_service) in services_from_pruning_traces \
-            or service.app_service in services_from_pruning_traces:
+                or service.app_service in services_from_pruning_traces:
             services_from_process_span_set.add(service)
-            if service.process_id:
-                service_to_subprocess.setdefault(
-                    (service.auto_service_id, service.app_service), set()).add(
-                        (service.process_id, service.process_kname))
+            service_to_subprocess.setdefault(service.auto_service_id, set())
+            # 优先级：gprocess > process_kname
+            if service.gprocess:
+                service_to_subprocess[service.auto_service_id].add(
+                    service.gprocess)
+            elif service.process_kname:
+                service_to_subprocess[service.auto_service_id].add(
+                    service.process_kname)
         else:
             log.warning(
                 f"service: {service.app_service}/{service.auto_service} dropped"
@@ -3414,8 +3444,8 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     # 前两者取交集，对剩下的 `auto_service` 做统计
     for service in services_from_process_span_set:
         service_uid, service_uname = "", ""
-        process_id = service.process_id
         process_kname = service.process_kname
+        gprocess = service.gprocess
         if service.auto_service_id:
             service_uid = f"{service.auto_service_id}-"
             service_uname = service.auto_service if service.auto_service else service.ip
@@ -3429,44 +3459,33 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             service_uid = 'unknown-'
             service_uname = "unknown service"
             log.warning(
-                f"service has no auto_service_id or app_service, group_index: {service.group_key}, subnet: {service.subnet}, process: {service.process_id}"
+                f"service has no auto_service_id or app_service, group_index: {service.group_key}, subnet: {service.subnet}, process: {service.process_kname}, gprocess: {service.gprocess}, ip: {service.ip}"
             )
 
-        # 由于 service_uid 标识可能基于进程划分开同一服务下两个实例
-        # 这里单独增加 auto_service_ux 标识，用于拓扑图合并同一个服务节点
-        # due to service_uid maybe used for split by processes in the same service
-        # here, add auto_service_ux just for the topo to identify the same service
-        auto_service_uid = service_uid
-        auto_service_uname = service_uname
-
         # 只对这几种类型按 process 划分进程，否则直接聚合为同一个服务
-        if len(
-                service_to_subprocess.get(
-                    (service.auto_service_id, service.app_service),
-                    set())) > 1 and service.auto_instance_type in (
-                        const.AUTO_INSTANCE_CHOST,
-                        const.AUTO_INSTANCE_POD_NODE, const.AUTO_INSTANCE_POD):
-            service_uid = f'{service_uid}{process_id}-{process_kname}'
-            service_uname = f'{service_uname}:{process_kname}'
+        # 仅当同一个 auto_service_id 下有多个进程，才会执行此逻辑，否则会直接显示 auto_service
+        if len(service_to_subprocess.get(
+                service.auto_service_id,
+                set())) > 1 and service.auto_instance_type in (
+                    const.AUTO_INSTANCE_CHOST, const.AUTO_INSTANCE_POD_NODE,
+                    const.AUTO_INSTANCE_POD):
+            if gprocess:
+                service_uid = f'{service_uid}{gprocess}'
+                service_uname = f'{service_uname}:{gprocess}'
+            else:
+                service_uid = f'{service_uid}{process_kname}'
+                service_uname = f'{service_uname}:{process_kname}'
 
         if service_uid not in metrics_map:
             metrics_map[service_uid] = {
                 "service_uid": service_uid,
                 "service_uname": service_uname,
-                # 注：仅用于拓扑图，无法匹配 span
-                # NOTE: only for topo, unable to match span
-                "auto_service_uid": auto_service_uid,
-                "auto_service_uname": auto_service_uname,
                 "duration": 0,
             }
         else:
             if metrics_map[service_uid].get('service_uname', '') == '':
                 metrics_map[service_uid]['service_uname'] = service_uname
-            if metrics_map[service_uid].get('auto_service_uname', '') == '':
-                metrics_map[service_uid][
-                    'auto_service_uname'] = auto_service_uname
 
-        # 这里 auto_service_ux 不用赋值 span，基于 service_uid 进行实例划分
         # 分组之后对 service 底下的所有 flow 设置对应的服务名称，并统计时延
         for span in service.spans:
             span.flow['service_uid'] = service_uid
@@ -3706,6 +3725,7 @@ def _get_flow_dict(flow: DataFrame):
     flow_dict["auto_service_id"] = flow.get("auto_service_id")
     flow_dict["auto_service_type"] = flow.get("auto_service_type")
     flow_dict["process_kname"] = flow.get("process_kname")
+    flow_dict["gprocess"] = flow.get("gprocess")
     return flow_dict
 
 
