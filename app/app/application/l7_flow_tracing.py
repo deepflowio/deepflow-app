@@ -295,6 +295,8 @@ class L7FlowTracing(Base):
         ]  # 主动调用 APM API 或由 Tracing Completion API 传入
 
         new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
+        tmp_multi_trace_ids_in_trace_id_x = set(
+        )  # 在迭代中发现的 trace_id_2 集合，可能会通过 trace_id 查询出来
 
         # Query1: 先获取 _id 对应的数据
         # don't use timefilter here, querier would extract time from _id (e.g.: id>>32)
@@ -312,8 +314,14 @@ class L7FlowTracing(Base):
         initial_trace_id = self.args.get(
             "trace_id")  # For Tempo API & Tracing Completion API
         if not initial_trace_id:  # For normal query using _id
-            initial_trace_id = dataframe_flowmetas.at[0, 'trace_id']
-        if initial_trace_id:
+            trace_ids = dataframe_flowmetas.at[0, 'trace_id']
+            if trace_ids:
+                for trace_id in trace_ids.split(","):
+                    trace_id = trace_id.strip()
+                    if not trace_id: continue
+                    allowed_trace_ids.add(trace_id)
+                    new_trace_ids_in_prev_iteration.add(trace_id)
+        else:
             allowed_trace_ids.add(initial_trace_id)
             new_trace_ids_in_prev_iteration.add(initial_trace_id)
 
@@ -357,13 +365,14 @@ class L7FlowTracing(Base):
                 if only_query_app_spans:
                     query_trace_filters.append(
                         f"signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}")
+
                 # Query2: 基于 trace_id 获取相关数据，第一层迭代
                 new_trace_id_flows = pd.DataFrame()
                 new_trace_id_flows = await self.query_flowmetas(
                     time_filter, ' AND '.join(query_trace_filters))
+
                 if type(new_trace_id_flows
                         ) == DataFrame and not new_trace_id_flows.empty:
-
                     # remove duplicate or trace_id conflict flows
                     new_trace_id_flow_delete_index = []
                     deleted_trace_ids = set()  # XXX: for debug only
@@ -376,11 +385,34 @@ class L7FlowTracing(Base):
                         # remove conflict trace_id data, since FastFilter(trace_id) has false positives
                         # 若启用 #deepflow-server:/config.trace-id-with-index，仅会使用 trace_id 的哈希进行过滤，
                         # 因此要去掉不在 new_trace_ids_in_prev_iteration 中的 trace_id，否则会有误报。
-                        new_trace_id = new_trace_id_flows.at[index, 'trace_id']
-                        if new_trace_id not in new_trace_ids_in_prev_iteration:
-                            new_trace_id_flow_delete_index.append(index)
-                            deleted_trace_ids.add(new_trace_id)
-                            continue
+                        new_trace_ids = new_trace_id_flows.at[index,
+                                                              'trace_id']
+                        # 这里做一个特殊处理：
+                        # 首先，存在上述「误查询」情况，可能会把一些「非预期」的 trace_id 查出来
+                        # 其次，需要兼容 trace_ids 也即多个 trace_id 的情况
+                        # 所以，这里特殊地针对 new_trace_ids 做分割，如果发现 len>1，说明是多 trace_id 场景，尝试 append 到 tmp_multi_trace_ids_in_trace_id_x 中
+                        # 如果 len=1，有两种情况：1.「误查询」，这类需要去掉；2. 上一轮的多 trace_id 的结果，此类情况应在上一轮已被纳入 set 中，不需要重复 append，所以也丢弃即可。
+                        new_trace_id_arr = [
+                            new_trace_id.strip()
+                            for new_trace_id in new_trace_ids.split(",")
+                            if new_trace_id.strip()
+                        ]
+                        if len(new_trace_id_arr) > 1:
+                            for new_trace_id in new_trace_id_arr:
+                                if new_trace_id not in new_trace_ids_in_prev_iteration:
+                                    if config.allow_multiple_trace_ids_in_tracing_result:
+                                        allowed_trace_ids.add(new_trace_id)
+                                        tmp_multi_trace_ids_in_trace_id_x.add(
+                                            new_trace_id)
+                                    else:
+                                        new_trace_id_flow_delete_index.append(
+                                            index)
+                                        deleted_trace_ids.add(new_trace_id)
+                        elif len(new_trace_id_arr) == 1:
+                            new_trace_id = new_trace_id_arr[0]
+                            if new_trace_id not in new_trace_ids_in_prev_iteration:
+                                new_trace_id_flow_delete_index.append(index)
+                                deleted_trace_ids.add(new_trace_id)
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
@@ -402,7 +434,8 @@ class L7FlowTracing(Base):
                     build_request_ids += new_request_ids
 
                 # remove used trace_ids
-                new_trace_ids_in_prev_iteration = set()
+                new_trace_ids_in_prev_iteration = tmp_multi_trace_ids_in_trace_id_x
+                tmp_multi_trace_ids_in_trace_id_x = set()
 
             else:  # no new_trace_ids_in_prev_iteration
                 pass
@@ -510,15 +543,19 @@ class L7FlowTracing(Base):
                     new_flow_remove_indices.append(index)
                     continue
                 # delete different trace id data
-                new_trace_id = new_flows.at[index, 'trace_id']
-                if new_trace_id and new_trace_id not in allowed_trace_ids:
-                    if not allowed_trace_ids or config.allow_multiple_trace_ids_in_tracing_result:
-                        allowed_trace_ids.add(new_trace_id)
-                        new_trace_ids_in_prev_iteration.add(new_trace_id)
-                    else:  # remove conflict trace_id data
-                        new_flow_remove_indices.append(index)
-                        deleted_trace_ids.add(new_trace_id)
-                        continue
+                new_trace_ids = new_flows.at[index, 'trace_id']
+                if not new_trace_ids:
+                    continue
+                for new_trace_id in new_trace_ids.split(","):
+                    new_trace_id = new_trace_id.strip()
+                    if new_trace_id and new_trace_id not in allowed_trace_ids:
+                        if not allowed_trace_ids or config.allow_multiple_trace_ids_in_tracing_result:
+                            allowed_trace_ids.add(new_trace_id)
+                            new_trace_ids_in_prev_iteration.add(new_trace_id)
+                        else:  # remove conflict trace_id data
+                            new_flow_remove_indices.append(index)
+                            deleted_trace_ids.add(new_trace_id)
+
             if new_flow_remove_indices:
                 new_flows = new_flows.drop(
                     new_flow_remove_indices).reset_index(drop=True)
@@ -1118,7 +1155,8 @@ class L7NetworkMeta:
     def flow_field_conflict(cls, lhs: TraceInfo, rhs: TraceInfo) -> bool:
         # span_id
         if lhs.trace_id and lhs.span_id and rhs.trace_id and rhs.span_id and (
-                lhs.trace_id != rhs.trace_id or lhs.span_id != rhs.span_id):
+                not set(lhs.trace_id).intersection(rhs.trace_id)
+                or lhs.span_id != rhs.span_id):
             return True
 
         is_http2_grpc_and_differ = False
@@ -1706,8 +1744,8 @@ class SpanNode:
     def get_response_duration(self) -> int:
         return self.flow.get('response_duration', 0)
 
-    def get_trace_id(self) -> int:
-        return self.flow.get('trace_id', '')
+    def get_trace_id(self) -> list:
+        return self.flow.get('trace_id', [])
 
     def get_server_port(self) -> int:
         return self.flow.get('server_port', 0)
@@ -2519,6 +2557,14 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
             value = dict_flows[key][index]
             if key == '_id':  # 流合并后会对应多条记录
                 flow[key] = [value]
+            elif key == 'trace_id':
+                # NOTE: trace_id 可能是 xxx,yyy 多值，修改为排序过的 list，方便比较
+                # 排序是为了避免 yyy,xxx != xxx,yyy 的情况
+                # 注意从这一刻开始，后面所有用到 flow[trace_id] 的地方得到的都是 list(string)
+                # 直到 format_final_result 函数
+                flow[key] = sorted(
+                    [v.strip() for v in value.split(",") if v.strip()])
+                flow["origin_trace_id"] = value
             elif isinstance(value, float) and math.isnan(value):
                 # XXX: 要在源头统一处理
                 # ClickHouse 中的 Nullable(int) 字段在无值时会返回为 dataframe 中的 float(nan)
@@ -3270,6 +3316,7 @@ def _range_overlap(start_1: int, end_1: int, start_2: int, end_2: int,
 # Obtain traces after pruning
 def pruning_flows(_id, flows, host_clock_offset_us):
     _FLOW_INDEX_KEY = 'id'  # after _get_flow_dict(), _index change to id
+    _FLOW_TRACE_ID_KEY = 'trace_id'
 
     # 构建一个并查集，用来将所有的 Trace 划分为一个个 Tree
     disjoint_set = DisjointSet()
@@ -3304,26 +3351,59 @@ def pruning_flows(_id, flows, host_clock_offset_us):
         return flows
 
     # 计算每棵树里面的 trace_ids
+    trace_id_index_map = {}
     for flow in flows:
-        if not flow['trace_id']:
+        if not flow[_FLOW_TRACE_ID_KEY] or len(flow[_FLOW_TRACE_ID_KEY]) == 0:
             continue
         index = flow[_FLOW_INDEX_KEY]
         root = disjoint_set.get(index)
         if 'trace_ids' not in tree_infos[root]:
-            tree_infos[root]['trace_ids'] = set([flow['trace_id']])
+            tree_infos[root]['trace_ids'] = set(flow[_FLOW_TRACE_ID_KEY])
         else:
-            tree_infos[root]['trace_ids'].add(flow['trace_id'])
+            tree_infos[root]['trace_ids'].update(flow[_FLOW_TRACE_ID_KEY])
+        for trace_id in flow[_FLOW_TRACE_ID_KEY]:
+            trace_id_index_map.setdefault(trace_id, len(trace_id_index_map))
+
+    # 一般而言，多 trace_id 的场景通常如下：
+    # 1. 一定有 trace_id 交叠
+    # trace_id    _trace_id_2
+    #   aaa[root]    bbb
+    #   ccc          bbb
+    # 2. 需要先基于 trace_id 找到所有与 root_of_initial_flow 有交叠的 trace_id，这一类 trace_id 都不被剪枝
+    # trace_id    _trace_id_2
+    #   aaa[root]    bbb
+    #   bbb          ccc
+    #   ccc          ddd
+
+    trace_id_set = DisjointSet()
+    trace_id_set.disjoint_set = [-1] * (len(trace_id_index_map) + 1)
+    for flow in flows:
+        trace_ids = flow[_FLOW_TRACE_ID_KEY]
+        if len(trace_ids) == 0:
+            continue
+        parent_index = trace_id_index_map[trace_ids[0]]
+        parent_root = trace_id_set.get(parent_index)
+        for trace_id in trace_ids[1:]:
+            child_index = trace_id_index_map[trace_id]
+            child_root = trace_id_set.get(child_index)
+            if child_root != parent_root:
+                trace_id_set.put(child_root, parent_root)
+                trace_id_set.get(child_index)
 
     # avoid unknown exceptions
     if root_of_initial_flow < 0:
         log.warning(f"cannot find the root of initial flow: [{_id}]")
         return flows
+
     # 保留与 root_of_initial_flow 所在 Trace Tree 时间有交叠的 Trace Tree
     final_flows = []
     initial_tree_info = tree_infos[root_of_initial_flow]
     initial_tree_start_time_us = initial_tree_info['min_start_time_us']
     initial_tree_end_time_us = initial_tree_info['max_end_time_us']
     initial_tree_trace_ids = initial_tree_info.get('trace_ids', set())
+    initial_tree_trace_roots = set(
+        trace_id_set.get(trace_id_index_map[trace_id])
+        for trace_id in initial_tree_trace_ids)
     for root, tree_info in tree_infos.items():
         if not _range_overlap(
                 tree_info['min_start_time_us'],
@@ -3332,9 +3412,11 @@ def pruning_flows(_id, flows, host_clock_offset_us):
                 initial_tree_end_time_us,
                 host_clock_offset_us,
         ):
-            # 如果时间范围无交叠，但属于同一个 trace_id 也应该追踪出来
-            if initial_tree_trace_ids and initial_tree_trace_ids & tree_infos[
-                    root].get('trace_ids', set()):
+            # 如果时间范围无交叠，但属于同一个 trace_id root 也应该追踪出来
+            tree_trace_roots = set(
+                trace_id_set.get(trace_id_index_map[trace_id])
+                for trace_id in tree_info.get('trace_ids', set()))
+            if initial_tree_trace_roots and initial_tree_trace_roots & tree_trace_roots:
                 pass
             else:
                 # 时间与原始树不交迭、trace_id 与原始树不共享，则进行剪枝
@@ -3549,6 +3631,10 @@ def format_final_result(
                 'deepflow_parent_span_id'] not in deepflow_span_ids:
             trace['deepflow_parent_span_id'] = ''
             trace['parent_id'] = -1
+        # 在整个计算过程中，trace_id 都转换为 list(string) 方便计算
+        # 最后返回的时候转回原来的字符串用以界面显示
+        trace['trace_id'] = trace['origin_trace_id']
+        trace.pop('origin_trace_id')
     return response
 
 
@@ -3714,7 +3800,9 @@ def _get_flow_dict(flow: DataFrame):
         "tap":
         flow.get("tap", None),
         "_querier_region":
-        flow.get("_querier_region", None)
+        flow.get("_querier_region", None),
+        "origin_trace_id":
+        flow.get("origin_trace_id", None)
     }
     # 0909: 之前的设计逻辑，要求仅 eBPF 返回这些 tag
     # 取消此逻辑，允许所有 span 返回下列数据，支持前端获取 net span 的 auto_service 等 tag 信息，用于在仅有 net span 场景下计算拓扑图
