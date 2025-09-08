@@ -1421,6 +1421,14 @@ class NetworkSpanSet:
         self.span_id = None
         # 分组聚合所有 tcp_seq 相同的 flow
         self.spans: List[SpanNode] = []
+        self.auto_service_0 = None
+        self.auto_service_1 = None
+        self.auto_service_id_0 = None
+        self.auto_service_id_1 = None
+        self.auto_service_type_0 = None
+        self.auto_service_type_1 = None
+        self.auto_instance_type_0 = None
+        self.auto_instance_type_1 = None
         self.id = uuid.uuid1().hex
 
     def __eq__(self, other: 'NetworkSpanSet') -> bool:
@@ -1428,6 +1436,44 @@ class NetworkSpanSet:
 
     def __hash__(self) -> int:
         return hash(self.id)
+
+    def _set_auto_service(self, span: 'SpanNode'):
+        """
+        此方法统一 net_span 的统计字段并为 flow 生成一个无方向的 key
+        这里和 ProcessSpanSet._set_auto_service 有如下区别：
+        1. ProcessSpanSet 的 _set_auto_service 是为了在剪枝(pruning_trace) 后做服务聚合和时延统计
+        2. 这里的 _set_auto_service 只是为了赋值 span.auto_service，方便在「仅有 net span」的场景里，界面可以生成拓扑图
+        3. 对 ProcessSpanSet 而言，所有 span 一定都是同一个服务，但是 Network 的 span 可能是不同的服务（取决于观测点）
+        4. 所以这里要根据实际观测点来对 span.auto_service_x 赋值，不要统一处理
+        """
+        direction = "1" if span.tap_side.startswith("s") else "0"
+        for key in [
+                'auto_service_id',
+                'auto_service',
+                'auto_service_type',
+                'auto_instance_type',
+        ]:
+            direction_key = f'{key}_{direction}'
+            if not span.flow[direction_key]:
+                direction_key = f'{key}_0'
+
+            if getattr(self, direction_key):
+                if (self.auto_service_type_1 in [
+                        const.AUTO_SERVICE_IP,
+                        const.AUTO_SERVICE_INTERNET_IP,
+                ] or self.auto_service_type_0 in [
+                        const.AUTO_SERVICE_IP,
+                        const.AUTO_SERVICE_INTERNET_IP,
+                ]) or (self.auto_instance_type_0 in [
+                        const.AUTO_INSTANCE_IP, const.AUTO_INSTANCE_INTERNET_IP
+                ] or self.auto_instance_type_1 in [
+                        const.AUTO_INSTANCE_IP, const.AUTO_INSTANCE_INTERNET_IP
+                ]):
+                    setattr(self, direction_key, span.flow[direction_key])
+                span.flow[key] = getattr(self, direction_key)
+            else:
+                setattr(self, direction_key, span.flow[direction_key])
+                span.flow[key] = span.flow[direction_key]
 
     def append_span_node(self, span: 'SpanNode'):
         """
@@ -1438,6 +1484,12 @@ class NetworkSpanSet:
             self.span_id = span.get_span_id()
         # 标记 span 是否属于同一组 network_span_set，避免在 _connect_process_and_networks 首尾关联产生环路
         span.network_span_set = self
+        # 这里有可能写进来的是 SysSpan，需要避免重复设置，避免服务划分错误
+        # 由于在 sort_all_flows 里，是先执行 ProcessSpanSet 初始化，再执行 NetworkSpanSet 初始化
+        # 所以可以认为在这个步骤里，所有 SysSpan 已经带上了 auto_service，直接绕开即可
+        # 也即：NetworkSpanSet 的 auto_service 不要覆盖掉 SysSpan 已有的 auto_service
+        if span.signal_source == L7_FLOW_SIGNAL_SOURCE_PACKET:
+            self._set_auto_service(span)
         self.spans.append(span)
 
     def set_parent_relation(
@@ -3411,7 +3463,8 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
             if metrics_map[service_uid].get('service_uname', '') == '':
                 metrics_map[service_uid]['service_uname'] = service_uname
             if metrics_map[service_uid].get('auto_service_uname', '') == '':
-                metrics_map[service_uid]['auto_service_uname'] = auto_service_uname
+                metrics_map[service_uid][
+                    'auto_service_uname'] = auto_service_uname
 
         # 这里 auto_service_ux 不用赋值 span，基于 service_uid 进行实例划分
         # 分组之后对 service 底下的所有 flow 设置对应的服务名称，并统计时延
@@ -3644,14 +3697,15 @@ def _get_flow_dict(flow: DataFrame):
         "_querier_region":
         flow.get("_querier_region", None)
     }
-    # 这里不知道为什么只有 eBPF 返回这些数据，可能会影响界面显示或服务分组，如果要修改先找前端确认
-    if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
-        flow_dict["subnet"] = flow.get("subnet")
-        flow_dict["ip"] = flow.get("ip")
-        flow_dict["auto_service"] = flow.get("auto_service")
-        flow_dict["auto_service_id"] = flow.get("auto_service_id")
-        flow_dict["auto_service_type"] = flow["auto_service_type"]
-        flow_dict["process_kname"] = flow.get("process_kname")
+    # 0909: 之前的设计逻辑，要求仅 eBPF 返回这些 tag
+    # 取消此逻辑，允许所有 span 返回下列数据，支持前端获取 net span 的 auto_service 等 tag 信息，用于在仅有 net span 场景下计算拓扑图
+    # if flow["signal_source"] == L7_FLOW_SIGNAL_SOURCE_EBPF:
+    flow_dict["subnet"] = flow.get("subnet")
+    flow_dict["ip"] = flow.get("ip")
+    flow_dict["auto_service"] = flow.get("auto_service")
+    flow_dict["auto_service_id"] = flow.get("auto_service_id")
+    flow_dict["auto_service_type"] = flow.get("auto_service_type")
+    flow_dict["process_kname"] = flow.get("process_kname")
     return flow_dict
 
 
