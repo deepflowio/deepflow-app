@@ -272,6 +272,7 @@ class L7FlowTracing(Base):
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
             host_clock_offset_us: int = config.host_clock_offset_us,
+            extra_trace_fields: list = config.extra_trace_fields,
             app_spans_from_api: list = []) -> Tuple(list, list):
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
@@ -290,6 +291,7 @@ class L7FlowTracing(Base):
         syscall_trace_ids = set()  # set(str(syscall_trace_id))
         x_request_ids = set()  # set(x_request_id)
         dns_request_ids = set()  # set(request_id)
+        extra_trace_field_values = set()  # set(attributes.xxx)
         allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
         app_spans_from_external = [
         ]  # 主动调用 APM API 或由 Tracing Completion API 传入
@@ -298,15 +300,16 @@ class L7FlowTracing(Base):
 
         # Query1: 先获取 _id 对应的数据
         # don't use timefilter here, querier would extract time from _id (e.g.: id>>32)
-        dataframe_flowmetas = await self.query_flowmetas("1=1", base_filter)
+        dataframe_flowmetas = await self.query_flowmetas(
+            "1=1", base_filter, extra_trace_fields)
         if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
             # when app_spans_from_api got values from api, return it
             return [], app_spans_from_api
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
 
         # 用于下一轮迭代，记录元信息
-        build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids = _build_simple_trace_info_from_dataframe(
-            dataframe_flowmetas)
+        build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids, build_extra_trace_fields = _build_simple_trace_info_from_dataframe(
+            dataframe_flowmetas, extra_trace_fields)
 
         # remember the initial trace_id
         initial_trace_id = self.args.get(
@@ -360,7 +363,8 @@ class L7FlowTracing(Base):
                 # Query2: 基于 trace_id 获取相关数据，第一层迭代
                 new_trace_id_flows = pd.DataFrame()
                 new_trace_id_flows = await self.query_flowmetas(
-                    time_filter, ' AND '.join(query_trace_filters))
+                    time_filter, ' AND '.join(query_trace_filters),
+                    extra_trace_fields)
                 if type(new_trace_id_flows
                         ) == DataFrame and not new_trace_id_flows.empty:
 
@@ -393,13 +397,15 @@ class L7FlowTracing(Base):
                         [dataframe_flowmetas, new_trace_id_flows])
                     l7_flow_ids = set(dataframe_flowmetas['_id'])
 
-                    new_trace_req_tcp_seqs, new_trace_resp_tcp_seqs, new_trace_x_request_ids, new_trace_syscall_trace_ids, new_request_ids = _build_simple_trace_info_from_dataframe(
-                        new_trace_id_flows)
+                    new_trace_req_tcp_seqs, new_trace_resp_tcp_seqs, new_trace_x_request_ids, new_trace_syscall_trace_ids, new_request_ids, new_extra_trace_fields = _build_simple_trace_info_from_dataframe(
+                        new_trace_id_flows, extra_trace_fields)
                     build_req_tcp_seqs += new_trace_req_tcp_seqs
                     build_resp_tcp_seqs += new_trace_resp_tcp_seqs
                     build_x_request_ids += new_trace_x_request_ids
                     build_syscall_trace_ids += new_trace_syscall_trace_ids
                     build_request_ids += new_request_ids
+                    for key, val in new_extra_trace_fields.items():
+                        build_extra_trace_fields[key] += val
 
                 # remove used trace_ids
                 new_trace_ids_in_prev_iteration = set()
@@ -489,13 +495,33 @@ class L7FlowTracing(Base):
                     new_filters.append(
                         f"({' AND '.join(dns_request_id_filters)})")
 
+            if config.extra_trace_fields:
+                for key, val in build_extra_trace_fields.items():
+                    new_extra_trace_fields = set()
+                    for netf in val:
+                        if netf and netf not in extra_trace_field_values:
+                            extra_trace_field_values.add(netf)
+                            new_extra_trace_fields.add(netf)
+                    new_extra_trace_field_filters = []
+                    if new_extra_trace_fields:
+                        new_extra_trace_field_strs = [
+                            f"'{etf}'" for etf in new_extra_trace_fields
+                        ]
+                        # XXX: 注意这里实际使用可能是 attributes.xxx in (yyy, zzz)，可能会有性能 issue
+                        new_extra_trace_field_filters.append(
+                            f"`{key}` in ({','.join(new_extra_trace_field_strs)})"
+                        )
+                        new_filters.append(
+                            f"({' OR '.join(new_extra_trace_field_filters)})")
+
             if not new_filters:  # no more iterations needed
                 break
 
             # Query3: 查询上述基于 Condition[123] 构建出的条件，即与【第一层迭代】关联的所有 flow，此处构建【第二层迭代】查询
             new_flows = pd.DataFrame()
             new_flows = await self.query_flowmetas(time_filter,
-                                                   ' OR '.join(new_filters))
+                                                   ' OR '.join(new_filters),
+                                                   extra_trace_fields)
             if type(new_flows
                     ) != DataFrame or new_flows.empty:  # no more new flows
                 break
@@ -558,8 +584,8 @@ class L7FlowTracing(Base):
                 l7_flow_ids = set(dataframe_flowmetas['_id'])
 
                 # reset new_trace_infos
-                build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids = _build_simple_trace_info_from_dataframe(
-                    new_flows)
+                build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids, build_extra_trace_fields = _build_simple_trace_info_from_dataframe(
+                    new_flows, extra_trace_fields)
 
             else:  # no new_flows, no more iterations needed
                 break
@@ -591,7 +617,8 @@ class L7FlowTracing(Base):
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
         l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
             time_filter, base_filter, max_iteration, network_delay_us,
-            host_clock_offset_us, app_spans_from_api)
+            host_clock_offset_us, config.extra_trace_fields,
+            app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
@@ -649,8 +676,8 @@ class L7FlowTracing(Base):
                 self.failed_regions.add(region_name)
         return response
 
-    async def query_flowmetas(self, time_filter: str,
-                              base_filter: str) -> list:
+    async def query_flowmetas(self, time_filter: str, base_filter: str,
+                              extra_fields: list) -> list:
         """找到base_filter对应的L7 Flowmeta
 
         网络流量追踪信息：
@@ -666,15 +693,18 @@ class L7FlowTracing(Base):
             x_request_id_0：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
             x_request_id_1：通过Nginx/HAProxy/BFE等L7网关注入的requst_id追踪
         """
+        extra_field_strs = [f"`{f}`" for f in extra_fields]
         sql = """SELECT
         type, signal_source, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us,
         toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, protocol, syscall_trace_id_request, 
         syscall_trace_id_response, span_id, parent_span_id, request_id, l7_protocol, trace_id, x_request_id_0,
-        x_request_id_1, _id, tap_side
+        x_request_id_1, _id, tap_side {extra_field_list}
         FROM `l7_flow_log`
         WHERE (({time_filter}) AND ({base_filter})) limit {l7_tracing_limit}
         """.format(time_filter=time_filter,
                    base_filter=base_filter,
+                   extra_field_list="" if len(extra_field_strs) == 0 else
+                   f", {', '.join(extra_field_strs)}",
                    l7_tracing_limit=config.l7_tracing_limit)
         response = await self.query_ck(sql)
         # Hit Select Limit
@@ -857,7 +887,8 @@ def set_all_relate(trace_infos: list,
             if fast_check and find_related: continue
 
 
-def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
+def _build_simple_trace_info_from_dataframe(df: pd.DataFrame,
+                                            extra_trace_fields: list):
     req_tcp_seqs = df['req_tcp_seq'].tolist()
     resp_tcp_seqs = df['resp_tcp_seq'].tolist()
     x_request_ids = df['x_request_id_0'].tolist()
@@ -866,7 +897,10 @@ def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
     syscall_trace_ids += df['syscall_trace_id_response'].tolist()
     request_ids = df.loc[df['l7_protocol'] == L7_PROTOCOL_DNS,
                          'request_id'].tolist()
-    return req_tcp_seqs, resp_tcp_seqs, x_request_ids, syscall_trace_ids, request_ids
+    extra_trace_map = {}
+    for field in extra_trace_fields:
+        extra_trace_map[field] = df.loc[df[field] != '', field].tolist()
+    return req_tcp_seqs, resp_tcp_seqs, x_request_ids, syscall_trace_ids, request_ids, extra_trace_map
 
 
 class TraceInfo:

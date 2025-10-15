@@ -38,3 +38,6 @@ app:
     # due to transaction-id reused, it may leads to big data query and causes query performance issue
     # it also possibly leads to unwanted tracing results
     allow_dns_tracing: true
+    # support extra fields during trace, it must can be found in l7_flow_log, also, it would be query in l7_flow_log, default: empty
+    # notice: if you want this feature, you must set allow_multiple_trace_ids_in_tracing_result: true
+    extra_trace_fields: []
