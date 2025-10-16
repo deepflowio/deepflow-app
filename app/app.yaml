@@ -41,3 +41,6 @@ app:
     # support extra fields during trace, it must can be found in l7_flow_log, also, it would be query in l7_flow_log, default: empty
     # notice: if you want this feature, you must set allow_multiple_trace_ids_in_tracing_result: true
     extra_trace_fields: []
+    # source data using for tracing during query, default: all (can't config to empty)
+    # available options: trace_id, syscall_trace_id, x_request_id, tcp_seq, dns, extra_trace_fields
+    tracing_source: []
