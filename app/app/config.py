@@ -25,6 +25,8 @@ class Config(object):
         self.call_apm_api_to_supplement_trace = spec.get(
             'call_apm_api_to_supplement_trace', False)
         self.allow_dns_tracing = spec.get('allow_dns_tracing', True)
+        self.extra_trace_fields = spec.get('extra_trace_fields', [])
+        self.tracing_source = spec.get('tracing_source', [])
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
