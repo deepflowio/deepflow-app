@@ -21,7 +21,7 @@ class Config(object):
         self.network_delay_us = spec.get('network_delay_us', 50000)
         self.host_clock_offset_us = spec.get('host_clock_offset_us', 10000)
         self.allow_multiple_trace_ids_in_tracing_result = spec.get(
-            'allow_multiple_trace_ids_in_tracing_result', True)
+            'allow_multiple_trace_ids_in_tracing_result', False)
         self.call_apm_api_to_supplement_trace = spec.get(
             'call_apm_api_to_supplement_trace', False)
         self.allow_dns_tracing = spec.get('allow_dns_tracing', True)
