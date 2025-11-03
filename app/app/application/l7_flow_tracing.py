@@ -290,13 +290,12 @@ class L7FlowTracing(Base):
         syscall_trace_ids = set()  # set(str(syscall_trace_id))
         x_request_ids = set()  # set(x_request_id)
         dns_request_ids = set()  # set(request_id)
-        allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
         app_spans_from_external = [
         ]  # 主动调用 APM API 或由 Tracing Completion API 传入
 
-        new_trace_ids_in_prev_iteration = set()  # 上一轮迭代过程中发现的新 trace_id 集合
-        tmp_multi_trace_ids_in_trace_id_x = set(
-        )  # 在迭代中发现的 trace_id_2 集合，可能会通过 trace_id 查询出来
+        allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
+        visited_trace_ids = set()  # 已访问过的 trace_id 集合
+        new_trace_ids_for_next_iteration = set()  # 给下一轮迭代查询用的 trace_id 集合
 
         # Query1: 先获取 _id 对应的数据
         # don't use timefilter here, querier would extract time from _id (e.g.: id>>32)
@@ -314,16 +313,16 @@ class L7FlowTracing(Base):
         initial_trace_id = self.args.get(
             "trace_id")  # For Tempo API & Tracing Completion API
         if not initial_trace_id:  # For normal query using _id
-            trace_ids = dataframe_flowmetas.at[0, 'trace_id']
-            if trace_ids:
-                for trace_id in trace_ids.split(","):
-                    trace_id = trace_id.strip()
-                    if not trace_id: continue
-                    allowed_trace_ids.add(trace_id)
-                    new_trace_ids_in_prev_iteration.add(trace_id)
+            trace_ids = dataframe_flowmetas.at[0, 'trace_id'] or ''
+            for trace_id in trace_ids.split(","):
+                trace_id = trace_id.strip()
+                if not trace_id:
+                    continue
+                allowed_trace_ids.add(trace_id)
+                new_trace_ids_for_next_iteration.add(trace_id)
         else:
             allowed_trace_ids.add(initial_trace_id)
-            new_trace_ids_in_prev_iteration.add(initial_trace_id)
+            new_trace_ids_for_next_iteration.add(initial_trace_id)
 
         # append app_spans from Tracing Completion API
         app_spans_from_external.extend(app_spans_from_api)
@@ -333,7 +332,7 @@ class L7FlowTracing(Base):
                 trace_id = app_span.get('trace_id', '')
                 if trace_id:
                     allowed_trace_ids.add(trace_id)
-                    new_trace_ids_in_prev_iteration.add(trace_id)
+                    new_trace_ids_for_next_iteration.add(trace_id)
 
         # max_iterations set to 0 means only query data with trace_id
         only_query_trace_id = False
@@ -344,11 +343,11 @@ class L7FlowTracing(Base):
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
             # 1. 使用 trace_id 查询
-            if new_trace_ids_in_prev_iteration:
+            if new_trace_ids_for_next_iteration:
                 # 1.1. Call external APM API
                 if config.call_apm_api_to_supplement_trace:
                     new_app_spans_from_apm = []
-                    for trace_id in new_trace_ids_in_prev_iteration:
+                    for trace_id in new_trace_ids_for_next_iteration:
                         app_spans = await self.query_apm_for_app_span_completion(
                             trace_id)
                         new_app_spans_from_apm.extend(app_spans)
@@ -358,7 +357,7 @@ class L7FlowTracing(Base):
 
                 # 1.2. Query database by trace_id
                 new_trace_ids_str = set(
-                    [f"'{nti}'" for nti in new_trace_ids_in_prev_iteration])
+                    [f"'{nti}'" for nti in new_trace_ids_for_next_iteration])
                 query_trace_filters = [
                     f"FastFilter(trace_id) IN ({','.join(new_trace_ids_str)})"
                 ]
@@ -370,6 +369,11 @@ class L7FlowTracing(Base):
                 new_trace_id_flows = pd.DataFrame()
                 new_trace_id_flows = await self.query_flowmetas(
                     time_filter, ' AND '.join(query_trace_filters))
+
+                # 已查询过一次的 trace_id，直接加入 visited，不需要再被查询
+                # new_trace_ids_for_next_iteration 已被查询，可在这一步直接清空
+                visited_trace_ids.update(new_trace_ids_for_next_iteration)
+                new_trace_ids_for_next_iteration.clear()
 
                 if type(new_trace_id_flows
                         ) == DataFrame and not new_trace_id_flows.empty:
@@ -384,14 +388,14 @@ class L7FlowTracing(Base):
                             continue
                         # remove conflict trace_id data, since FastFilter(trace_id) has false positives
                         # 若启用 #deepflow-server:/config.trace-id-with-index，仅会使用 trace_id 的哈希进行过滤，
-                        # 因此要去掉不在 new_trace_ids_in_prev_iteration 中的 trace_id，否则会有误报。
+                        # 因此要去掉不在 allowed_trace_ids 中的 trace_id，否则会有误报。
                         new_trace_ids = new_trace_id_flows.at[index,
                                                               'trace_id']
                         # 这里做一个特殊处理：
                         # 首先，存在上述「误查询」情况，可能会把一些「非预期」的 trace_id 查出来
                         # 其次，需要兼容 trace_ids 也即多个 trace_id 的情况
-                        # 所以，这里特殊地针对 new_trace_ids 做分割，如果发现 len>1，说明是多 trace_id 场景，尝试 append 到 tmp_multi_trace_ids_in_trace_id_x 中
-                        # 如果 len=1，有两种情况：1.「误查询」，这类需要去掉；2. 上一轮的多 trace_id 的结果，此类情况应在上一轮已被纳入 set 中，不需要重复 append，所以也丢弃即可。
+                        # 所以，这里特殊地针对 new_trace_ids 做分割，如果发现 len>1，说明是多 trace_id 场景，尝试 append 到 new_trace_ids_for_next_iteration 中
+                        # 如果 len=1，有两种情况：1.误查询，这类需要去掉；2. 上一轮的多 trace_id 的结果，此类情况应在上一轮已被纳入 visited_trace_id 中，不需要重复 append，所以也丢弃即可。
                         new_trace_id_arr = [
                             new_trace_id.strip()
                             for new_trace_id in new_trace_ids.split(",")
@@ -399,18 +403,13 @@ class L7FlowTracing(Base):
                         ]
                         if len(new_trace_id_arr) > 1:
                             for new_trace_id in new_trace_id_arr:
-                                if new_trace_id not in new_trace_ids_in_prev_iteration:
-                                    if config.allow_multiple_trace_ids_in_tracing_result:
-                                        allowed_trace_ids.add(new_trace_id)
-                                        tmp_multi_trace_ids_in_trace_id_x.add(
-                                            new_trace_id)
-                                    else:
-                                        new_trace_id_flow_delete_index.append(
-                                            index)
-                                        deleted_trace_ids.add(new_trace_id)
+                                if new_trace_id not in visited_trace_ids:
+                                    allowed_trace_ids.add(new_trace_id)
+                                    new_trace_ids_for_next_iteration.add(
+                                        new_trace_id)
                         elif len(new_trace_id_arr) == 1:
                             new_trace_id = new_trace_id_arr[0]
-                            if new_trace_id not in new_trace_ids_in_prev_iteration:
+                            if new_trace_id not in allowed_trace_ids:
                                 new_trace_id_flow_delete_index.append(index)
                                 deleted_trace_ids.add(new_trace_id)
                     if new_trace_id_flow_delete_index:
@@ -432,10 +431,6 @@ class L7FlowTracing(Base):
                     build_x_request_ids += new_trace_x_request_ids
                     build_syscall_trace_ids += new_trace_syscall_trace_ids
                     build_request_ids += new_request_ids
-
-                # remove used trace_ids
-                new_trace_ids_in_prev_iteration = tmp_multi_trace_ids_in_trace_id_x
-                tmp_multi_trace_ids_in_trace_id_x = set()
 
             else:  # no new_trace_ids_in_prev_iteration
                 pass
@@ -546,12 +541,14 @@ class L7FlowTracing(Base):
                 new_trace_ids = new_flows.at[index, 'trace_id']
                 if not new_trace_ids:
                     continue
+                # 这里的 trace_ids 是通过 eBPF/Packet 关联查询出来的，而不是通过 trace_id 在迭代过程中查出来的
+                # 因此，这里无论是否有多个，都应被 allow_multiple_trace_ids_in_tracing_result 判断是否要保留
                 for new_trace_id in new_trace_ids.split(","):
                     new_trace_id = new_trace_id.strip()
                     if new_trace_id and new_trace_id not in allowed_trace_ids:
                         if not allowed_trace_ids or config.allow_multiple_trace_ids_in_tracing_result:
                             allowed_trace_ids.add(new_trace_id)
-                            new_trace_ids_in_prev_iteration.add(new_trace_id)
+                            new_trace_ids_for_next_iteration.add(new_trace_id)
                         else:  # remove conflict trace_id data
                             new_flow_remove_indices.append(index)
                             deleted_trace_ids.add(new_trace_id)
@@ -598,6 +595,10 @@ class L7FlowTracing(Base):
                 build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids = _build_simple_trace_info_from_dataframe(
                     new_flows)
 
+            elif len(
+                    new_trace_ids_for_next_iteration
+            ) > 0:  # find multiple trace_ids in current iteration, should query for next iteration
+                continue
             else:  # no new_flows, no more iterations needed
                 break
 
