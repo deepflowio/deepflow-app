@@ -407,14 +407,9 @@ class L7FlowTracing(Base):
                         if len(new_trace_id_arr) > 1:
                             for new_trace_id in new_trace_id_arr:
                                 if new_trace_id not in new_trace_ids_in_prev_iteration:
-                                    if config.allow_multiple_trace_ids_in_tracing_result:
-                                        allowed_trace_ids.add(new_trace_id)
-                                        tmp_multi_trace_ids_in_trace_id_x.add(
-                                            new_trace_id)
-                                    else:
-                                        new_trace_id_flow_delete_index.append(
-                                            index)
-                                        deleted_trace_ids.add(new_trace_id)
+                                    allowed_trace_ids.add(new_trace_id)
+                                    tmp_multi_trace_ids_in_trace_id_x.add(
+                                        new_trace_id)
                         elif len(new_trace_id_arr) == 1:
                             new_trace_id = new_trace_id_arr[0]
                             if new_trace_id not in new_trace_ids_in_prev_iteration:
@@ -553,6 +548,8 @@ class L7FlowTracing(Base):
                 new_trace_ids = new_flows.at[index, 'trace_id']
                 if not new_trace_ids:
                     continue
+                # 这里的 trace_ids 是通过 eBPF/Packet 关联查询出来的，而不是通过 trace_id 在迭代过程中查出来的
+                # 因此，这里无论是否有多个，都应被 allow_multiple_trace_ids_in_tracing_result 判断是否要保留
                 for new_trace_id in new_trace_ids.split(","):
                     new_trace_id = new_trace_id.strip()
                     if new_trace_id and new_trace_id not in allowed_trace_ids:
