@@ -1179,6 +1179,9 @@ class L7NetworkMeta:
                 'http_proxy_client',
                 'request_type',
                 'request_domain',
+                # 如果协议是 MySQL，这里 req_resource=SQL语句
+                # 当语句超大时，在 eBPF 位置发生包重组，在 Packet 位置没有包重组，会导致这个判断不通过
+                # 于是，对这个字段只需要判断 :1024 即可，因为 Packet 的默认截断大小是 1024，且 1024 < 1500(default mtu)
                 'request_resource',
                 'response_code',
                 'response_exception',
@@ -1222,6 +1225,11 @@ class L7NetworkMeta:
                 if lhs_value != rhs_value:
                     is_http2_grpc_and_differ = True
                 continue
+
+            if key == 'request_resource' and (len(lhs_value) > 1024
+                                              and len(rhs_value) > 1024):
+                lhs_value = lhs_value[:1024]
+                rhs_value = rhs_value[:1024]
 
             if lhs_value != rhs_value:
                 return True
