@@ -1175,6 +1175,10 @@ class L7NetworkMeta:
                 'http_proxy_client',
                 'request_type',
                 'request_domain',
+                # 如果协议是 MySQL，这里 req_resource=SQL语句
+                # 当语句超大时，在 eBPF 和 Packet 中收到的包大小可能不一样，导致这里判断不准确
+                # 于是，对这个字段只需要判断前 1024 字节即可(Packet 的默认截断大小是 1024)
+                # 对别的协议（如 HTTP/gRPC/Redis），req_resource 一般是 URL/Redis 命令，1024 字节也足够比较
                 'request_resource',
                 'response_code',
                 'response_exception',
@@ -1218,6 +1222,11 @@ class L7NetworkMeta:
                 if lhs_value != rhs_value:
                     is_http2_grpc_and_differ = True
                 continue
+
+            if key == 'request_resource' and len(lhs_value) > 1024 and len(
+                    rhs_value) > 1024:
+                lhs_value = lhs_value[:1024]
+                rhs_value = rhs_value[:1024]
 
             if lhs_value != rhs_value:
                 return True
