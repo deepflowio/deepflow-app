@@ -595,6 +595,10 @@ class L7FlowTracing(Base):
                 build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids = _build_simple_trace_info_from_dataframe(
                     new_flows)
 
+            elif len(
+                    new_trace_ids_for_next_iteration
+            ) > 0:  # find multiple trace_ids in current iteration, should query for next iteration
+                continue
             else:  # no new_flows, no more iterations needed
                 break
 
