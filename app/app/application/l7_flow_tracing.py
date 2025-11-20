@@ -49,71 +49,69 @@ L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID = 1 << 4
 
 # NOTE: 这里为了方便理解，不用数组而用 map
 L7_FLOW_RELATIONSHIP_MAP = {
-    L7_FLOW_RELATIONSHIP_TCP_SEQ: # 1
+    L7_FLOW_RELATIONSHIP_TCP_SEQ:  # 1
     'network',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID: # 2
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID:  # 2
     'xrequestid',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID: # 01 | 10
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID:  # 01 | 10
     'network,xrequestid',
-    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID: # 4
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:  # 4
     'syscall',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID: # 001 | 100
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:  # 001 | 100
     'network,syscall',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID: # 010 | 100
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:  # 010 | 100
     'xrequestid,syscall',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID: # 001 | 010 | 100
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID:  # 001 | 010 | 100
     'network,xrequestid,syscall',
-    L7_FLOW_RELATIONSHIP_SPAN_ID: # 8
+    L7_FLOW_RELATIONSHIP_SPAN_ID:  # 8
     'app',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0001 | 1000
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0001 | 1000
     'network,app',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0010 | 1000
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0010 | 1000
     'xrequestid,app',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0001 | 0010 | 1000
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0001 | 0010 | 1000
     'network,xrequestid,app',
-    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0100 | 1000
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0100 | 1000
     'syscall,app',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0001 | 0100 | 1000
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0001 | 0100 | 1000
     'network,syscall,app',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0010 | 0100 | 1000
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0010 | 0100 | 1000
     'xrequestid,syscall,app',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID: # 0001 | 0010 | 0100 | 1000
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID:  # 0001 | 0010 | 0100 | 1000
     'network,xrequestid,syscall,app',
-    L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 16
+    L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 16
     'request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0010
     'network,request_id',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0010 | 0010
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0010 | 0010
     'xrequestid,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0010 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0010 | 0010
     'network,xrequestid,request_id',
-    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0100 | 0010
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0100 | 0010
     'syscall,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0100 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0100 | 0010
     'network,syscall,request_id',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0010 | 0100 | 0010
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0010 | 0100 | 0010
     'xrequestid,syscall,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0010 | 0100 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0010 | 0100 | 0010
     'network,xrequestid,syscall,request_id',
-    L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 1000 | 0010
+    L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 1000 | 0010
     'app,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 1000 | 0010
     'network,app,request_id',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0010 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0010 | 1000 | 0010
     'xrequestid,app,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0010 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0010 | 1000 | 0010
     'network,xrequestid,app,request_id',
-    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0100 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0100 | 1000 | 0010
     'syscall,app,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0100 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0100 | 1000 | 0010
     'network,syscall,app,request_id',
-    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0010 | 0100 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0010 | 0100 | 1000 | 0010
     'xrequestid,syscall,app,request_id',
-    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID: # 0001 | 0010 | 0100 | 1000 | 0010
+    L7_FLOW_RELATIONSHIP_TCP_SEQ | L7_FLOW_RELATIONSHIP_X_REQUEST_ID | L7_FLOW_RELATIONSHIP_SYSCALL_TRACE_ID | L7_FLOW_RELATIONSHIP_SPAN_ID | L7_FLOW_RELATIONSHIP_DNS_REQUEST_ID:  # 0001 | 0010 | 0100 | 1000 | 0010
     'network,xrequestid,syscall,app,request_id'
 }
-
-CAPTURE_CLOUD_NETWORK_TYPE = 3
 
 RETURN_FIELDS = list(
     set([
@@ -219,6 +217,18 @@ L4_PROTOCOL_UDP = 17
 
 # XXX: 目前是一个人为规定的设计，非协议捕获值
 UNIX_SOCKET_SERVER_PORT = 1
+
+# NOTE: 与上面的 L7_FLOW_RELATIONSHIP_MAP 不是同一种语义
+TRACING_SRC_TRACE_ID = "trace_id"
+TRACING_SRC_SYSCALL = "syscall"
+TRACING_SRC_TCP_SEQ = "tcp_seq"
+TRACING_SRC_X_REQ_ID = "x_request_id"
+TRACING_SRC_DNS = "dns"
+
+DEFAULT_TRACING_SOURCE = [
+    TRACING_SRC_TRACE_ID, TRACING_SRC_SYSCALL, TRACING_SRC_TCP_SEQ,
+    TRACING_SRC_X_REQ_ID, TRACING_SRC_DNS
+]
 
 
 class L7FlowTracing(Base):
@@ -334,16 +344,20 @@ class L7FlowTracing(Base):
                     allowed_trace_ids.add(trace_id)
                     new_trace_ids_for_next_iteration.add(trace_id)
 
-        # max_iterations set to 0 means only query data with trace_id
-        only_query_trace_id = False
+        # max_iterations set to 0 means 1
+        # before, it means only query by trace_id
+        # but now, we support multiple trace_ids,
+        # it means we have to do query iteration multiple times even 'only_query_trace_id'
+        # so it's no longer use for 'only_query_trace_id' anymore
         if max_iteration == 0:
             max_iteration = 1
-            only_query_trace_id = True
+
+        config.tracing_source = config.tracing_source or DEFAULT_TRACING_SOURCE
 
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
             # 1. 使用 trace_id 查询
-            if new_trace_ids_for_next_iteration:
+            if new_trace_ids_for_next_iteration and TRACING_SRC_TRACE_ID in config.tracing_source:
                 # 1.1. Call external APM API
                 if config.call_apm_api_to_supplement_trace:
                     new_app_spans_from_apm = []
@@ -437,69 +451,73 @@ class L7FlowTracing(Base):
 
             if only_query_app_spans:  # no more iterations needed
                 break
-            if only_query_trace_id:  # no more iterations needed
-                break
 
             # 2. Query by tcp_seq / syscall_trace_id / x_request_id / dns request_id
             new_filters = []
-            # 2.1. new tcp_seqs
-            new_req_tcp_seqs = set()  # set(str(req_tcp_seq))
-            new_resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
-            for nrts in build_req_tcp_seqs:
-                if nrts and nrts not in req_tcp_seqs:
-                    req_tcp_seqs.add(nrts)
-                    new_req_tcp_seqs.add(str(nrts))
-            for nrts in build_resp_tcp_seqs:
-                if nrts and nrts not in resp_tcp_seqs:
-                    resp_tcp_seqs.add(nrts)
-                    new_resp_tcp_seqs.add(str(nrts))
-            # 2.1. Condition 1: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
-            # 这里查询 tcp_seq 时仅需一侧相等(req/resp)即可，定义为弱关联关系
-            tcp_seq_filters = []
-            if new_req_tcp_seqs:
-                tcp_seq_filters.append(
-                    f"req_tcp_seq IN ({','.join(new_req_tcp_seqs)})")
-            if new_resp_tcp_seqs:
-                tcp_seq_filters.append(
-                    f"resp_tcp_seq IN ({','.join(new_resp_tcp_seqs)})")
-            if tcp_seq_filters:
-                new_filters.append(f"({' OR '.join(tcp_seq_filters)})")
-            # 2.2. new syscall_trace_ids
-            new_syscall_trace_ids = set()  # set(str(syscall_trace_id))
-            for nsti in build_syscall_trace_ids:
-                if nsti and nsti not in syscall_trace_ids:
-                    syscall_trace_ids.add(nsti)
-                    new_syscall_trace_ids.add(str(nsti))
-            # 2.2. Condition 2: 以 syscall_trace_id_request & syscall_trace_id_response 作为条件查询关联 flow
-            syscall_trace_id_filters = []
-            if new_syscall_trace_ids:
-                syscall_trace_id_filters.append(
-                    f"syscall_trace_id_request IN ({','.join(new_syscall_trace_ids)})"
-                )
-                syscall_trace_id_filters.append(
-                    f"syscall_trace_id_response IN ({','.join(new_syscall_trace_ids)})"
-                )
-                new_filters.append(
-                    f"({' OR '.join(syscall_trace_id_filters)})")
-            # 2.3. new x_request_ids
-            new_x_request_ids = set()  # set(x_request_id)
-            for nxri in build_x_request_ids:
-                if nxri and nxri not in x_request_ids:
-                    x_request_ids.add(nxri)
-                    new_x_request_ids.add(nxri)
-            # 2.3. Condition 3: 以 x_request_id_0 & x_request_id_1 作为条件查询关联 flow
-            x_request_id_filters = []
-            if new_x_request_ids:
-                new_x_request_ids_str = [
-                    f"'{xri}'" for xri in new_x_request_ids
-                ]
-                x_request_id_filters.append(
-                    f"x_request_id_0 IN ({','.join(new_x_request_ids_str)})")
-                x_request_id_filters.append(
-                    f"x_request_id_1 IN ({','.join(new_x_request_ids_str)})")
-                new_filters.append(f"({' OR '.join(x_request_id_filters)})")
-            # 2.4. new dns request_ids
-            if config.allow_dns_tracing:
+            if TRACING_SRC_TCP_SEQ in config.tracing_source:
+                # 2.1. new tcp_seqs
+                new_req_tcp_seqs = set()  # set(str(req_tcp_seq))
+                new_resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
+                for nrts in build_req_tcp_seqs:
+                    if nrts and nrts not in req_tcp_seqs:
+                        req_tcp_seqs.add(nrts)
+                        new_req_tcp_seqs.add(str(nrts))
+                for nrts in build_resp_tcp_seqs:
+                    if nrts and nrts not in resp_tcp_seqs:
+                        resp_tcp_seqs.add(nrts)
+                        new_resp_tcp_seqs.add(str(nrts))
+                # 2.1. Condition 1: 以 req_tcp_seq & resp_tcp_seq 作为条件查询关联 flow
+                # 这里查询 tcp_seq 时仅需一侧相等(req/resp)即可，定义为弱关联关系
+                tcp_seq_filters = []
+                if new_req_tcp_seqs:
+                    tcp_seq_filters.append(
+                        f"req_tcp_seq IN ({','.join(new_req_tcp_seqs)})")
+                if new_resp_tcp_seqs:
+                    tcp_seq_filters.append(
+                        f"resp_tcp_seq IN ({','.join(new_resp_tcp_seqs)})")
+                if tcp_seq_filters:
+                    new_filters.append(f"({' OR '.join(tcp_seq_filters)})")
+            if TRACING_SRC_SYSCALL in config.tracing_source:
+                # 2.2. new syscall_trace_ids
+                new_syscall_trace_ids = set()  # set(str(syscall_trace_id))
+                for nsti in build_syscall_trace_ids:
+                    if nsti and nsti not in syscall_trace_ids:
+                        syscall_trace_ids.add(nsti)
+                        new_syscall_trace_ids.add(str(nsti))
+                # 2.2. Condition 2: 以 syscall_trace_id_request & syscall_trace_id_response 作为条件查询关联 flow
+                syscall_trace_id_filters = []
+                if new_syscall_trace_ids:
+                    syscall_trace_id_filters.append(
+                        f"syscall_trace_id_request IN ({','.join(new_syscall_trace_ids)})"
+                    )
+                    syscall_trace_id_filters.append(
+                        f"syscall_trace_id_response IN ({','.join(new_syscall_trace_ids)})"
+                    )
+                    new_filters.append(
+                        f"({' OR '.join(syscall_trace_id_filters)})")
+            if TRACING_SRC_X_REQ_ID in config.tracing_source:
+                # 2.3. new x_request_ids
+                new_x_request_ids = set()  # set(x_request_id)
+                for nxri in build_x_request_ids:
+                    if nxri and nxri not in x_request_ids:
+                        x_request_ids.add(nxri)
+                        new_x_request_ids.add(nxri)
+                # 2.3. Condition 3: 以 x_request_id_0 & x_request_id_1 作为条件查询关联 flow
+                x_request_id_filters = []
+                if new_x_request_ids:
+                    new_x_request_ids_str = [
+                        f"'{xri}'" for xri in new_x_request_ids
+                    ]
+                    x_request_id_filters.append(
+                        f"x_request_id_0 IN ({','.join(new_x_request_ids_str)})"
+                    )
+                    x_request_id_filters.append(
+                        f"x_request_id_1 IN ({','.join(new_x_request_ids_str)})"
+                    )
+                    new_filters.append(
+                        f"({' OR '.join(x_request_id_filters)})")
+            if TRACING_SRC_DNS in config.tracing_source:
+                # 2.4. new dns request_ids
                 new_dns_request_ids = set()
                 for ndri in build_request_ids:
                     if ndri and ndri not in dns_request_ids:
@@ -517,8 +535,10 @@ class L7FlowTracing(Base):
                     new_filters.append(
                         f"({' AND '.join(dns_request_id_filters)})")
 
-            if not new_filters:  # no more iterations needed
+            if not new_filters and not new_trace_ids_for_next_iteration:  # no more iterations needed
                 break
+            elif not new_filters:  # only new_trace_ids_for_next_iteration got values
+                continue
 
             # Query3: 查询上述基于 Condition[123] 构建出的条件，即与【第一层迭代】关联的所有 flow，此处构建【第二层迭代】查询
             new_flows = pd.DataFrame()
@@ -838,7 +858,7 @@ def set_all_relate(trace_infos: list,
         if ti.syscall_trace_id_response:
             syscall_trace_id_to_trace_infos[ti.syscall_trace_id_response].add(
                 ti)
-        if config.allow_dns_tracing and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
+        if TRACING_SRC_DNS in config.tracing_source and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
             dns_request_id_to_trace_infos[ti.request_id].add(ti)
 
     for ti in trace_infos[skip_first_n_trace_infos:]:
@@ -885,14 +905,13 @@ def set_all_relate(trace_infos: list,
                                                 related_map, fast_check)
         if fast_check and find_related: continue
         # dns request_id
-        if config.allow_dns_tracing:
-            related_trace_infos = dns_request_id_to_trace_infos.get(
-                ti.request_id, set())
-            find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
-                                                related_map, network_delay_us,
-                                                host_clock_offset_us,
-                                                fast_check)
-            if fast_check and find_related: continue
+        if TRACING_SRC_DNS not in config.tracing_source: continue
+        related_trace_infos = dns_request_id_to_trace_infos.get(
+            ti.request_id, set())
+        find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
+                                            related_map, network_delay_us,
+                                            host_clock_offset_us, fast_check)
+        if fast_check and find_related: continue
 
 
 def _build_simple_trace_info_from_dataframe(df: pd.DataFrame):
@@ -2889,7 +2908,7 @@ def _union_sys_spans(
                 if target_child is None:
                     target_child = matched_child
                     target_child_info = matched_child_info
-                elif matched_child.flow['start_time_us'] > target_child.flow[
+                elif matched_child.flow['start_time_us'] < target_child.flow[
                         'start_time_us']:
                     target_child = matched_child
                     target_child_info = matched_child_info
@@ -3147,8 +3166,6 @@ def _connect_process_and_networks(
         # 这种情况下关联 ps_child.parent_span_id == ps_parent.span_id 关系
         for _index, related_types in related_flow_index_map.get(
                 ps_child_index, {}).items():
-            if ps_child.get_parent_id() >= 0:
-                continue
             if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
                 continue
             ps_app_parent: SpanNode = flow_index_to_span[_index]
