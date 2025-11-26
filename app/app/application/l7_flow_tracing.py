@@ -1175,7 +1175,7 @@ class L7NetworkMeta:
     def flow_field_conflict(cls, lhs: TraceInfo, rhs: TraceInfo) -> bool:
         # span_id
         if lhs.trace_id and lhs.span_id and rhs.trace_id and rhs.span_id and (
-                not set(lhs.trace_id).intersection(rhs.trace_id)
+                not set(lhs.trace_id) & set(rhs.trace_id)
                 or lhs.span_id != rhs.span_id):
             return True
 
@@ -1856,6 +1856,8 @@ class ProcessSpanSet:
         # 记录叶子节点的 syscall_trace_id, 用以匹配 s-p root
         self.leaf_syscall_trace_id_request: Set[int] = set()
         self.leaf_syscall_trace_id_response: Set[int] = set()
+        # 记录本 ProcessSpanSet 构建过程中的所有 TraceId，只要 c-p/s-p 的 TraceId 有交集即可
+        self.g_trace_id: Set[str] = set()
         # 记录叶子节点的 x_request_id => index (in self.spans), 用以匹配 s-p root
         self.leaf_x_request_id: Dict[str, List[int]] = {}
         # 用于显示调用拓扑使用
@@ -1993,6 +1995,8 @@ class ProcessSpanSet:
             if cp_x_request_id_1 and cp_x_request_id_1 != cp_x_request_id_0:
                 self.leaf_x_request_id.setdefault(
                     cp_x_request_id_1, []).append(len(self.spans) - 1)
+        if sys_span.get_trace_id():
+            self.g_trace_id.update(sys_span.get_trace_id())
 
     def remove_server_sys_span(self, sys_span: SysSpanNode):
         # 这里应该要做 append_sys_span 的逆操作(但对象仅为 ServerProcess sys_span)
@@ -2264,9 +2268,11 @@ class ProcessSpanSet:
                 if not client_syscall_match and not sys_span_matched and not x_request_id_match:
                     # same proces & time cover already find out above, at here we only find out trace_id match
                     # NOTE: this scenario means not only `trace_id`, also maybe have a global sequence id through all services in 1 request
-                    same_process_trace_match = span.flow[
-                        "trace_id"] and span.flow[
-                            "trace_id"] == client_sys_span.flow["trace_id"]
+                    # NOTE: here, we use g_trace_id intersection with client_sys_span.trace_id for match, it's for multiple trace_id like:
+                    # [s-p: trace_id_1]
+                    # [c-p-1: trace_id_1, trace_id_2] [c-p-2: trace_id_2]
+                    same_process_trace_match = self.g_trace_id & set(
+                        client_sys_span.flow["trace_id"])
 
                 if sys_span_matched:
                     mounted_info = "syscall_trace_id matched to s-p root"
@@ -2320,8 +2326,8 @@ class ProcessSpanSet:
             if not x_request_id_match:
                 # same proces & time cover already find out above, at here we only find out trace_id match
                 # NOTE: this scenario means not only `trace_id`, also maybe have a global sequence id through all services in 1 request
-                same_process_trace_match = span.flow["trace_id"] and \
-                                            span.flow["trace_id"] == client_sys_span.flow["trace_id"]
+                same_process_trace_match = self.g_trace_id & set(
+                    client_sys_span.flow["trace_id"])
 
             if x_request_id_match:
                 mounted_info = "x_request_id matched to c-p root"
@@ -2593,7 +2599,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 # 直到 format_final_result 函数
                 flow[key] = sorted(
                     [v.strip() for v in value.split(",") if v.strip()])
-                flow["origin_trace_id"] = value
+                flow['origin_trace_id'] = value
             elif isinstance(value, float) and math.isnan(value):
                 # XXX: 要在源头统一处理
                 # ClickHouse 中的 Nullable(int) 字段在无值时会返回为 dataframe 中的 float(nan)
@@ -2794,11 +2800,15 @@ def _union_sys_spans(
     # 先根据 syscall_trace_id_request 构建一个映射，方便查找
     # syscall_trace_id_request => index
     syscall_req_to_index: Dict[int, List[int]] = {}
+    # 额外增加 trace_id 的映射，如果这些 c-p 的 trace_id 两两之间有交集，允许通过串联的形式一起 append 到 s-p 下
+    trace_id_to_index: Dict[str, List[int]] = {}
     for i in range(len(client_sys_spans)):
         span = client_sys_spans[i]
         if span.get_syscall_trace_id_request() > 0:
             syscall_req_to_index.setdefault(
                 span.get_syscall_trace_id_request(), []).append(i)
+        for trace_id in span.get_trace_id():
+            trace_id_to_index.setdefault(trace_id, []).append(i)
 
     # 对 client_sys_spans 按 syscall_trace_id 划分为一个个集合
     cp_disjoint_set = DisjointSet()
@@ -2824,6 +2834,12 @@ def _union_sys_spans(
                     continue
                 # 要把兄弟 c-p 设置为 parent，即：将`下一跳`设置为 parent
                 # 当兄弟 c-p 有 syscall_trace_id_response 时，它的 parent 也是下一跳
+                cp_disjoint_set.put(i, parent_index)
+                cp_disjoint_set.get(i)
+
+        for trace_id in span.get_trace_id():
+            parent_indices = trace_id_to_index.get(trace_id, [])
+            for parent_index in parent_indices:
                 cp_disjoint_set.put(i, parent_index)
                 cp_disjoint_set.get(i)
 
@@ -3660,8 +3676,9 @@ def format_final_result(
             trace['parent_id'] = -1
         # 在整个计算过程中，trace_id 都转换为 list(string) 方便计算
         # 最后返回的时候转回原来的字符串用以界面显示
-        trace['trace_id'] = trace['origin_trace_id']
-        trace.pop('origin_trace_id')
+        # 理论上只要经过了 _get_flow_dict 的数据一定有这个 key，但还是必须做防护避免报错
+        trace['trace_id'] = trace.get('origin_trace_id', '')
+        trace.pop('origin_trace_id', None)
     return response
 
 
