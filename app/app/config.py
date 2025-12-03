@@ -24,6 +24,8 @@ class Config(object):
             'allow_multiple_trace_ids_in_tracing_result', False)
         self.call_apm_api_to_supplement_trace = spec.get(
             'call_apm_api_to_supplement_trace', False)
+        self.apm_api_type_pinpoint = spec.get(
+            'apm_api_type_pinpoint', False)
         self.tracing_source = spec.get(
             'tracing_source',
             ["trace_id", "syscall", "tcp_seq", "x_request_id", "dns"])
