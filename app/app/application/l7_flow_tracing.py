@@ -314,6 +314,7 @@ class L7FlowTracing(Base):
             # when app_spans_from_api got values from api, return it
             return [], app_spans_from_api
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
+        trace_span_ids = set()  # set((flow.trace_id, flow.span_id))
 
         # 用于下一轮迭代，记录元信息
         build_req_tcp_seqs, build_resp_tcp_seqs, build_x_request_ids, build_syscall_trace_ids, build_request_ids = _build_simple_trace_info_from_dataframe(
@@ -359,7 +360,7 @@ class L7FlowTracing(Base):
             # 1. 使用 trace_id 查询
             if new_trace_ids_for_next_iteration and TRACING_SRC_TRACE_ID in config.tracing_source:
                 # 1.1. Call external APM API
-                if config.call_apm_api_to_supplement_trace:
+                if config.call_apm_api_to_supplement_trace and not config.apm_api_type_pinpoint:
                     new_app_spans_from_apm = []
                     for trace_id in new_trace_ids_for_next_iteration:
                         app_spans = await self.query_apm_for_app_span_completion(
@@ -426,6 +427,9 @@ class L7FlowTracing(Base):
                             if new_trace_id not in allowed_trace_ids:
                                 new_trace_id_flow_delete_index.append(index)
                                 deleted_trace_ids.add(new_trace_id)
+                        else:
+                            # 这里还会有 trace_id_index 相同，但 trace_id = 空的情况，把 len=0 也丢弃
+                            new_trace_id_flow_delete_index.append(index)
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
@@ -437,6 +441,9 @@ class L7FlowTracing(Base):
                     dataframe_flowmetas = self.concat_l7_flow_log_dataframe(
                         [dataframe_flowmetas, new_trace_id_flows])
                     l7_flow_ids = set(dataframe_flowmetas['_id'])
+                    for i in range(len(dataframe_flowmetas['trace_id'])):
+                        trace_span_ids.add((dataframe_flowmetas['trace_id'][i],
+                                            dataframe_flowmetas['span_id'][i]))
 
                     new_trace_req_tcp_seqs, new_trace_resp_tcp_seqs, new_trace_x_request_ids, new_trace_syscall_trace_ids, new_request_ids = _build_simple_trace_info_from_dataframe(
                         new_trace_id_flows)
@@ -624,6 +631,19 @@ class L7FlowTracing(Base):
 
             # end of `for i in range(max_iteration)`
 
+        # Call external APM (Pinpoint) API
+        if config.call_apm_api_to_supplement_trace and config.apm_api_type_pinpoint:
+            for trace_id, span_id in trace_span_ids:
+                if not span_id:
+                    continue
+                if isinstance(
+                        span_id,
+                        str) and not span_id.strip():  # skip empty span_id
+                    continue
+                app_spans = await self.query_apm_for_app_span_completion(
+                    trace_id, span_id)
+                app_spans_from_external.extend(app_spans)
+
         return l7_flow_ids, app_spans_from_external
 
     async def trace_l7_flow(
@@ -726,7 +746,7 @@ class L7FlowTracing(Base):
         """
         sql = """SELECT
         type, signal_source, req_tcp_seq, resp_tcp_seq, toUnixTimestamp64Micro(start_time) AS start_time_us,
-        toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, protocol, syscall_trace_id_request, 
+        toUnixTimestamp64Micro(end_time) AS end_time_us, vtap_id, protocol, syscall_trace_id_request,
         syscall_trace_id_response, span_id, parent_span_id, request_id, l7_protocol, trace_id, x_request_id_0,
         x_request_id_1, _id, tap_side
         FROM `l7_flow_log`
@@ -742,11 +762,12 @@ class L7FlowTracing(Base):
         self.status.append(status_discription, response)
         return response.get("data", [])
 
-    async def query_apm_for_app_span_completion(self, trace_id: str) -> list:
+    async def query_apm_for_app_span_completion(self, trace_id: str,
+                                                span_id: str) -> list:
         try:
             # if get data error from external apm, ignore it
             # it should not interrupt the main tracing process
-            get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}"
+            get_third_app_span_url = f"http://{config.querier_server}:{config.querier_port}/api/v1/adapter/tracing?traceid={trace_id}&spanid={span_id}"
             app_spans_res, app_spans_code = await curl_perform(
                 'get', get_third_app_span_url)
             if app_spans_code != HTTP_OK:
@@ -2076,7 +2097,7 @@ class ProcessSpanSet:
             # 如果 parent_span_id 为空说明这里是请求入口，即整棵树的 root
             # 极端情况下可能会有多个没有 parent_span_id 的入口，这里没法分辨它们的关系，不做拆分
             if root_parent_span_id == '':
-                root_parent_span_id = "root"  # 只是标记 root_parent_span_id，没有实际作用
+                root_parent_span_id = f"root-{len(split_result)}"  # 只是标记 root_parent_span_id，没有实际作用
             if split_result.get(root_parent_span_id, None) is None:
                 newSet = ProcessSpanSet(root_parent_span_id)
                 newSet.app_span_roots = [self.spans[root_span_index]]
@@ -2156,7 +2177,6 @@ class ProcessSpanSet:
                                 "s-p sys_span mounted due to same span_id as parent",
                                 self.mounted_callback)
                         return True
-
         # span_id not matched, try syscall_trace_id
         if syscall_trace_id_request or syscall_trace_id_response:
             for app_root in self.app_span_roots:
@@ -2856,11 +2876,17 @@ def _union_sys_spans(
     # 如果没有 app_span 时，不要做无效扫描
     if len(process_span_map) > 0:
         for span in client_sys_spans + server_sys_spans:  # 先 c-p 后 s-p
-            auto_instance = span.auto_instance
-            for sp_span_pss in process_span_map.get(auto_instance, []):
-                if not sp_span_pss.attach_sys_span_via_app_span(span):
-                    # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
-                    continue
+            # 这个条件可以直接去掉，全局遍历关联
+            # 这里无法预设 app_span 一定包含 auto_instance tag，因此，只能遍历所有 app_span 集合的头尾 span
+            # auto_instance = span.auto_instance
+            # for sp_span_pss in process_span_map.get(auto_instance, []):
+            #     if not sp_span_pss.attach_sys_span_via_app_span(span):
+            #         # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
+            #         continue
+            for auto_instance, sp_span_pss in process_span_map.items():
+                for sp_span_ps in sp_span_pss:
+                    if sp_span_ps.attach_sys_span_via_app_span(span):
+                        break
 
     # 按 s-p/c-p 的顺序执行关联，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
 
@@ -3512,7 +3538,7 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
                   uid_to_trace_index: Dict[int, int]) -> list:
     """
     按 service 对 flow 分组并统计时延指标，先基于剪枝后的 trace span 过滤服务，对剩下的服务统计时延
- 
+
     服务分组的依据是：「保持一定的抽象粒度的情况下，尽量找到最小粒度的应用服务」
     通常情况下，service 直接按 auto_service/app_service 分组做合并
     当同一个 auto_service_id 下有多个进程时，执行进程分组逻辑
@@ -3531,7 +3557,7 @@ def merge_service(services: List[ProcessSpanSet], traces: list,
     1. 仅 eBPF 的一侧有
     2. 采集器开启 inputs.proc.enabled
     3. 采集器通过 inputs.proc.process_mathcer 规则匹配到进程
- 
+
     这里 2+3 步骤称为「gprocess 同步」
     """
     metrics_map = {}
@@ -4000,7 +4026,7 @@ class HostClockCorrector:
         1. 基于一个 hostX 作为基准做统一调整，所有 host 对齐到该 hostX
         2. 理论上要以 rootSpan 的 host 作为基准，这里等价于"没有成为 child"的 host
         3. 注意可能出现多个基准 host，比如存在如下情况：[hostX, hostY], [hostY, hostZ], [hostA, hostB], [hostA, hostC], 此时应该存在 hostX/hostA 两个基准
-        
+
         调整逻辑：
         1. 基准 host 不做调整，仅对基准 host 以下的 host 做调整（准确地说是只对 child host 调整）
         2. 对一组 [hostA, hostB]，如果存在 [hostX, hostA] 且 hostA 已被调整，则 hostB 的调整值需要加上 hostA 的调整值，以对齐到 hostX
