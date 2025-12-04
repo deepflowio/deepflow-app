@@ -427,6 +427,9 @@ class L7FlowTracing(Base):
                             if new_trace_id not in allowed_trace_ids:
                                 new_trace_id_flow_delete_index.append(index)
                                 deleted_trace_ids.add(new_trace_id)
+                        else:
+                            # 这里还会有 trace_id_index 相同，但 trace_id = 空的情况，把 len=0 也丢弃
+                            new_trace_id_flow_delete_index.append(index)
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
@@ -439,7 +442,8 @@ class L7FlowTracing(Base):
                         [dataframe_flowmetas, new_trace_id_flows])
                     l7_flow_ids = set(dataframe_flowmetas['_id'])
                     for i in range(len(dataframe_flowmetas['trace_id'])):
-                        trace_span_ids.add((dataframe_flowmetas['trace_id'][i], dataframe_flowmetas['span_id'][i]))
+                        trace_span_ids.add((dataframe_flowmetas['trace_id'][i],
+                                            dataframe_flowmetas['span_id'][i]))
 
                     new_trace_req_tcp_seqs, new_trace_resp_tcp_seqs, new_trace_x_request_ids, new_trace_syscall_trace_ids, new_request_ids = _build_simple_trace_info_from_dataframe(
                         new_trace_id_flows)
@@ -632,7 +636,9 @@ class L7FlowTracing(Base):
             for trace_id, span_id in trace_span_ids:
                 if not span_id:
                     continue
-                if isinstance(span_id, str) and not span_id.strip(): # skip empty span_id
+                if isinstance(
+                        span_id,
+                        str) and not span_id.strip():  # skip empty span_id
                     continue
                 app_spans = await self.query_apm_for_app_span_completion(
                     trace_id, span_id)
@@ -756,7 +762,8 @@ class L7FlowTracing(Base):
         self.status.append(status_discription, response)
         return response.get("data", [])
 
-    async def query_apm_for_app_span_completion(self, trace_id: str, span_id: str) -> list:
+    async def query_apm_for_app_span_completion(self, trace_id: str,
+                                                span_id: str) -> list:
         try:
             # if get data error from external apm, ignore it
             # it should not interrupt the main tracing process
@@ -2090,7 +2097,7 @@ class ProcessSpanSet:
             # 如果 parent_span_id 为空说明这里是请求入口，即整棵树的 root
             # 极端情况下可能会有多个没有 parent_span_id 的入口，这里没法分辨它们的关系，不做拆分
             if root_parent_span_id == '':
-                root_parent_span_id = "root"  # 只是标记 root_parent_span_id，没有实际作用
+                root_parent_span_id = f"root-{len(split_result)}"  # 只是标记 root_parent_span_id，没有实际作用
             if split_result.get(root_parent_span_id, None) is None:
                 newSet = ProcessSpanSet(root_parent_span_id)
                 newSet.app_span_roots = [self.spans[root_span_index]]
@@ -2170,7 +2177,6 @@ class ProcessSpanSet:
                                 "s-p sys_span mounted due to same span_id as parent",
                                 self.mounted_callback)
                         return True
-
         # span_id not matched, try syscall_trace_id
         if syscall_trace_id_request or syscall_trace_id_response:
             for app_root in self.app_span_roots:
@@ -2870,11 +2876,17 @@ def _union_sys_spans(
     # 如果没有 app_span 时，不要做无效扫描
     if len(process_span_map) > 0:
         for span in client_sys_spans + server_sys_spans:  # 先 c-p 后 s-p
-            auto_instance = span.auto_instance
-            for sp_span_pss in process_span_map.get(auto_instance, []):
-                if not sp_span_pss.attach_sys_span_via_app_span(span):
-                    # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
-                    continue
+            # 这个条件可以直接去掉，全局遍历关联
+            # 这里无法预设 app_span 一定包含 auto_instance tag，因此，只能遍历所有 app_span 集合的头尾 span
+            # auto_instance = span.auto_instance
+            # for sp_span_pss in process_span_map.get(auto_instance, []):
+            #     if not sp_span_pss.attach_sys_span_via_app_span(span):
+            #         # 这里 attach 失败，但可能关联关系在同一进程其他的 app_span 内，继续尝试
+            #         continue
+            for auto_instance, sp_span_pss in process_span_map.items():
+                for sp_span_ps in sp_span_pss:
+                    if sp_span_ps.attach_sys_span_via_app_span(span):
+                        break
 
     # 按 s-p/c-p 的顺序执行关联，确保先通过 s-p 建立 process_span_set，再往上挂 c-p
 
