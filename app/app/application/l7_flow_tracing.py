@@ -426,6 +426,10 @@ class L7FlowTracing(Base):
                             if new_trace_id not in allowed_trace_ids:
                                 new_trace_id_flow_delete_index.append(index)
                                 deleted_trace_ids.add(new_trace_id)
+                        else:
+                            # 写入 trace_id_index 时，遇到空 trace_id 有可能会复用 index，导致重复
+                            # 于是，这里可能导致误查询，需要额外过滤一下 len(new_trace_id_arr)=0(trace_id='') 的情况
+                            new_trace_id_flow_delete_index.append(index)
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
