@@ -174,8 +174,9 @@ RETURN_FIELDS = list(
         "auto_service_1",
         "tap_id",
         "tap",
+        # 用于界面显示是否加密数据
+        "is_tls",
         # 用于 DNS 五元组匹配
-        "client_port",
         "server_port",
         # 指标信息
         "response_status",
@@ -3850,7 +3851,9 @@ def _get_flow_dict(flow: DataFrame):
         "_querier_region":
         flow.get("_querier_region", None),
         "origin_trace_id":
-        flow.get("origin_trace_id", None)
+        flow.get("origin_trace_id", None),
+        "is_tls":
+        flow.get("is_tls", None),
     }
     # 0909: 之前的设计逻辑，要求仅 eBPF 返回这些 tag
     # 取消此逻辑，允许所有 span 返回下列数据，支持前端获取 net span 的 auto_service 等 tag 信息，用于在仅有 net span 场景下计算拓扑图
