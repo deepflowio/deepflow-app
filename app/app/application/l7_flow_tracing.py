@@ -23,23 +23,16 @@ log = logger.getLogger(__name__)
 # 网络位置排序优先级，当采集到这些位置的 span 时固定按此位置排序
 NET_SPAN_TAP_SIDE_PRIORITY = {
     item: i
-    for i, item in enumerate(['c', 'c-nd', 's-nd', 's'])
+    for i, item in enumerate([
+        const.TAP_SIDE_CLIENT_NIC,
+        const.TAP_SIDE_CLIENT_POD_NODE,
+        const.TAP_SIDE_SERVER_POD_NODE,
+        const.TAP_SIDE_SERVER_NIC,
+    ])
 }
 L7_FLOW_TYPE_REQUEST = 0
 L7_FLOW_TYPE_RESPONSE = 1
 L7_FLOW_TYPE_SESSION = 2
-
-TAP_SIDE_CLIENT_PROCESS = 'c-p'
-TAP_SIDE_SERVER_PROCESS = 's-p'
-TAP_SIDE_CLIENT_APP = 'c-app'
-TAP_SIDE_SERVER_APP = 's-app'
-TAP_SIDE_APP = 'app'
-TAP_SIDE_SPAN_ID_RANKS = {
-    TAP_SIDE_CLIENT_APP: 1,
-    TAP_SIDE_SERVER_APP: 2,
-    TAP_SIDE_CLIENT_PROCESS: 3,
-    TAP_SIDE_SERVER_PROCESS: 4,
-}
 
 L7_FLOW_RELATIONSHIP_TCP_SEQ = 1
 L7_FLOW_RELATIONSHIP_X_REQUEST_ID = 1 << 1
@@ -176,6 +169,8 @@ RETURN_FIELDS = list(
         "tap",
         # 用于界面显示是否加密数据
         "is_tls",
+        # 用于判断是否异步
+        "is_async",
         # 用于 DNS 五元组匹配
         "server_port",
         # 指标信息
@@ -208,11 +203,15 @@ MERGE_KEY_REQUEST = [
 MERGE_KEY_RESPONSE = ['http_proxy_client']
 DATABASE = "flow_log"
 
+# l7 protocol
 L7_PROTOCOL_HTTP2 = 21
 L7_PROTOCOL_GRPC = 41
+L7_PROTOCOL_ISO8583 = 48
 L7_PROTOCOL_MYSQL = 60
+L7_PROTOCOL_WEBSPHERE_MQ = 108
 L7_PROTOCOL_DNS = 120
 
+# l4 protocol
 L4_PROTOCOL_TCP = 6
 L4_PROTOCOL_UDP = 17
 
@@ -1409,7 +1408,7 @@ class L7SyscallMeta:
             # s-p & s-p based on syscall_trace_id should not related each other
             # they should connected based on front-end client syscall
             if rti.get_extra_field("tap_side") == trace_info.get_extra_field(
-                    "tap_side") == TAP_SIDE_SERVER_PROCESS:
+                    "tap_side") == const.TAP_SIDE_SERVER_PROCESS:
                 continue
             # syscall_trace_id_request
             if trace_info.syscall_trace_id_request:
@@ -1588,8 +1587,8 @@ class NetworkSpanSet:
             if self.spans[i].signal_source == self.spans[
                     i - 1].signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
                 if self.spans[
-                        i].tap_side == TAP_SIDE_SERVER_PROCESS and self.spans[
-                            i - 1].tap_side == TAP_SIDE_CLIENT_PROCESS:
+                        i].tap_side == const.TAP_SIDE_SERVER_PROCESS and self.spans[
+                            i - 1].tap_side == const.TAP_SIDE_CLIENT_PROCESS:
                     # 当顺序为 [c-p, s-p] 说明中间没有 net-span，构成父子关系
                     self.spans[i].set_parent(self.spans[i - 1],
                                              "trace mounted due to tcp_seq",
@@ -1662,7 +1661,7 @@ class NetworkSpanSet:
             # 但实际上，如果 req_tcp_seq=0，说明这其实是一个 response，方向为 server-side -> client-side，request_type=_RESPONSE_DATA/HEADER
             # 对此类情况，应要反转 ingress 和 egress 排序
             if not sorted_spans[0].flow['req_tcp_seq'] and \
-                sorted_spans[0].flow['type'] == L7_FLOW_TYPE_SESSION:
+               sorted_spans[0].flow['type'] == L7_FLOW_TYPE_SESSION:
                 ingress_rank = 2
                 egress_agent = 0
 
@@ -1825,7 +1824,7 @@ class SysSpanNode(SpanNode):
 
         # when auto_instance_type is k8s pod, allow auto_instance match instead of process_id match
         auto_instance_match = self.auto_instance_type == other_sys_span.auto_instance_type == const.AUTO_INSTANCE_POD \
-                            and self.auto_instance != 0 and self.auto_instance == other_sys_span.auto_instance
+            and self.auto_instance != 0 and self.auto_instance == other_sys_span.auto_instance
 
         return process_id_match or auto_instance_match
 
@@ -1904,7 +1903,8 @@ class ProcessSpanSet:
         为了避免同一进程的 span 分组统计错误，这里统一校准字段
         """
         direction = "1" if span.tap_side in [
-            TAP_SIDE_SERVER_PROCESS, TAP_SIDE_SERVER_APP, TAP_SIDE_APP
+            const.TAP_SIDE_SERVER_PROCESS, const.TAP_SIDE_SERVER_APP,
+            const.TAP_SIDE_APP
         ] else "0"
         for key in [
                 'auto_service_id',
@@ -1913,7 +1913,8 @@ class ProcessSpanSet:
                 'auto_instance_type',
         ]:
             direction_key = f'{key}_{direction}'
-            if span.tap_side == TAP_SIDE_APP and not span.flow[direction_key]:
+            if span.tap_side == const.TAP_SIDE_APP and not span.flow[
+                    direction_key]:
                 # 仅对 TAP_SIDE_APP: 具体方向未知，优先获取 server_side，找不到值的时候矫正为 client_side
                 direction_key = f'{key}_0'
 
@@ -1938,7 +1939,7 @@ class ProcessSpanSet:
         此方法统一 sys_span 的统计字段并为 flow 生成一个无方向的 key
         """
         direction = "1" if span.tap_side in [
-            TAP_SIDE_SERVER_PROCESS, TAP_SIDE_SERVER_APP
+            const.TAP_SIDE_SERVER_PROCESS, const.TAP_SIDE_SERVER_APP
         ] else "0"
         for key in [
                 'subnet_id',
@@ -1982,7 +1983,7 @@ class ProcessSpanSet:
         self.spans.append(sys_span)
         self._set_extra_value_for_sys_span(sys_span)
         self._set_auto_service(sys_span)
-        if sys_span.tap_side == TAP_SIDE_CLIENT_PROCESS:
+        if sys_span.tap_side == const.TAP_SIDE_CLIENT_PROCESS:
             cp_syscall_trace_id_req = sys_span.get_syscall_trace_id_request()
             cp_syscall_trace_id_res = sys_span.get_syscall_trace_id_response()
             cp_x_request_id_0 = sys_span.get_x_request_id_0()
@@ -2109,9 +2110,9 @@ class ProcessSpanSet:
         s-p: 按 app_span.parent_span_id = sys_span.span_id, 作为 app_span 的 parent
         c-p: 按 app_span.span_id = sys_span.span_id, 作为 app_span 的 child
         '''
-        if sys_span.tap_side == TAP_SIDE_SERVER_PROCESS:
+        if sys_span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
             return self._attach_server_sys_span(sys_span)
-        elif sys_span.tap_side == TAP_SIDE_CLIENT_PROCESS:
+        elif sys_span.tap_side == const.TAP_SIDE_CLIENT_PROCESS:
             return self._attach_client_sys_span(sys_span)
         else:
             return False
@@ -2167,8 +2168,11 @@ class ProcessSpanSet:
             for app_root in self.app_span_roots:
                 # 如果 span_id 不存在，说明可能是入口 span，上游没有注入 span_id，此时根据叶子节点 c-p 的 syscall_trace_id 匹配即可
                 # 这里匹配可以严格点，s-p 和 c-p 只会同侧(req-req / res-res)相等，避免误关联一个独立的 c-p
-                if app_root.get_parent_id() < 0 and (syscall_trace_id_request in self.leaf_syscall_trace_id_request \
-                or syscall_trace_id_response in self.leaf_syscall_trace_id_response):
+                if app_root.get_parent_id() < 0 and (
+                        syscall_trace_id_request
+                        in self.leaf_syscall_trace_id_request
+                        or syscall_trace_id_response
+                        in self.leaf_syscall_trace_id_response):
                     self.append_sys_span(sys_span)
                     app_root.set_parent(
                         sys_span,
@@ -2241,7 +2245,7 @@ class ProcessSpanSet:
             mounted_info = "syscall_trace_id matched to c-p child"
 
         for span in self.spans:
-            if span.tap_side == TAP_SIDE_SERVER_PROCESS:
+            if span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
                 # span is SysSpanNode
                 # isinstance: 类型安全检查，避免调用函数失败
                 # process_matched 防错: 避免 auto_instance 匹配到 host 但实际进程不同的情况
@@ -2267,8 +2271,8 @@ class ProcessSpanSet:
                     # s-p.x_req_id_1 = c-p.x_req_id_0: 注入 x_req_id
                     # s-p.x_req_id_1 = c-p.x_req_id_1: 透传 x_req_id (x_req_id_0 同理)
                     x_request_id_match = span.get_x_request_id_0() and (span.get_x_request_id_0() == client_sys_span.get_x_request_id_0()) \
-                                        or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1()\
-                                          or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
+                                         or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1() \
+                                         or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
                 # for cross-thread span but in same trace_id/process and time range covered
                 if not client_syscall_match and not sys_span_matched and not x_request_id_match:
                     # same proces & time cover already find out above, at here we only find out trace_id match
@@ -2307,8 +2311,7 @@ class ProcessSpanSet:
             return None, ""
         for span in self.spans:
             if not span.get_server_port() == UNIX_SOCKET_SERVER_PORT or \
-                not span.parent is None or \
-                    span.tap_side != TAP_SIDE_SERVER_PROCESS:
+                span.parent is not None or span.tap_side != const.TAP_SIDE_SERVER_PROCESS:
                 continue
             # span is SysSpanNode
             # isinstance: 类型安全检查，避免调用函数失败
@@ -2323,8 +2326,8 @@ class ProcessSpanSet:
             # s-p.x_req_id_1 = c-p.x_req_id_0: 注入 x_req_id
             # s-p.x_req_id_1 = c-p.x_req_id_1: 透传 x_req_id (x_req_id_0 同理)
             x_request_id_match = span.get_x_request_id_0() and (span.get_x_request_id_0() == client_sys_span.get_x_request_id_0()) \
-                                or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1()\
-                                    or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
+                                 or (span.get_x_request_id_1() and (span.get_x_request_id_1() == client_sys_span.get_x_request_id_1() \
+                                 or span.get_x_request_id_1() == client_sys_span.get_x_request_id_0()))
 
             same_process_trace_match = False
             # for cross-thread span but in same trace_id/process and time range covered
@@ -2396,19 +2399,19 @@ def _get_auto_instance(span: SpanNode) -> str:
     client_side_key = 'auto_instance_id_0'
     # 对 x-app 位置的 flow，有可能 auto_instance_id=0，说明是外部资源
     # 外部资源不要分到同一组，按 auto_instance/app_instance 的优先级获取
-    if span.tap_side == TAP_SIDE_SERVER_APP:
+    if span.tap_side == const.TAP_SIDE_SERVER_APP:
         auto_instance = span.flow[server_side_key] if span.flow[
             server_side_key] else span.flow['auto_instance_1']
         if not auto_instance:
             auto_instance = span.flow['app_instance']
         return auto_instance
-    elif span.tap_side == TAP_SIDE_CLIENT_APP:
+    elif span.tap_side == const.TAP_SIDE_CLIENT_APP:
         auto_instance = span.flow[client_side_key] if span.flow[
             client_side_key] else span.flow['auto_instance_0']
         if not auto_instance:
             auto_instance = span.flow['app_instance']
         return auto_instance
-    elif span.tap_side == TAP_SIDE_APP:
+    elif span.tap_side == const.TAP_SIDE_APP:
         auto_instance = span.flow[server_side_key] if span.flow[
             server_side_key] else span.flow['auto_instance_1']
         if not auto_instance:
@@ -2418,18 +2421,18 @@ def _get_auto_instance(span: SpanNode) -> str:
             auto_instance = span.flow['app_instance']
         return auto_instance
     # 对 x-p 位置的 flow 一定能获取到 auto_instance_id
-    elif span.tap_side == TAP_SIDE_SERVER_PROCESS:
+    elif span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
         return span.flow[server_side_key]
-    elif span.tap_side == TAP_SIDE_CLIENT_PROCESS:
+    elif span.tap_side == const.TAP_SIDE_CLIENT_PROCESS:
         return span.flow[client_side_key]
     else:
         return ""
 
 
 def _get_process_id(span: SpanNode) -> int:
-    if span.tap_side == TAP_SIDE_SERVER_PROCESS:
+    if span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
         return span.flow.get('process_id_1', 0)
-    elif span.tap_side == TAP_SIDE_CLIENT_PROCESS:
+    elif span.tap_side == const.TAP_SIDE_CLIENT_PROCESS:
         return span.flow.get('process_id_0', 0)
     else:
         return 0
@@ -2438,17 +2441,80 @@ def _get_process_id(span: SpanNode) -> int:
 def _generate_pseudo_process_span_set(network_leaf: dict,
                                       network_root: dict) -> ProcessSpanSet:
     fake_sp = dict(network_leaf)
-    fake_sp['tap_side'] = TAP_SIDE_SERVER_PROCESS
+    fake_sp['tap_side'] = const.TAP_SIDE_SERVER_PROCESS
     fake_sp['_ids'] = []
 
     fake_cp = dict(network_root)
-    fake_cp['tap_side'] = TAP_SIDE_CLIENT_PROCESS
+    fake_cp['tap_side'] = const.TAP_SIDE_CLIENT_PROCESS
     fake_cp['_ids'] = []
     pss = ProcessSpanSet(
         f'pseudo-{fake_sp["req_tcp_seq"]}-{fake_sp["resp_tcp_seq"]}')
     pss.append_sys_span(fake_sp)
     pss.append_sys_span(fake_cp)
     return pss
+
+
+def merge_async_flow(flows: list, flow: dict) -> bool:
+    """
+    merge 一些特别的异步 flow
+    这类 flow 不是 agent 没有合并导致请求-响应分离，而是设计上就是异步的 flow
+    对此类情况，做特殊的合并，不要与处理基础流合并的 merge_flow 混淆
+    注意这里由于 flows append request 再 merge，所以实际上只能通过 response 找 request
+
+    合并前提：agent_id(vtap_id)+l7_protocol in [websphere_mq, iso8583],is_async=1
+    仅 request/response 合并
+    合并规则，基于 trace_id + l7_protocol + reverse(observation_point(tap_side))
+    xxx: 这里隐含了一个前提，即一个 trace_id 只会有一个异步的流
+    """
+
+    # 目前仅基于 trace_id 做「相反观测点位置」合并
+    # 相反观测点指的是：c<->s / c-p<->s-p，见 REVERSE_TAP_SIDE
+    def allow_merge_async_flow(flow: dict) -> bool:
+        if flow['l7_protocol'] not in [
+                L7_PROTOCOL_WEBSPHERE_MQ, L7_PROTOCOL_ISO8583
+        ]:
+            return False
+        if not flow['is_async']:
+            return False
+        if flow['trace_id'] == "":
+            return False
+        return True
+
+    if flow['type'] != L7_FLOW_TYPE_RESPONSE:
+        return False
+    if not allow_merge_async_flow(flow):
+        return False
+
+    for i in range(len(flows) - 1, -1, -1):
+        if flows[i]['type'] != L7_FLOW_TYPE_REQUEST:
+            continue
+        if not allow_merge_async_flow(flows[i]):
+            continue
+        if flows[i]['vtap_id'] != flow['vtap_id']:
+            continue
+        if flows[i]['tap_side'] != const.REVERSE_TAP_SIDE.get(
+                flow['tap_side'], ""):
+            continue
+        # trace_id 必须有交集
+        if not set(flow['trace_id']) & set(flows[i]['trace_id']):
+            continue
+
+        # 上面所有校验都过了，允许合并
+        flows[i]['type'] = L7_FLOW_TYPE_SESSION
+        for key in flow.keys():
+            if key == '_id':
+                flows[i][key].extend(flow[key])
+            elif not flows[i].get(key):
+                flows[i][key] = flow[key]
+        if flows[i]['end_time_us'] < flow['end_time_us']:
+            flows[i]['end_time_us'] = flow['end_time_us']
+            flows[i]['resp_tcp_seq'] = flow['resp_tcp_seq']
+            flows[i]['syscall_cap_seq_1'] = flow['syscall_cap_seq_1']
+
+            flows[i]['response_duration'] = flows[i]['end_time_us'] - flows[i][
+                'start_time_us']
+        return True
+    return False
 
 
 def merge_flow(flows: list, flow: dict) -> bool:
@@ -2474,7 +2540,7 @@ def merge_flow(flows: list, flow: dict) -> bool:
 
     # for special case: DNS sys span
     is_sys_span = flow['tap_side'] in [
-        TAP_SIDE_SERVER_PROCESS, TAP_SIDE_CLIENT_PROCESS
+        const.TAP_SIDE_SERVER_PROCESS, const.TAP_SIDE_CLIENT_PROCESS
     ]
     is_dns_sys_span = flow['l7_protocol'] == L7_PROTOCOL_DNS and is_sys_span
     # 这里仅要求 frame 合并到会话中，只过滤 duration=0
@@ -2615,6 +2681,9 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 flow[key] = value
         if merge_flow(flows, flow):  # 合并单向Flow为会话
             continue
+        # 合并异步 flow 为会话
+        if merge_async_flow(flows, flow):
+            continue
         flow['_index'] = len(flows)  # assert '_index' not in flow
         flow['_querier_region'] = dict_flows['_querier_region'][
             index]  # set _querier_region for multi-region
@@ -2658,7 +2727,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         span: SpanNode = None
         if flow['signal_source'] == L7_FLOW_SIGNAL_SOURCE_EBPF:
             span = SysSpanNode(flow)
-            if span.tap_side == TAP_SIDE_SERVER_PROCESS:
+            if span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
                 server_sys_spans.append(span)
             else:
                 client_sys_spans.append(span)
@@ -2707,7 +2776,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
         host_clock_offset_us, network_delay_us, trace_infos,
         host_clock_corrector.calculate_host_clock_correction)
 
-    ### Process Span Set 分离
+    # Process Span Set 分离
     process_span_list = [
         pss for _, process_span_sets in process_span_map.items()
         for pss in process_span_sets
@@ -3029,7 +3098,7 @@ def _build_network_span_set(
             network.append_span_node(flow_index_to_span[_index])
             flow_aggregated.add(_index)
 
-    ### 网络span排序
+    # 网络span排序
     # 网络 span 按照 tap_side_rank 排序，顺序始终为：c -> 其他 -> s，并按采集器分组排序，同一采集器内按 start_time 排序
     for network in networks:
         network.set_parent_relation(host_clock_offset_us, network_delay_us,
@@ -3854,6 +3923,8 @@ def _get_flow_dict(flow: DataFrame):
         flow.get("origin_trace_id", None),
         "is_tls":
         flow.get("is_tls", None),
+        "is_async":
+        flow.get("is_async", None),
     }
     # 0909: 之前的设计逻辑，要求仅 eBPF 返回这些 tag
     # 取消此逻辑，允许所有 span 返回下列数据，支持前端获取 net span 的 auto_service 等 tag 信息，用于在仅有 net span 场景下计算拓扑图
@@ -3925,7 +3996,7 @@ class HostClockCorrector:
                 child.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL
                 or parent.signal_source == L7_FLOW_SIGNAL_SOURCE_OTEL):
             # 其中一边是 App，不计算
-            if child.tap_side == TAP_SIDE_APP or parent.tap_side == TAP_SIDE_APP:
+            if child.tap_side == const.TAP_SIDE_APP or parent.tap_side == const.TAP_SIDE_APP:
                 return
             # App & Sys Span 即使 agent_id 不一样，也可能是来自同一个 Pod(非本机 agent 接收数据)，这种情况下时延差异纯粹来自于统计，而不是主机误差
             # 对这种情况不应该计算误差，但仅对 App Span 有此逻辑，其他类型的数据时差一定来自主机误差
