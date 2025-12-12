@@ -2492,6 +2492,8 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
             continue
         if flows[i]['vtap_id'] != flow['vtap_id']:
             continue
+        if flows[i]['l7_protocol'] != flow['l7_protocol']:
+            continue
         if flows[i]['tap_side'] != const.REVERSE_TAP_SIDE.get(
                 flow['tap_side'], ""):
             continue
