@@ -2,9 +2,8 @@ import math
 import uuid
 import pandas as pd
 from log import logger
-from typing import List, Dict, Set, Callable
+from typing import List, Dict, Set, Callable, Tuple
 
-from ast import Tuple
 from pandas import DataFrame
 from collections import defaultdict
 from data.querier_client import Querier
@@ -223,11 +222,12 @@ TRACING_SRC_TRACE_ID = "trace_id"
 TRACING_SRC_SYSCALL = "syscall"
 TRACING_SRC_TCP_SEQ = "tcp_seq"
 TRACING_SRC_X_REQ_ID = "x_request_id"
+# 默认不开启 dns 追踪
 TRACING_SRC_DNS = "dns"
 
 DEFAULT_TRACING_SOURCE = [
     TRACING_SRC_TRACE_ID, TRACING_SRC_SYSCALL, TRACING_SRC_TCP_SEQ,
-    TRACING_SRC_X_REQ_ID, TRACING_SRC_DNS
+    TRACING_SRC_X_REQ_ID
 ]
 
 
@@ -282,7 +282,7 @@ class L7FlowTracing(Base):
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
             host_clock_offset_us: int = config.host_clock_offset_us,
-            app_spans_from_api: list = []) -> Tuple(list, list):
+            app_spans_from_api: list = []) -> Tuple[Set, list]:
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
         time_filter: 查询的时间范围过滤条件，SQL表达式
@@ -312,7 +312,7 @@ class L7FlowTracing(Base):
         dataframe_flowmetas = await self.query_flowmetas("1=1", base_filter)
         if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
             # when app_spans_from_api got values from api, return it
-            return [], app_spans_from_api
+            return set(), app_spans_from_api
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
 
         # 用于下一轮迭代，记录元信息
@@ -430,6 +430,7 @@ class L7FlowTracing(Base):
                             # 写入 trace_id_index 时，遇到空 trace_id 有可能会复用 index，导致重复
                             # 于是，这里可能导致误查询，需要额外过滤一下 len(new_trace_id_arr)=0(trace_id='') 的情况
                             new_trace_id_flow_delete_index.append(index)
+
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
