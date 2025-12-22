@@ -2,9 +2,8 @@ import math
 import uuid
 import pandas as pd
 from log import logger
-from typing import List, Dict, Set, Callable
+from typing import List, Dict, Set, Callable, Tuple
 
-from ast import Tuple
 from pandas import DataFrame
 from collections import defaultdict
 from data.querier_client import Querier
@@ -227,7 +226,7 @@ TRACING_SRC_DNS = "dns"
 
 DEFAULT_TRACING_SOURCE = [
     TRACING_SRC_TRACE_ID, TRACING_SRC_SYSCALL, TRACING_SRC_TCP_SEQ,
-    TRACING_SRC_X_REQ_ID, TRACING_SRC_DNS
+    TRACING_SRC_X_REQ_ID
 ]
 
 
@@ -254,11 +253,14 @@ class L7FlowTracing(Base):
             base_filter += f" and signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}"
             max_iteration = 1
         rst = await self.trace_l7_flow(
-            time_filter=time_filter,
             base_filter=base_filter,
+            start_time=self.start_time,
+            end_time=self.end_time,
             max_iteration=max_iteration,
             network_delay_us=network_delay_us,
-            host_clock_offset_us=host_clock_offset_us)
+            host_clock_offset_us=host_clock_offset_us,
+            multiple_trace_iteration_time_range=config.
+            multiple_trace_iteration_time_range)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -277,12 +279,15 @@ class L7FlowTracing(Base):
 
     async def query_and_trace_flowmetas(
             self,
-            time_filter: str,
             base_filter: str,
+            start_time: int,
+            end_time: int,
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
             host_clock_offset_us: int = config.host_clock_offset_us,
-            app_spans_from_api: list = []) -> Tuple(list, list):
+            multiple_trace_iteration_time_range: int = config.
+        multiple_trace_iteration_time_range,
+            app_spans_from_api: list = []) -> Tuple[Set, list, str]:
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
         time_filter: 查询的时间范围过滤条件，SQL表达式
@@ -306,13 +311,15 @@ class L7FlowTracing(Base):
         allowed_trace_ids = set()  # 所有被允许的 trace_id 集合
         visited_trace_ids = set()  # 已访问过的 trace_id 集合
         new_trace_ids_for_next_iteration = set()  # 给下一轮迭代查询用的 trace_id 集合
+        time_filter = f"time>={start_time} AND time<={end_time}"
+        query_start_time, query_end_time = start_time, end_time
 
         # Query1: 先获取 _id 对应的数据
         # don't use timefilter here, querier would extract time from _id (e.g.: id>>32)
         dataframe_flowmetas = await self.query_flowmetas("1=1", base_filter)
         if type(dataframe_flowmetas) != DataFrame or dataframe_flowmetas.empty:
             # when app_spans_from_api got values from api, return it
-            return [], app_spans_from_api
+            return set(), app_spans_from_api, time_filter
         l7_flow_ids = set(dataframe_flowmetas['_id'])  # set(flow._id)
 
         # 用于下一轮迭代，记录元信息
@@ -356,6 +363,9 @@ class L7FlowTracing(Base):
 
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
+            # 做个限制，仅对多 trace_id 场景尝试迭代时间
+            new_iteration_time_required = False
+            time_filter = f"time>={query_start_time} AND time<={query_end_time}"
             # 1. 使用 trace_id 查询
             if new_trace_ids_for_next_iteration and TRACING_SRC_TRACE_ID in config.tracing_source:
                 # 1.1. Call external APM API
@@ -416,6 +426,7 @@ class L7FlowTracing(Base):
                             if new_trace_id.strip()
                         ]
                         if len(new_trace_id_arr) > 1:
+                            new_iteration_time_required = True
                             for new_trace_id in new_trace_id_arr:
                                 if new_trace_id not in visited_trace_ids:
                                     allowed_trace_ids.add(new_trace_id)
@@ -430,12 +441,23 @@ class L7FlowTracing(Base):
                             # 写入 trace_id_index 时，遇到空 trace_id 有可能会复用 index，导致重复
                             # 于是，这里可能导致误查询，需要额外过滤一下 len(new_trace_id_arr)=0(trace_id='') 的情况
                             new_trace_id_flow_delete_index.append(index)
+
                     if new_trace_id_flow_delete_index:
                         new_trace_id_flows = new_trace_id_flows.drop(
                             new_trace_id_flow_delete_index).reset_index(
                                 drop=True)
                     if deleted_trace_ids:
                         log.debug(f"删除的 trace_id 为：{deleted_trace_ids}")
+
+                    # 在每次迭代中，获取到的新数据里，根据 TRACING_SRC 分为几类数据（见 TRACING_SRC_X 枚举）
+                    # 其中，基于 TRACE_ID 找到的关联数据是绝对可信的
+                    # 如果找到了比入口 _id 更大范围的时间，应该基于这个时间范围继续扩大，才能保证找全
+                    # 因此，需要基于新查出来的数据刷新迭代中查询的时间范围
+                    # 其中，start_time 其实是「点击某个 _id 之后，往前推一段范围」
+                    # end_time 其实是「点击某个 _id 之后，往后推一段范围」
+                    if new_iteration_time_required:
+                        query_start_time = query_start_time - multiple_trace_iteration_time_range
+                        query_end_time = query_end_time + multiple_trace_iteration_time_range
 
                     # update dataframe_flowmetas and l7_flow_ids
                     dataframe_flowmetas = self.concat_l7_flow_log_dataframe(
@@ -628,15 +650,19 @@ class L7FlowTracing(Base):
 
             # end of `for i in range(max_iteration)`
 
-        return l7_flow_ids, app_spans_from_external
+        time_filter = f"time>={query_start_time} AND time<={query_end_time}"
+        return l7_flow_ids, app_spans_from_external, time_filter
 
     async def trace_l7_flow(
         self,
-        time_filter: str,
         base_filter: str,
+        start_time: int,
+        end_time: int,
         max_iteration: int = config.max_iteration,
         network_delay_us: int = config.network_delay_us,
         host_clock_offset_us: int = config.host_clock_offset_us,
+        multiple_trace_iteration_time_range: int = config.
+        multiple_trace_iteration_time_range,
         app_spans_from_api: list = [],
         related_map_from_api: defaultdict(inner_defaultdict_int) = None
     ) -> dict:
@@ -651,9 +677,12 @@ class L7FlowTracing(Base):
         network_delay_us: 使用Flowmeta进行流日志匹配的时间偏差容忍度，越大漏报率越低但误报率越高，一般设置为网络时延的最大可能值
         """
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
-        l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
-            time_filter, base_filter, max_iteration, network_delay_us,
-            host_clock_offset_us, app_spans_from_api)
+        # 注意：迭代中，会尝试通过 trace_id 的关联关系更新 start_time/end_time
+        # 这会导致 time_filter 中的时间范围与入参不同，但这是预期行为
+        l7_flow_ids, app_spans_from_external, time_filter = await self.query_and_trace_flowmetas(
+            base_filter, start_time, end_time, max_iteration, network_delay_us,
+            host_clock_offset_us, multiple_trace_iteration_time_range,
+            app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}

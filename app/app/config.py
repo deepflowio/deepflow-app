@@ -26,7 +26,9 @@ class Config(object):
             'call_apm_api_to_supplement_trace', False)
         self.tracing_source = spec.get(
             'tracing_source',
-            ["trace_id", "syscall", "tcp_seq", "x_request_id", "dns"])
+            ["trace_id", "syscall", "tcp_seq", "x_request_id"])
+        self.multiple_trace_iteration_time_range = spec.get(
+            'multiple_trace_iteration_time_range', 180)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
