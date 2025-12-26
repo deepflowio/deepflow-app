@@ -2463,8 +2463,14 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
 
     合并前提：agent_id(vtap_id)+l7_protocol in [websphere_mq, iso8583],is_async=1
     仅 request/response 合并
-    合并规则，基于 trace_id + l7_protocol + reverse(observation_point(tap_side))
-    xxx: 这里隐含了一个前提，即一个 trace_id 只会有一个异步的流
+    合并规则，基于 trace_id + l7_protocol + observation_point(tap_side)
+    其中，对 iso8583 场景，由于是两个 TCP Flow，所以客户端和服务端在请求/响应分别是反向的，要取 reverse(observation_point) 相等
+    而对 WebSphereMQ 场景，由于始终是 A 向 MQ 建连，客户端/服务端角色始终是固定的，所以不需要考虑反向观测点的问题
+
+    xxx:
+    这里对 ISO8583 隐含了一个前提，即一个 trace_id 只会有一个异步的流
+    但对 WebSphereMQ 而言，一个 trace_id 会有两次异步流，分别是两个业务场景
+    所以，额外的，在 WebSphereMQ 协议中，req 携带 MesgID, resp 携带 MesgRefID，它们都会写入到 SpanID 中，因此可以用 SpanID 匹配二者
     """
 
     # 目前仅基于 trace_id 做「相反观测点位置」合并
@@ -2494,11 +2500,19 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
             continue
         if flows[i]['l7_protocol'] != flow['l7_protocol']:
             continue
-        if flows[i]['tap_side'] != const.REVERSE_TAP_SIDE.get(
-                flow['tap_side'], ""):
+        # TODO: 如果 l7_flow_log 增加了 is_reverse 字段，可以直接用该字段判断
+        if flow['l7_protocol'] == L7_PROTOCOL_ISO8583 \
+                and flows[i]['tap_side'] != const.REVERSE_TAP_SIDE.get(flow['tap_side'], ""):
+            continue
+        if flow['l7_protocol'] == L7_PROTOCOL_WEBSPHERE_MQ \
+                and flows[i]['tap_side'] != flow['tap_side']:
             continue
         # trace_id 必须有交集
         if not set(flow['trace_id']) & set(flows[i]['trace_id']):
+            continue
+        # 这里意思是，待合并的两个 flow 任意一个有值时，必须两边相等，才允许合并
+        if (flows[i]['span_id'] or flow['span_id']) \
+                and (flows[i]['span_id'] != flow['span_id']):
             continue
 
         # 上面所有校验都过了，允许合并
