@@ -1177,11 +1177,22 @@ class L7NetworkMeta:
 
     @classmethod
     def flow_field_conflict(cls, lhs: TraceInfo, rhs: TraceInfo) -> bool:
-        # span_id
-        if lhs.trace_id and lhs.span_id and rhs.trace_id and rhs.span_id and (
-                not set(lhs.trace_id) & set(rhs.trace_id)
-                or lhs.span_id != rhs.span_id):
-            return True
+        # 预期是有 trace_id 一定有 span_id，但反过来不一定
+        # xxx: 这里应该提前返回，在可解析协议越来越丰富之后，有不少截断 payload 的情况导致 req_x/resp_x 这些字段不相等
+        # 于是，如果都有 trace_id/span_id 且 tcp_seq 相等（进入了本函数），那下面的信息不用比较了
+        # payload 截断指的是：req_x/endpoint 从 payload 中某个位置获取信息
+        # 在 eBPF 位置获取了完整的包能解析；在 Packet 位置只取到了两个重组成功的 TCP Segment，刚好缺少需要解析的信息，于是解码有缺
+        if lhs.trace_id and rhs.trace_id:
+            if not (set(lhs.trace_id) & set(rhs.trace_id)):
+                return True
+            # trace_id 相等，span_id 也相等或者都为空，返回 False
+            # 其余情况返回 True
+            if not lhs.span_id and not rhs.span_id:
+                return False
+            else:
+                return lhs.span_id != rhs.span_id
+        # end of trace_id compare
+        # 当没有 trace_id 时，才尝试执行一遍完整的比较
 
         is_http2_grpc_and_differ = False
 
