@@ -1177,11 +1177,22 @@ class L7NetworkMeta:
 
     @classmethod
     def flow_field_conflict(cls, lhs: TraceInfo, rhs: TraceInfo) -> bool:
-        # span_id
-        if lhs.trace_id and lhs.span_id and rhs.trace_id and rhs.span_id and (
-                not set(lhs.trace_id) & set(rhs.trace_id)
-                or lhs.span_id != rhs.span_id):
-            return True
+        # 预期是有 trace_id 一定有 span_id，但反过来不一定
+        if lhs.trace_id and rhs.trace_id:
+            # 这里求交集即可
+            if not (set(lhs.trace_id) & set(rhs.trace_id)):
+                return True
+            # 提前返回，如果都有 trace_id/span_id 且 tcp_seq 相等，那下面的信息不用比较了
+            # 注意这里一定是 and，因为没法预期所有位置都解出了 trace_id
+            if lhs.span_id and rhs.span_id:
+                if lhs.span_id != rhs.span_id:
+                    return True
+                else:
+                    return False
+            else:
+                return False
+        # end of trace_id compare
+        # 当没有 trace_id 时，才尝试执行一遍完整的比较
 
         is_http2_grpc_and_differ = False
 
