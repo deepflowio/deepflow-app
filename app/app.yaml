@@ -33,12 +33,18 @@ app:
     allow_multiple_trace_ids_in_tracing_result: false
     # use external apm data to fill trace data, default: false
     call_apm_api_to_supplement_trace: false
-    # source data for tracing, default: all (set to empty means all)
+    # source data for tracing, default: [trace_id, syscall, tcp_seq, x_request_id] (equals to empty)
     # available options: [trace_id, syscall, tcp_seq, x_request_id, dns]
     # each source means one of tracing method enabled
     #   trace_id: global seq through requests
     #   syscall: eBPF tracing through process/threads
     #   tcp_seq: network layer tracing through TCP seq
     #   x_request_id: application layer tracing through X-Request-ID/http header
-    #   dns: DNS protocol tracing through DNS transaction-id (request_id)
+    #   dns: DNS protocol tracing through DNS transaction-id (request_id), IT'S DEFAULT CLOSE, HAS TO BE OPENED EXPLICITLY
     tracing_source: []
+    # when use trace_id/_trace_id_2 iteration to find more trace_ids, we should try our best to find more trace_ids
+    # such request with the same trace_id may hold within a long time, like 5 or more minutes.
+    # but we should not query those data globally due to performance issue.
+    # so, we limit time_range for each time try to find trace_ids.
+    # we will to try search data in [now-range, now+range], unit:s, default: 180s
+    multiple_trace_iteration_time_range: 180
