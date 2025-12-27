@@ -171,6 +171,8 @@ RETURN_FIELDS = list(
         "is_tls",
         # 用于判断是否异步
         "is_async",
+        # 用于判断流是否反转过
+        "is_reversed",
         # 用于 DNS 五元组匹配
         "server_port",
         # 指标信息
@@ -2465,7 +2467,7 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
     仅 request/response 合并
     合并规则，基于 trace_id + l7_protocol + observation_point(tap_side)
     其中，对 iso8583 场景，由于是两个 TCP Flow，所以客户端和服务端在请求/响应分别是反向的，要取 reverse(observation_point) 相等
-    而对 WebSphereMQ 场景，由于始终是 A 向 MQ 建连，客户端/服务端角色始终是固定的，所以不需要考虑反向观测点的问题
+    而对 WebSphereMQ 场景，由于始终是 A 向 MQ 建连，客户端/服务端角色始终是固定的，所以不需要考虑相反观测点的问题（因为请求和响应是一起反向的，两者观测点始终一致）
 
     xxx:
     这里对 ISO8583 隐含了一个前提，即一个 trace_id 只会有一个异步的流
@@ -2500,12 +2502,11 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
             continue
         if flows[i]['l7_protocol'] != flow['l7_protocol']:
             continue
-        # TODO: 如果 l7_flow_log 增加了 is_reverse 字段，可以直接用该字段判断
-        if flow['l7_protocol'] == L7_PROTOCOL_ISO8583 \
+        if flow['is_reversed'] == 0 \
                 and flows[i]['tap_side'] != const.REVERSE_TAP_SIDE.get(flow['tap_side'], ""):
             continue
-        if flow['l7_protocol'] == L7_PROTOCOL_WEBSPHERE_MQ \
-                and flows[i]['tap_side'] != flow['tap_side']:
+        if flow['is_reversed'] == 1 and flows[i]['tap_side'] != flow[
+                'tap_side']:
             continue
         # trace_id 必须有交集
         if not set(flow['trace_id']) & set(flows[i]['trace_id']):
