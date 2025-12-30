@@ -44,7 +44,7 @@ jobs:
           docker version
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           install: true
 
@@ -56,15 +56,19 @@ jobs:
           password: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Build and push deepflow app images
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: app
           push: false
           file: app/Dockerfile_depends
           platforms: linux/amd64
           outputs: type=local,dest=./app/output_amd64
+          # tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-amd64
           cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-amd64
           cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-amd64
+          build-args: |
+            OWNER=${{ github.repository_owner }}
+            IMAGE=${{ env.IMAGE }}
 
       - name: Package code build results
         run: |
@@ -97,7 +101,7 @@ jobs:
           docker version
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           install: true
 
@@ -109,15 +113,19 @@ jobs:
           password: "${{ secrets.GITHUB_TOKEN }}"
 
       - name: Build and push deepflow app images
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: app
           push: false
           file: app/Dockerfile_depends
           platforms: linux/arm64
           outputs: type=local,dest=./app/output_arm64
+          # tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-arm64
           cache-from: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-arm64
           cache-to: type=registry,mode=max,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-cache-arm64
+          build-args: |
+            OWNER=${{ github.repository_owner }}
+            IMAGE=${{ env.IMAGE }}
 
       - name: Package code build results
         run: |
@@ -154,7 +162,7 @@ jobs:
           docker version
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
         with:
           install: true
 
@@ -207,7 +215,7 @@ jobs:
           
 
       - name: Build and push deepflow app images
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: app
           push: true
@@ -219,7 +227,7 @@ jobs:
             "deepflowce/${{ env.IMAGE }}:${{ env.IMAGE_TAG_PREFIX }}"
 
       - name: Build and push deepflow app images to hongkong aliyun
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: app
           push: true
@@ -237,7 +245,7 @@ jobs:
           password: "${{ secrets.REGISTRY_PASS }}"
 
       - name: Build and push deepflow app images to beijing aliyun 
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: app
           push: true 
