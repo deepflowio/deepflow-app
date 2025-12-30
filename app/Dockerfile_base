@@ -1,0 +1,17 @@
+# 构建层
+FROM python:3.8-alpine AS builder
+RUN apk update && \
+    apk upgrade && \
+    apk add --no-cache \
+    gcc \
+    g++ \
+    libc-dev \
+    python3-dev \
+    libpq-dev \
+    mariadb-connector-c-dev \
+    libffi-dev \
+    make \
+    && \
+    pip install --upgrade pip
+
+RUN pip install cffi 
