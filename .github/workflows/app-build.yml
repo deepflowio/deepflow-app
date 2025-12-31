@@ -55,15 +55,6 @@ jobs:
           username: "${{ github.repository_owner }}"
           password: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Build and push deepflow app base builder images
-        uses: docker/build-push-action@v3
-        with:
-          context: app
-          push: true
-          file: app/Dockerfile_base
-          platforms: linux/amd64
-          tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-base-amd64 
-
       - name: Build and push deepflow app images
         uses: docker/build-push-action@v3
         with:
@@ -120,15 +111,6 @@ jobs:
           registry: "ghcr.io"
           username: "${{ github.repository_owner }}"
           password: "${{ secrets.GITHUB_TOKEN }}"
-
-      - name: Build and push deepflow app base builder images
-        uses: docker/build-push-action@v3
-        with:
-          context: app
-          push: true
-          file: app/Dockerfile_base
-          platforms: linux/arm64
-          tags: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE }}:main-base-arm64
 
       - name: Build and push deepflow app images
         uses: docker/build-push-action@v3
