@@ -3744,9 +3744,9 @@ def format_final_result(
     for trace in traces:
         format_selftime(traces, trace, trace.get("childs", []), uid_index_map)
     response['services'] = merge_service(services, traces, uid_index_map)
-    if host_clock_correction is not None:
-        correct_span_time(traces, host_clock_correction, instance_to_agent)
-        response['host_clock_correction'] = host_clock_correction
+    # if host_clock_correction is not None:
+    #     correct_span_time(traces, host_clock_correction, instance_to_agent)
+    #     response['host_clock_correction'] = host_clock_correction
     deepflow_span_ids = {
         trace.get('deepflow_span_id')
         for trace in response.get('tracing', [])
