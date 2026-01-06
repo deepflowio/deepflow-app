@@ -3721,9 +3721,8 @@ def correct_span_time(flows: dict, host_clock_correction: dict,
             # should verify `agent` by instance_to_agent record by Ebpf/Packet signal source
             agent_id = instance_to_agent.get(flow['auto_instance'],
                                              flow['vtap_id'])
-        if host_clock_correction.get(agent_id, 0) != 0:
-            flow['start_time_us'] += host_clock_correction[agent_id]
-            flow['end_time_us'] += host_clock_correction[agent_id]
+        flow['render_start_time_us'] = flow['start_time_us'] + host_clock_correction.get(agent_id, 0)
+        flow['render_end_time_us'] = flow['end_time_us'] + host_clock_correction.get(agent_id, 0)
 
 
 def format_final_result(
