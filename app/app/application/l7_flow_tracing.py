@@ -2504,8 +2504,6 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
             continue
         if not allow_merge_async_flow(flows[i]):
             continue
-        if flows[i]['vtap_id'] != flow['vtap_id']:
-            continue
         if flows[i]['l7_protocol'] != flow['l7_protocol']:
             continue
         if flows[i]['tap_side'] != flow['tap_side']:
