@@ -1685,10 +1685,31 @@ class NetworkSpanSet:
             else:
                 sorted_spans[i].flow['agent_rank'] = 1
 
-        sorted_spans = sorted(
-            sorted_spans,
-            key=lambda x: (x.flow['agent_rank'], -x.flow['response_duration'],
-                           x.flow['start_time_us'], -x.flow['end_time_us']))
+        # 这里如果有客户端进程+服务端进程，一定分布在 tcp_seq 的两端，所以这两个 span 不参与排序
+        # 这里预期一个 TCP_SEQ 内最多只有一个客户端进程，最多只有一个服务端进程 span，但如果发生异常情况，比如请求-响应聚合失败，那么：
+        # 这里也必须兼容【最多两个客户端进程，最多两个服务端进程】在同一个 TCP_SEQ 组的情况
+        # 于是，这里单独对三组数据做独立排序
+        client_processes = []
+        server_processes = []
+        network_spans = []
+
+        for span in sorted_spans:
+            if span.tap_side == const.TAP_SIDE_CLIENT_PROCESS:
+                client_processes.append(span)
+            elif span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
+                server_processes.append(span)
+            else:
+                network_spans.append(span)
+
+        def sorted_func(x):
+            return (x.flow['agent_rank'], -x.flow['response_duration'],
+                    x.flow['start_time_us'], -x.flow['end_time_us'])
+
+        client_processes = sorted(client_processes, key=sorted_func)
+        network_spans = sorted(network_spans, key=sorted_func)
+        server_processes = sorted(server_processes, key=sorted_func)
+
+        sorted_spans = client_processes + network_spans + server_processes
 
         # 当 ingress_agent=egress_agent 时
         # 如果中间穿过了其他节点数据，需要将所有 server-side span 排序到末尾
@@ -1807,6 +1828,27 @@ class SpanNode:
             covered = self.flow['start_time_us'] <= other_sys_span.flow[
                 'start_time_us'] and self.flow['response_duration'] == 0
         return covered
+
+    def time_full_before(self,
+                         other_sys_span: 'SpanNode',
+                         allow_lost_resp=False) -> bool:
+        '''
+        这里与上面 time_range_cover 的区别是：这里要求 self 完全在 other_sys_span 之前结束
+        这里其实判断 self.end_time < other.end_time 是为了避免与上述 cover 的场景混淆在一起，因为「覆盖」是更优先的
+        '''
+        before = self.flow['start_time_us'] <= other_sys_span.flow['start_time_us'] \
+                and self.flow['end_time_us'] < other_sys_span.flow['end_time_us']
+        if allow_lost_resp and not before:
+            before = self.flow['start_time_us'] <= other_sys_span.flow['start_time_us'] \
+                    and self.flow['response_duration'] == 0
+        return before
+
+    def time_start_before(self, other_sys_span: 'SpanNode') -> bool:
+        '''
+        这里与上面 time_before 的区别是：这里要求 self 比较 start_time 即可
+        '''
+        return self.flow['start_time_us'] <= other_sys_span.flow[
+            'start_time_us']
 
 
 class AppSpanNode(SpanNode):
@@ -2263,8 +2305,8 @@ class ProcessSpanSet:
                 # process_matched 防错: 避免 auto_instance 匹配到 host 但实际进程不同的情况
                 # time_range_cover: 校验 client_sys_flow 是否落入 s-p 时间范围内
                 # 这里假设 c-p 正常完成，但 s-p 后续有异常导致没有响应，允许时间仅校验一半，对应参数 allow_lost_resp
-                if isinstance(span, SysSpanNode) and \
-                    not (span.process_matched(client_sys_span) and span.time_range_cover(client_sys_span, allow_lost_resp=True)):
+                if isinstance(span, SysSpanNode) and not (span.process_matched(client_sys_span) \
+                   and span.time_range_cover(client_sys_span, allow_lost_resp=True)):
                     return None, ""
 
                 sys_span_matched = x_request_id_match = same_process_trace_match = False
@@ -2306,7 +2348,29 @@ class ProcessSpanSet:
                     # 同一进程下，如果既有 x_request_id 匹配关系，也有 syscall_trace_id 匹配，如果扫描 process_span_set 顺序不同，会导致挂错
                     # 对此类情况，先不要直接追加，应追加到【时间最接近】的一个 process_span_set
                     return span, f"c-p sys-span mounted due to {mounted_info}"
-        return None, ""
+        return None, mounted_info
+
+    def try_attach_client_sys_span_via_preceding_sys_span(
+            self, client_sys_span: SysSpanNode):
+        '''
+        这里与上面 try_attach_client_sys_span_via_sys_span 不同点在于：
+        这里尝试解决「异步」的问题，try_attach_client_sys_span_via_sys_span 处理的是同一进程内，服务端进程覆盖客户端进程的情况
+        这里处理服务端进程不覆盖，且早于客户端进程结束的情况
+        因此，这里的逻辑是纯粹的「推断」逻辑，并非完全可靠的强关联。
+        关联条件：process_id + trace_id + s-p 时间必须小于 c-p
+        '''
+        mounted_info = ""
+        for span in self.spans:
+            if span.tap_side == const.TAP_SIDE_SERVER_PROCESS:
+                if isinstance(span, SysSpanNode) and not (span.process_matched(client_sys_span) \
+                   and span.time_full_before(client_sys_span, allow_lost_resp=True)):
+                    return None, ""
+                same_trace_id_match = self.g_trace_id & set(
+                    client_sys_span.flow["trace_id"])
+                if same_trace_id_match:
+                    mounted_info = "preceding c-p as async span after s-p root by same process/trace_id"
+                    return span, f"c-p sys-span mounted due to {mounted_info}"
+        return None, mounted_info
 
     def try_append_to_client_sys_span_via_sys_span(
             self, client_sys_span: SysSpanNode):
@@ -2356,7 +2420,7 @@ class ProcessSpanSet:
 
             if x_request_id_match or same_process_trace_match:
                 return span, f"s-p sys-span mounted due to {mounted_info}"
-        return None, ""
+        return None, mounted_info
 
     def indirect_attach_client_sys_span_via_sys_span(
             self, server_sys_span: SpanNode,
@@ -2554,6 +2618,9 @@ def merge_flow(flows: list, flow: dict) -> bool:
             L7_PROTOCOL_GRPC, L7_PROTOCOL_HTTP2
     ]:
         return False
+    # 避免在这里错误合并 async flow，直接 return
+    if flow['is_async']:
+        return False
 
     # for special case: DNS sys span
     is_sys_span = flow['tap_side'] in [
@@ -2576,6 +2643,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
     for i in range(len(flows) - 1, -1, -1):
         if flows[i][
                 'type'] != L7_FLOW_TYPE_REQUEST and not allow_merge_type:  # 不满足条件的仅需要合并至 REQUEST
+            continue
+        if flows[i]['is_async']:
             continue
 
         # 通过 vtap_id + flow_id + request_id 匹配到同一个 Request
@@ -2696,6 +2765,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 flow[key] = None
             else:
                 flow[key] = value
+        if flow['l7_protocol'] == L7_PROTOCOL_WEBSPHERE_MQ:
+            pass
         if merge_flow(flows, flow):  # 合并单向Flow为会话
             continue
         # 合并异步 flow 为会话
@@ -3020,6 +3091,26 @@ def _union_sys_spans(
                     target_child = matched_child
                     target_child_info = matched_child_info
 
+        # 上面准确的逻辑执行完之后，执行「推断」的逻辑
+        # 这里的逻辑是，当一个客户端进程找不到时间上覆盖的服务端进程，但找到了一个同进程、同 trace_id 时间提前的服务端进程
+        # 那么，这里认为这个客户端进程是一个异步调用，在服务端进程结束之后仍然没结束，标记父子关系
+        # 如果上面的逻辑找到了 target_parent，这里肯定不用执行了
+        # 这里只对「准确的逻辑」中找不到 target_parent 的情况做补偿处理
+        if target_parent is None:
+            for sp_process_span_set in target_sp_list:
+                matched_parent, mounted_info = sp_process_span_set.try_attach_client_sys_span_via_preceding_sys_span(
+                    span)
+                if matched_parent is not None:
+                    if target_parent is None:
+                        target_parent = matched_parent
+                        target_parent_info = mounted_info
+                    elif matched_parent.flow[
+                            'start_time_us'] > target_parent.flow[
+                                'start_time_us']:
+                        # 在有多个 s-p 都满足匹配条件的情况下，选开始时间最大的(在满足时间覆盖的情况下，这说明此 s-p 最接近 c-p)，它更有可能是直接的【上一跳】
+                        target_parent = matched_parent
+                        target_parent_info = mounted_info
+
         if target_parent is not None:
             target_parent.process_span_set.append_sys_span(span)
             span.set_parent(target_parent, target_parent_info,
@@ -3312,8 +3403,15 @@ def _connect_process_and_networks(
                 or _same_span_set(net_parent, net_child, 'process_span_set'):
                 continue
 
+            # 这里 network tcp match 的情况比较特殊，由于可能有异步七层网关+x_request_id 的场景存在，所以不能判断 time_range_cover
+            # 但依旧可以简单地判断 time_start_before，即对同一个 agent_id，要求 net_parent 开始时间 < net_child 开始时间
+            if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                if net_parent.agent_id == net_child.agent_id and not net_parent.time_start_before(
+                        net_child):
+                    continue
+
             # 由于 x_request_id 没有 parent_id 这类设计，容易发生环路，故 net span 都要根据时延判断先后顺序
-            if (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0())\
+            if (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0()) \
                 or (net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0()) \
                 or (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_1()) \
                 or (net_parent_span_id and net_parent_span_id == net_child.get_span_id()):
@@ -3354,7 +3452,7 @@ def _connect_process_and_networks(
                 if net_child.get_parent_id() >= 0:
                     continue
                 if _same_span_set(net_parent, net_child, 'network_span_set') \
-                    or _same_span_set(net_parent, net_child, 'process_span_set'):
+                   or _same_span_set(net_parent, net_child, 'process_span_set'):
                     continue
                 if net_parent_l7_protocol in [L7_PROTOCOL_HTTP2, L7_PROTOCOL_GRPC] \
                     and net_parent_l7_protocol == net_child.flow['l7_protocol'] \
@@ -3730,8 +3828,10 @@ def correct_span_time(flows: dict, host_clock_correction: dict,
             # should verify `agent` by instance_to_agent record by Ebpf/Packet signal source
             agent_id = instance_to_agent.get(flow['auto_instance'],
                                              flow['vtap_id'])
-        flow['render_start_time_us'] = flow['start_time_us'] + host_clock_correction.get(agent_id, 0)
-        flow['render_end_time_us'] = flow['end_time_us'] + host_clock_correction.get(agent_id, 0)
+        flow['render_start_time_us'] = flow[
+            'start_time_us'] + host_clock_correction.get(agent_id, 0)
+        flow['render_end_time_us'] = flow[
+            'end_time_us'] + host_clock_correction.get(agent_id, 0)
 
 
 def format_final_result(
