@@ -1752,6 +1752,7 @@ class SpanNode:
         self.is_ps_leaf = False
         self.is_net_root = False
         self.is_net_leaf = False
+        self.children_count = 0  # simple mark, only for quick check
 
     def __eq__(self, other: 'SpanNode') -> bool:
         return self.get_flow_index() == other.get_flow_index()
@@ -1767,9 +1768,11 @@ class SpanNode:
         if mounted_callback is not None:
             mounted_callback(self, parent)
         self.parent = parent
+        self.parent.children_count += 1
         _set_parent_mount_info(self.flow, parent.flow, mounted_info)
 
     def detach_parent(self, parent: 'SpanNode'):
+        self.parent.children_count -= 1
         _remove_parent_relate_info(self.flow, parent.flow)
 
     # 为高频访问字段添加 getter 函数，减少出错
@@ -1809,6 +1812,9 @@ class SpanNode:
 
     def get_response_duration(self) -> int:
         return self.flow.get('response_duration', 0)
+
+    def get_start_time(self) -> int:
+        return self.flow.get('start_time_us', 0)
 
     def get_trace_id(self) -> list:
         return self.flow.get('trace_id', [])
@@ -2585,6 +2591,8 @@ def merge_async_flow(flows: list, flow: dict) -> bool:
         for key in flow.keys():
             if key == '_id':
                 flows[i][key].extend(flow[key])
+            elif key == 'trace_id':
+                flows[i][key] = list(set(flows[i][key]) | set(flow[key]))
             elif not flows[i].get(key):
                 flows[i][key] = flow[key]
         if flows[i]['end_time_us'] < flow['end_time_us']:
@@ -2884,7 +2892,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                 process_leaf_list.append(item)
 
     network_leafs = [network.spans[-1] for network in network_span_list]
-    # network_roots = [network.spans[0] for network in network_span_list]
+    network_roots = [network.spans[0] for network in network_span_list]
     # request_id => network_roots
     network_roots_with_req_id = {}
     for network in network_span_list:
@@ -2898,7 +2906,8 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
     # 1. process <-> net, 2. net <-> process, 3. process <-> process, 4. net <-> net
     _connect_process_and_networks(
         process_root_list, process_leaf_list, network_roots_with_req_id,
-        network_leafs, flow_index_to_span, related_flow_index_map,
+        network_leafs, network_roots, flow_index_to_span,
+        related_flow_index_map,
         host_clock_corrector.calculate_host_clock_correction)
 
     return process_span_list, network_span_list, flow_index_to_id0, related_flow_index_map, host_clock_corrector.tidy_host_clock_correction(
@@ -3224,7 +3233,8 @@ def _same_span_set(lhs: SpanNode, rhs: SpanNode, spanset: str) -> bool:
 def _connect_process_and_networks(
         process_roots: List[SpanNode], process_leafs: List[SpanNode],
         network_roots_with_req_id: Dict[int, SpanNode],
-        network_leafs: List[SpanNode], flow_index_to_span: List[SpanNode],
+        network_leafs: List[SpanNode], network_roots: List[SpanNode],
+        flow_index_to_span: List[SpanNode],
         related_flow_index_map: defaultdict(inner_defaultdict_int),
         host_clock_correct_callback: Callable[[SpanNode, SpanNode], None]):
     # 1. process span set 的 leaf 作为 network span set root 的 parent
@@ -3382,7 +3392,7 @@ def _connect_process_and_networks(
 
     # 5. network span set 互相连接
     # relations: child.x_request_id_0 == parent.x_request_id_1/child.span_id = parent.span_id
-    network_match_parent: Dict[int, int] = {}
+    network_match_parent: Dict[int, (int, str)] = {}
     for net_parent in network_leafs:
         net_parent_index = net_parent.get_flow_index()
         net_parent_span_id = net_parent.get_span_id()
@@ -3411,11 +3421,26 @@ def _connect_process_and_networks(
                     continue
 
             # 由于 x_request_id 没有 parent_id 这类设计，容易发生环路，故 net span 都要根据时延判断先后顺序
-            if (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0()) \
-                or (net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0()) \
-                or (net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_1()) \
-                or (net_parent_span_id and net_parent_span_id == net_child.get_span_id()):
+            mounted_info = "net_span mounted due to"
+            any_matched = False
+            if net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_0(
+            ):
+                mounted_info += " x_request_id 1->0"
+                any_matched = True
+            if net_parent_x_request_id_0 and net_parent_x_request_id_0 == net_child.get_x_request_id_0(
+            ):
+                mounted_info += " x_request_id 0->0"
+                any_matched = True
+            if net_parent_x_request_id_1 and net_parent_x_request_id_1 == net_child.get_x_request_id_1(
+            ):
+                mounted_info += " x_request_id 1->1"
+                any_matched = True
+            if net_parent_span_id and net_parent_span_id == net_child.get_span_id(
+            ):
+                mounted_info = " same span_id"
+                any_matched = True
 
+            if any_matched:
                 # 网关注入 x_request_id 的场景: net_parent_x_request_id_1 == net_child.get_x_request_id_0()
                 # 网关透传 x_request_id 或透传 http header 中的 span_id
                 # 要求 parent 的所有 response_duration > child 最大的 response_duration
@@ -3425,13 +3450,17 @@ def _connect_process_and_networks(
                     continue
                 # 这里不要直接设置 parent，如果找到了满足条件的情况，都加入列表待处理
                 if _index not in network_match_parent:
-                    network_match_parent[_index] = net_parent_index
-                elif flow_index_to_span[network_match_parent[_index]].get_response_duration() \
-                    > net_parent_response_duration:
-                    # 根据 `时延最接近` 原则找 parent
-                    # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
-                    # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
-                    network_match_parent[_index] = net_parent_index
+                    network_match_parent[_index] = (net_parent_index,
+                                                    mounted_info)
+                else:
+                    last_parent_index, _ = network_match_parent[_index]
+                    last_matched_parent = flow_index_to_span[last_parent_index]
+                    if last_matched_parent.get_response_duration() > net_parent_response_duration:
+                        # 根据 `时延最接近` 原则找 parent
+                        # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
+                        # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
+                        network_match_parent[_index] = (net_parent_index,
+                                                        mounted_info)
         # end of L7_FLOW_RELATIONSHIP_SPAN_ID and L7_FLOW_RELATION_SHIP_X_REQUEST_ID match
 
         net_parent_request_id = net_parent.get_request_id()
@@ -3461,16 +3490,79 @@ def _connect_process_and_networks(
                         net_parent, "net_span mounted due to grpc request_id",
                         host_clock_correct_callback)
 
-    for child, parent in network_match_parent.items():
+    # 6. 特殊逻辑处理
+    # 这里单独对 [network_span] 进行连接处理，仅处理「指定的协议、具有 trace_id 的场景」
+    # 目前处理：仅对 WebSphereMQ 协议，具有 is_async 标识的 c-s 之间互相连接
+    # 具体场景为：user -> MQ | MQ -> user，是两组逻辑上有关系，但数据上仅有 trace_id 可能有关联的 span
+    # TODO: 这里可以考虑做成配置决定是否执行此逻辑，但需要更多场景支撑再决定如何配置，可能是「支持此处理的协议列表，或一系列条件的组合」
+    for net_parent in network_leafs:
+        if net_parent.flow['l7_protocol'] != L7_PROTOCOL_WEBSPHERE_MQ:
+            continue
+        if not net_parent.flow['is_async']:
+            continue
+        # 在这个场景下，一定是 c-s 1:1对应，不可能存在多个请求，简单排除下
+        if net_parent.children_count > 0:
+            continue
+        if not net_parent.tap_side.startswith('c'):
+            continue
+        # 只能基于 trace_id 做交集判断
+        net_parent_trace_id = net_parent.get_trace_id()
+        if not net_parent_trace_id:
+            continue
+        net_parent_index = net_parent.get_flow_index()
+        net_parent_start_time = net_parent.get_start_time()
+        # 由于这里的关联关系是 trace_id，等于没有任何关联关系，因此实际上是「硬挂」的
+        # XXX: 这里做 O(n2) 遍历需要考虑下性能
+        for net_child in network_roots:
+            net_child_index = net_child.get_flow_index()
+            if net_parent_index == net_child_index:
+                continue
+            if net_child.flow['l7_protocol'] != L7_PROTOCOL_WEBSPHERE_MQ:
+                continue
+            if not net_child.flow['is_async']:
+                continue
+            if not net_child.is_net_root:
+                continue
+            if net_child.get_parent_id() >= 0:
+                continue
+            if not net_child.tap_side.startswith('s'):
+                continue
+            if _same_span_set(net_parent, net_child, 'network_span_set') \
+                or _same_span_set(net_parent, net_child, 'process_span_set'):
+                continue
+            net_child_trace_id = net_child.get_trace_id()
+            if not net_child_trace_id:
+                continue
+            if not (set(net_parent_trace_id) & set(net_child_trace_id)):
+                continue
+            # 这里 network tcp match 的情况比较特殊，由于实际上就是异步，所以不能判断 time_range_cover
+            # 但依旧可以简单地判断 time_start_before，即对同一个 agent_id，要求 net_parent 开始时间 < net_child 开始时间
+            if net_parent.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL and net_child.signal_source != L7_FLOW_SIGNAL_SOURCE_OTEL:
+                if net_parent.agent_id == net_child.agent_id and not net_parent.time_start_before(
+                        net_child):
+                    continue
+            if net_child_index not in network_match_parent:
+                network_match_parent[net_child_index] = (
+                    net_parent_index,
+                    "net_span mounted due to webspheremq async trace_id")
+            else:
+                last_parent_index, last_mounted_info = network_match_parent[net_child_index]
+                last_matched_parent = flow_index_to_span[last_parent_index]
+                if last_matched_parent.get_start_time() < net_parent_start_time:
+                    # 如果有多个符合，直接取开始时间最大的，即最接近的
+                    # 这里的 mounted_info 是固定的，直接复用即可
+                    network_match_parent[net_child_index] = (net_parent_index,
+                                                             last_mounted_info)
+
+    for child, (parent, mounted_info) in network_match_parent.items():
         # FIXME: 生成一个 pseudo net span，待前端修改后再开放此代码，注意处理时延计算
         # fake_pss = _generate_pseudo_process_span_set(flow_index_to_span[child],
         #                                              flow_index_to_span[parent])
         # process_span_list.append(fake_pss)
         # flows.extend(fake_pss.spans)
-        flow_index_to_span[child].set_parent(
-            flow_index_to_span[parent],
-            "net_span mounted due to x_request_id or span_id passed",
-            host_clock_correct_callback)
+        flow_index_to_span[child].set_parent(flow_index_to_span[parent],
+                                             mounted_info,
+                                             host_clock_correct_callback)
 
 
 def format_trace(services: List[ProcessSpanSet],
@@ -3967,6 +4059,10 @@ def _get_flow_dict(flow: DataFrame):
         flow["request_resource"],
         "response_status":
         flow["response_status"],
+        "response_exception":
+        flow["response_exception"],
+        "response_code":
+        flow["response_code"],
         "flow_id":
         str(flow["flow_id"]),
         "request_id":
