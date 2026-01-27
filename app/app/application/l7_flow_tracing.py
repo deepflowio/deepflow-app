@@ -3,6 +3,7 @@ import uuid
 import pandas as pd
 from log import logger
 from typing import List, Dict, Set, Callable, Tuple
+import random
 
 from pandas import DataFrame
 from collections import defaultdict
@@ -15,7 +16,7 @@ from common.const import (HTTP_OK, L7_FLOW_SIGNAL_SOURCE_PACKET,
                           L7_FLOW_SIGNAL_SOURCE_EBPF,
                           L7_FLOW_SIGNAL_SOURCE_OTEL)
 from common.disjoint_set import DisjointSet
-from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
+# from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 
 log = logger.getLogger(__name__)
 
@@ -3498,8 +3499,10 @@ def format_trace(services: List[ProcessSpanSet],
         for span in network.spans:
             if span.signal_source == L7_FLOW_SIGNAL_SOURCE_EBPF:
                 continue
+            direct_flow_span_id = generate_span_id(
+            ) if not network.span_id else network.span_id
             id_map[span.get_flow_index(
-            )] = f"{network.span_id}.{span.tap_side}.{span.get_flow_index()}"
+            )] = f"{direct_flow_span_id}.{span.tap_side}.{span.get_flow_index()}"
             response["tracing"].append(_get_flow_dict(span.flow))
 
     for trace in response["tracing"]:
@@ -3869,7 +3872,113 @@ def format_final_result(
         # 理论上只要经过了 _get_flow_dict 的数据一定有这个 key，但还是必须做防护避免报错
         trace['trace_id'] = trace.get('origin_trace_id', '')
         trace.pop('origin_trace_id', None)
+    construct_pseudo_root(traces)
     return response
+
+
+def construct_pseudo_root(traces):
+    """
+    construct_pseudo_root
+
+    对多 root 的追踪结果，构建一个 pseudo root span
+    需要补充的字段:
+    _id, ids, signal_source, related_ids, type, childs, parent_id,
+    start_time_us, end_time_us, render_start_time_us, render_end_time_us, duration,
+    tap_side(observation_point), Enum(tap_side), l7_protocol, Enum(l7_protocol), l7_protocol_str,
+    request_type, request_resource, endpoint, response_status,
+    flow_id, request_id, x_request_id_0, x_request_id_1,
+    trace_id, span_id, parent_span_id,
+    req_tcp_seq, resp_tcp_seq, syscall_trace_id_request, syscall_trace_id_response,
+    syscall_cap_seq_0, syscall_cap_seq_1,
+    attribute, process_id, vtap_id(agent_id), service_uid, service_uname,
+    app_service, app_instance,
+    tap_port(capture_nic), tap_port_name(capture_nic_name), tap(capture_network_type), tap_id(capture_network_id),
+    resource_from_vtap, set_parent_info,
+    auto_instance, auto_instance_id, auto_instance_type,
+    auto_service, auto_service_id, auto_service_type, ip
+    querier_region, deepflow_span_id, deepflow_parent_span_id,
+
+    :param traces: format_final_result() 的 response.get('tracing', [])
+    """
+    roots = []
+    for trace in traces:
+        if trace['parent_id'] == -1:
+            roots.append(trace)
+    if len(roots) < 2:
+        return
+
+    max_id = max(traces, key=lambda x: x['id'])["id"]
+    min_start_time = min(roots,
+                         key=lambda x: x['start_time_us'])["start_time_us"]
+    max_end_time = max(roots, key=lambda x: x['end_time_us'])["end_time_us"]
+    duration = max_end_time - min_start_time
+
+    # 虚拟 root 要获取 root 的观测点来确定观测点，并取反
+    # 一般而言，在正常场景下断开的火焰图中，span 的观测点都是一致的，期望都是 s-p 或都是 s
+    # 但是，如果真的有不一致的情况，(无论是什么原因)，这里的优先级是：packet > ebpf > app
+    has_ebpf_root = False
+    has_packet_root = False
+    has_app_root = False
+    for root in roots:
+        if has_packet_root and has_ebpf_root and has_app_root:
+            break
+        if root['signal_source'] == L7_FLOW_SIGNAL_SOURCE_PACKET:
+            has_packet_root = True
+        elif root['signal_source'] == L7_FLOW_SIGNAL_SOURCE_EBPF:
+            has_ebpf_root = True
+        elif root['signal_source'] == L7_FLOW_SIGNAL_SOURCE_OTEL:
+            has_app_root = True
+
+    if has_packet_root:
+        signal_source = L7_FLOW_SIGNAL_SOURCE_PACKET
+        observation_point = const.TAP_SIDE_SERVER_NIC
+    elif has_ebpf_root:
+        signal_source = L7_FLOW_SIGNAL_SOURCE_EBPF
+        observation_point = const.TAP_SIDE_SERVER_PROCESS
+    else:
+        signal_source = L7_FLOW_SIGNAL_SOURCE_OTEL
+        observation_point = const.TAP_SIDE_SERVER_PROCESS
+
+    pseudo_root = {
+        "_id": max_id + 1,
+        "_ids": [],
+        "related_ids": [],
+        "type": L7_FLOW_TYPE_SESSION,
+        "childs": [],
+        "parent_id": -1,
+        "start_time_us": min_start_time,
+        "end_time_us": max_end_time,
+        "render_start_time_us": min_start_time,
+        "render_end_time_us": max_end_time,
+        "duration": duration,
+        "signal_source": signal_source,
+        "tap_side": observation_point,
+        "vtap_id": 0,
+        "service_uid": "test",
+        "service_uname": "test",
+        # "app_service": "",
+        # "app_instance": "",
+        "auto_instance": "",
+        "auto_instance_id": 0,
+        "auto_instance_type": 0,
+        "auto_service": "",
+        "auto_service_id": 0,
+        "auto_service_type": 0,
+        # "ip": "",
+        # "querier_region": "",
+        "deepflow_span_id":
+        f"{generate_span_id()}.{observation_point}.{max_id + 1}",
+        "deepflow_parent_span_id": "",
+    }
+
+    for root in roots:
+        root['parent_id'] = pseudo_root['_id']
+        root['set_parent_info'] = "pseudo_root"
+        root['deepflow_parent_span_id'] = pseudo_root['deepflow_span_id']
+        pseudo_root['childs'].append(root['id'])
+
+    traces.append(pseudo_root)
+    return
 
 
 class TraceSort:
@@ -4076,7 +4185,8 @@ def _remove_parent_relate_info(flow: dict, flow_parent: dict):
 
 
 def generate_span_id():
-    return hex(RandomIdGenerator().generate_span_id())
+    return hex(random.getrandbits(64))
+    # return hex(RandomIdGenerator().generate_span_id())
 
 
 def _get_epochsecond(id: int):
