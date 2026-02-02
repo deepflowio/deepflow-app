@@ -175,6 +175,7 @@ RETURN_FIELDS = list(
         # 指标信息
         "response_status",
         "response_duration",
+        "biz_response_code",
         "response_code",
         "response_exception",
         "response_result",
@@ -4061,6 +4062,8 @@ def _get_flow_dict(flow: DataFrame):
         flow["response_status"],
         "response_exception":
         flow["response_exception"],
+        "biz_response_code":
+        flow["biz_response_code"],
         "response_code":
         flow["response_code"],
         "flow_id":
