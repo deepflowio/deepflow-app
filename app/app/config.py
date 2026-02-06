@@ -31,6 +31,8 @@ class Config(object):
         if not isinstance(strategies, list):
             strategies = []
         self.span_set_connection_strategies = strategies
+        self.iteration_expand_time_range = int(
+            spec.get('iteration_expand_time_range', 0))
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
