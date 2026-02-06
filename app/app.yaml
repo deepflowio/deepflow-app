@@ -50,3 +50,9 @@ app:
     #   net_span_c_to_s_via_trace_id: connect a client-side leaf NetSpan to a server-side root NetSpan
     #                                  when they share the same trace_id but have different tcp_seq
     span_set_connection_strategies: []
+    # when in multiple trace_id scenarios, we may miss some data due to time range not in query window
+    # in default, query time range is fixed value from front-end, which is [-1m:+1m]
+    # but in async request-response scenarios, we have no idea how long an async response would be sent after request
+    # it may lead to a missing result
+    # so we use config for extra time range expansion, default: 0, unit: s
+    iteration_expand_time_range: 0
