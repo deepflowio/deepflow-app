@@ -47,9 +47,12 @@ class TracingCompletion(L7FlowTracing):
             for j in range(len(self.app_spans)):
                 if i == j:
                     continue
-                related_map_from_api[self.app_spans[i]['_id']][self.app_spans[j]['_id']] |= L7_FLOW_RELATIONSHIP_SPAN_ID
+                related_map_from_api[self.app_spans[i]['_id']][
+                    self.app_spans[j]['_id']] |= L7_FLOW_RELATIONSHIP_SPAN_ID
         rst = await self.trace_l7_flow(
             time_filter,
+            self.start_time,
+            self.end_time,
             base_filter,
             max_iteration,
             network_delay_us,
