@@ -27,6 +27,8 @@ class Config(object):
         self.tracing_source = spec.get(
             'tracing_source',
             ["trace_id", "syscall", "tcp_seq", "x_request_id"])
+        self.multi_trace_id_query_time_range = spec.get(
+            'multi_trace_id_query_time_range', 300)
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
