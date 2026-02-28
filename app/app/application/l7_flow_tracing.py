@@ -256,6 +256,8 @@ class L7FlowTracing(Base):
             max_iteration = 1
         rst = await self.trace_l7_flow(
             time_filter=time_filter,
+            init_start_time=self.start_time,
+            init_end_time=self.end_time,
             base_filter=base_filter,
             max_iteration=max_iteration,
             network_delay_us=network_delay_us,
@@ -279,6 +281,8 @@ class L7FlowTracing(Base):
     async def query_and_trace_flowmetas(
             self,
             time_filter: str,
+            init_start_time: str,
+            init_end_time: str,
             base_filter: str,
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
@@ -354,6 +358,11 @@ class L7FlowTracing(Base):
             max_iteration = 1
 
         config.tracing_source = config.tracing_source or DEFAULT_TRACING_SOURCE
+        # 注意这个搜索只用于搜索多 trace_id，其他关联搜索(tcp_seq, x_req_id, syscall)不要扩大查询范围
+        if config.multi_trace_id_query_time_range:
+            start_time = self.start_time - config.multi_trace_id_query_time_range
+            end_time = self.end_time + config.multi_trace_id_query_time_range
+            time_filter = f"time>={start_time} AND time<={end_time}"
 
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
@@ -635,6 +644,8 @@ class L7FlowTracing(Base):
     async def trace_l7_flow(
         self,
         time_filter: str,
+        init_start_time: str,
+        init_end_time: str,
         base_filter: str,
         max_iteration: int = config.max_iteration,
         network_delay_us: int = config.network_delay_us,
@@ -654,8 +665,9 @@ class L7FlowTracing(Base):
         """
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
         l7_flow_ids, app_spans_from_external = await self.query_and_trace_flowmetas(
-            time_filter, base_filter, max_iteration, network_delay_us,
-            host_clock_offset_us, app_spans_from_api)
+            time_filter, init_start_time, init_end_time, base_filter,
+            max_iteration, network_delay_us, host_clock_offset_us,
+            app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
@@ -3456,7 +3468,8 @@ def _connect_process_and_networks(
                 else:
                     last_parent_index, _ = network_match_parent[_index]
                     last_matched_parent = flow_index_to_span[last_parent_index]
-                    if last_matched_parent.get_response_duration() > net_parent_response_duration:
+                    if last_matched_parent.get_response_duration(
+                    ) > net_parent_response_duration:
                         # 根据 `时延最接近` 原则找 parent
                         # 即在满足条件的 parent 里找到时延最接近最小的 net_parent，它更有可能是直接的 `上一跳`
                         # network_match_parent[net_child_index] 指向 net_parent 的 _index，从 flow_index_to_span 中取 response_duration
@@ -3547,9 +3560,11 @@ def _connect_process_and_networks(
                     net_parent_index,
                     "net_span mounted due to webspheremq async trace_id")
             else:
-                last_parent_index, last_mounted_info = network_match_parent[net_child_index]
+                last_parent_index, last_mounted_info = network_match_parent[
+                    net_child_index]
                 last_matched_parent = flow_index_to_span[last_parent_index]
-                if last_matched_parent.get_start_time() < net_parent_start_time:
+                if last_matched_parent.get_start_time(
+                ) < net_parent_start_time:
                     # 如果有多个符合，直接取开始时间最大的，即最接近的
                     # 这里的 mounted_info 是固定的，直接复用即可
                     network_match_parent[net_child_index] = (net_parent_index,

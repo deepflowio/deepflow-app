@@ -43,3 +43,8 @@ app:
     #   x_request_id: application layer tracing through X-Request-ID/http header
     #   dns: DNS protocol tracing through DNS transaction-id (request_id), IT'S DISABLED BY DEFAULT, REQUIRED ENABLED MANUALLY IF NEEDED
     tracing_source: []
+    # when use multiple trace_id, we need to get all connected data in result
+    # in default, it may only query a fixed time range for multiple trace_id
+    # but in async request-response scenarios, we have no idea how long an async response would be sent after request
+    # so here we support a config for those scenarios, default: 300, unit: s
+    multi_trace_id_query_time_range: 300
