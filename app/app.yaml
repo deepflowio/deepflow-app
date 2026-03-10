@@ -43,3 +43,10 @@ app:
     #   x_request_id: application layer tracing through X-Request-ID/http header
     #   dns: DNS protocol tracing through DNS transaction-id (request_id), IT'S DISABLED BY DEFAULT, REQUIRED ENABLED MANUALLY IF NEEDED
     tracing_source: []
+    # span_set connection strategies for building span-tree, default: [] (no extra weak connections)
+    # ONLY controls cross span_set connections with WEAK relations(which means maybe incorrect, but better than no connection)
+    # available options: [net_span_c_to_s_via_trace_id]
+    # each strategy enables one type of weak cross span_set connection when strong evidence (tcp_seq/x_request_id/span_id) is absent:
+    #   net_span_c_to_s_via_trace_id: connect a client-side leaf NetSpan to a server-side root NetSpan
+    #                                  when they share the same trace_id but have different tcp_seq
+    span_set_connection_strategies: []

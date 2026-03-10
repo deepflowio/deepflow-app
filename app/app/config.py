@@ -27,6 +27,10 @@ class Config(object):
         self.tracing_source = spec.get(
             'tracing_source',
             ["trace_id", "syscall", "tcp_seq", "x_request_id"])
+        strategies = spec.get('span_set_connection_strategies', [])
+        if not isinstance(strategies, list):
+            strategies = []
+        self.span_set_connection_strategies = strategies
 
     def parse_querier(self, cfg):
         querier = cfg.get('querier', dict())
