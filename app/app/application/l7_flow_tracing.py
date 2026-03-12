@@ -1,6 +1,7 @@
 import math
 import uuid
 import pandas as pd
+import itertools
 from log import logger
 from typing import List, Dict, Set, Callable, Tuple
 
@@ -3493,11 +3494,13 @@ def _connect_process_and_networks(
                         host_clock_correct_callback)
 
     flow_index_to_trace_id_sets: Dict[int, Set] = {}
-    for net_span in network_leafs + network_roots:
-        if not net_span.get_trace_id():
+    for span in itertools.chain(network_leafs, network_roots, process_roots,
+                                process_leafs):
+        if not span.get_trace_id():
             continue
-        flow_index_to_trace_id_sets[net_span.get_flow_index()] = set(
-            net_span.get_trace_id())
+        flow_index_to_trace_id_sets[span.get_flow_index()] = set(
+            span.get_trace_id())
+
     # 6. 特殊逻辑处理
     # 这里单独对 [network_span] 进行连接处理，仅处理「指定的协议、具有 trace_id 的场景」
     # 目前处理：仅对 WebSphereMQ 协议，具有 is_async 标识的 c-s 之间互相连接
@@ -3574,7 +3577,8 @@ def _connect_process_and_networks(
                                              host_clock_correct_callback)
 
     # 在上面的「准确」逻辑执行之后，执行「可能不准确」的逻辑
-    weak_match_parent: Dict[int, int] = {}
+    weak_match_parent: Dict[int, Tuple[int, str]] = {}
+    weak_match_child: Dict[int, int] = {}
 
     # 7. 通过 trace_id 关联：叶子 span（客户端侧，无子节点）→ 根 span（服务端侧，无父节点）
     # 条件：trace_id 有交集，tcp_seq 不同，叶子时延 >= 根时延
@@ -3592,11 +3596,16 @@ def _connect_process_and_networks(
             net_parent_response_duration = net_parent.get_response_duration()
             net_parent_req_tcp_seq = net_parent.get_req_tcp_seq()
             net_parent_resp_tcp_seq = net_parent.get_resp_tcp_seq()
+            net_parent_l7_protocol = net_parent.flow['l7_protocol']
             for net_child in network_roots:
                 if not net_child.is_net_root:
                     continue
                 net_child_index = net_child.get_flow_index()
                 if net_parent_index == net_child_index:
+                    continue
+                # 只允许相同协议做这个匹配
+                net_child_l7_protocol = net_child.flow['l7_protocol']
+                if net_parent_l7_protocol != net_child_l7_protocol:
                     continue
                 if net_child.get_parent_id() >= 0:
                     continue
@@ -3624,20 +3633,98 @@ def _connect_process_and_networks(
                 ):
                     continue
                 if net_child_index not in weak_match_parent:
-                    weak_match_parent[net_child_index] = net_parent_index
+                    weak_match_parent[net_child_index] = (
+                        net_parent_index,
+                        "net_span c->s weakly mounted due to trace_id")
                 else:
-                    last_parent_index = weak_match_parent[net_child_index]
+                    last_parent_index, last_mounted_info = weak_match_parent[
+                        net_child_index]
                     last_matched_parent = flow_index_to_span[last_parent_index]
                     if last_matched_parent.get_response_duration(
                     ) > net_parent_response_duration:
-                        # 取时延最接近（最小满足条件）的 parent
-                        weak_match_parent[net_child_index] = net_parent_index
+                        # 取时延最小（最接近）的 parent
+                        weak_match_parent[net_child_index] = (
+                            net_parent_index, last_mounted_info)
 
-    for child, parent in weak_match_parent.items():
-        flow_index_to_span[child].set_parent(
-            flow_index_to_span[parent],
-            "net_span c->s weakly mounted due to trace_id",
-            host_clock_correct_callback)
+                # 双重校验，对 child 找最接近的 parent，对 parent 也要找最接近的 child
+                if net_parent_index not in weak_match_child:
+                    weak_match_child[net_parent_index] = net_child_index
+                else:
+                    last_child_index = weak_match_child[net_parent_index]
+                    last_matched_child = flow_index_to_span[last_child_index]
+                    if last_matched_child.get_response_duration(
+                    ) < net_child.get_response_duration():
+                        # 取时延最大（最接近）的 child
+                        weak_match_child[net_parent_index] = net_child_index
+
+    # 8. 通过 trace_id 关联：叶子 span（服务端侧 sys span）→ 根 span（客户端侧 sys span）
+    # 条件：trace_id 有交集，在同一个 auto_instance 下，只允许 pod_node/chost 类型（即进程之间关联）
+    # 且限制在一个虚拟机内，必须有时间包含关系
+    # XXX: 本质上，这个连接是对 [process_matched] 函数的一种补充，process_matched 函数只允许同一个 Pod 下跨进程关联
+    # 这里允许「同一个虚拟机下不同进程互相关联」，由于是一种更偏猜测的弱关系，所以没有做到 process_matched 函数内，而是独立地用配置控制
+    if 'sys_span_s_to_c_via_trace_id' in config.span_set_connection_strategies:
+        for ps_parent in process_leafs:
+            if not ps_parent.tap_side.startswith('s'):
+                continue
+            ps_parent_index = ps_parent.get_flow_index()
+            # 这里主要排除「正常」的场景，如果 s 是一个网卡，那么一定有对应的 c 网卡能关联
+            # 所以这里只针对非正常的 s 侧是 s-p/s-app ，然后转给某个同主机的 c 发出请求的情况
+            if ps_parent.signal_source == L7_FLOW_SIGNAL_SOURCE_PACKET:
+                continue
+            if ps_parent.auto_instance is None:
+                continue
+            if ps_parent.auto_instance_type is None or (
+                    ps_parent.auto_instance_type != const.AUTO_INSTANCE_CHOST
+                    and ps_parent.auto_instance_type
+                    != const.AUTO_INSTANCE_POD_NODE):
+                continue
+            ps_parent_trace_id = flow_index_to_trace_id_sets.get(
+                ps_parent_index, set())
+            if not ps_parent_trace_id:
+                continue
+            for ps_child in process_roots:
+                if not ps_child.is_ps_root:
+                    continue
+                ps_child_index = ps_child.get_flow_index()
+                if ps_parent_index == ps_child_index:
+                    continue
+                if ps_child.auto_instance is None or ps_parent.auto_instance != ps_child.auto_instance:
+                    continue
+                if ps_child.auto_instance_type is None or ps_parent.auto_instance_type != ps_child.auto_instance_type:
+                    continue
+                if ps_parent.agent_id == ps_child.agent_id and not ps_parent.time_range_cover(
+                        ps_child):
+                    continue
+                if ps_child.get_parent_id() >= 0:
+                    continue
+                if not ps_child.tap_side.startswith('c'):
+                    continue
+                if _same_span_set(ps_parent, ps_child, 'network_span_set') \
+                    or _same_span_set(ps_parent, ps_child, 'process_span_set'):
+                    continue
+                if not (ps_parent_trace_id & flow_index_to_trace_id_sets.get(
+                        ps_child_index, set())):
+                    continue
+                if ps_child_index not in weak_match_parent:
+                    weak_match_parent[ps_child_index] = (
+                        ps_parent_index,
+                        "sys_span s->c weakly mounted due to trace_id")
+                else:
+                    last_parent_index, last_mounted_info = weak_match_parent[
+                        ps_child_index]
+                    last_matched_parent = flow_index_to_span[last_parent_index]
+                    if last_matched_parent.get_response_duration(
+                    ) > ps_parent.get_response_duration():
+                        weak_match_parent[ps_child_index] = (ps_parent_index,
+                                                             last_mounted_info)
+
+    for child, (parent, mounted_info) in weak_match_parent.items():
+        # none or get child can pass
+        if weak_match_child.get(parent, child) != child:
+            continue
+        flow_index_to_span[child].set_parent(flow_index_to_span[parent],
+                                             mounted_info,
+                                             host_clock_correct_callback)
 
 
 def format_trace(services: List[ProcessSpanSet],
