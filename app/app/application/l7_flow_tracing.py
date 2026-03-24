@@ -3243,6 +3243,10 @@ def _connect_process_and_networks(
         ps_index = ps_parent.get_flow_index()
         ps_span_id = ps_parent.get_span_id()
         ps_response_duration = ps_parent.get_response_duration()
+        # 特殊场景，如果叶子是一个 c-p，且已经有一个 child 时
+        # 由于这个场景底下接一定是 net_child，而一个 c-p 只可能启动一个网络请求，因此这里规避下矛盾
+        if ps_parent.tap_side.startswith("c") and ps_parent.children_count > 0:
+            continue
         for _index, related_types in related_flow_index_map.get(ps_index,
                                                                 {}).items():
             if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
@@ -3280,6 +3284,10 @@ def _connect_process_and_networks(
         net_index = net_parent.get_flow_index()
         net_span_id = net_parent.get_span_id()
         net_response_duration = net_parent.get_response_duration()
+        # 对称校验，一个 s 网卡下只能有一个接收侧 s-p
+        if net_parent.tap_side.startswith(
+                "s") and net_parent.children_count > 0:
+            continue
         for _index, related_types in related_flow_index_map.get(net_index,
                                                                 {}).items():
             if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
@@ -3326,6 +3334,7 @@ def _connect_process_and_networks(
         ps_parent_index = ps_parent.get_flow_index()
         ps_parent_span_id = ps_parent.get_span_id()
         ps_parent_response_duartion = ps_parent.get_response_duration()
+        # 没有校验，因为 c-p 下可能接多个 s-p，s-p 下可能有多个 c-p
         for _index, related_types in related_flow_index_map.get(
                 ps_parent_index, {}).items():
             if related_types & L7_FLOW_RELATIONSHIP_SPAN_ID != L7_FLOW_RELATIONSHIP_SPAN_ID:
