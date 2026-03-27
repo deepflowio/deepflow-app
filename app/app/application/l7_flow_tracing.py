@@ -953,8 +953,14 @@ class TraceInfo:
         # tcp_seq
         self.req_tcp_seq = req_tcp_seq
         self.resp_tcp_seq = resp_tcp_seq
+        # trace_id, possible format: trace_id, trace_id_2
+        if isinstance(trace_id, list):
+            self.trace_id = set(trace_id)
+        elif isinstance(trace_id, str) and trace_id:
+            self.trace_id = {t.strip() for t in trace_id.split(',') if t.strip()}
+        else:
+            self.trace_id = set()
         # span_id
-        self.trace_id = trace_id
         self.span_id = span_id
         self.parent_span_id = parent_span_id
         # x_request_id
@@ -1186,7 +1192,7 @@ class L7NetworkMeta:
         # payload 截断指的是：req_x/endpoint 从 payload 中某个位置获取信息
         # 在 eBPF 位置获取了完整的包能解析；在 Packet 位置只取到了两个重组成功的 TCP Segment，刚好缺少需要解析的信息，于是解码有缺
         if lhs.trace_id and rhs.trace_id:
-            if not (set(lhs.trace_id) & set(rhs.trace_id)):
+            if not (lhs.trace_id & rhs.trace_id):
                 return True
             # trace_id 相等，span_id 也相等或者都为空，返回 False
             # 其余情况返回 True
@@ -1473,8 +1479,9 @@ class L7AppMeta:
         for rti in related_trace_infos:
             if trace_info._id == rti._id:
                 continue
-            if trace_info.trace_id != rti.trace_id:
+            if not (trace_info.trace_id & rti.trace_id):
                 # The span_id of different traces is likely to be the same.
+                # Use intersection to support spans carrying multiple trace_ids.
                 continue
             # span_id
             if trace_info.span_id in [rti.span_id, rti.parent_span_id]:
