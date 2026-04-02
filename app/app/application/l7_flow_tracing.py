@@ -1196,6 +1196,13 @@ class L7NetworkMeta:
                 return lhs.span_id != rhs.span_id
         # end of trace_id compare
         # 当没有 trace_id 时，才尝试执行一遍完整的比较
+        
+        # 临时版本，如果一边有，另一边没有，说明解析有问题
+        # 那后面的也不用比较了，一定是一边有，另一边空，此场景暂未知道根因
+        # 只能先出个临时分支覆盖一下
+        if lhs.trace_id or rhs.trace_id:
+            return False
+        # 这里如果两个都是空，那还是要正经比较一下的，避免真有异常
 
         is_http2_grpc_and_differ = False
 
@@ -1505,6 +1512,7 @@ class NetworkSpanSet:
 
     def __init__(self):
         # 标识 span_id 方便匹配 app-span
+        self.trace_id = []
         self.span_id = None
         # 分组聚合所有 tcp_seq 相同的 flow
         self.spans: List[SpanNode] = []
@@ -1567,8 +1575,14 @@ class NetworkSpanSet:
         将 net-span 与 sys-span 按 tcp_seq 分组
         构造 tcp_seq 分组时已通过 `flow_field_conflict` 函数确保同一组内必是同一个 span_id
         """
+        if not self.trace_id and span.get_trace_id():
+            self.trace_id = span.get_trace_id()
+        if not span.get_trace_id() and self.trace_id:
+            span.flow['trace_id'] = self.trace_id
         if not self.span_id and span.get_span_id():
             self.span_id = span.get_span_id()
+        if not span.get_span_id() and self.span_id:
+            span.flow['span_id'] = self.span_id
         # 标记 span 是否属于同一组 network_span_set，避免在 _connect_process_and_networks 首尾关联产生环路
         span.network_span_set = self
         # 这里有可能写进来的是 SysSpan，需要避免重复设置，避免服务划分错误
