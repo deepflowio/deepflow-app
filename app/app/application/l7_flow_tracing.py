@@ -255,12 +255,22 @@ class L7FlowTracing(Base):
         if self.signal_sources == ['otel']:
             base_filter += f" and signal_source={L7_FLOW_SIGNAL_SOURCE_OTEL}"
             max_iteration = 1
+        tracing_sources = self.args.get("tracing_sources",
+                                        config.tracing_source)
+
+        # 避免 value=null
+        if not tracing_sources or len(tracing_sources) == 0:
+            tracing_sources = config.tracing_source
+        if len(tracing_sources) == 0:
+            tracing_sources = DEFAULT_TRACING_SOURCE
+
         rst = await self.trace_l7_flow(
             time_filter=time_filter,
             base_filter=base_filter,
             max_iteration=max_iteration,
             network_delay_us=network_delay_us,
-            host_clock_offset_us=host_clock_offset_us)
+            host_clock_offset_us=host_clock_offset_us,
+            tracing_sources=tracing_sources)
         return self.status, rst, self.failed_regions
 
     async def get_id_by_trace_id(self, trace_id, time_filter):
@@ -284,6 +294,7 @@ class L7FlowTracing(Base):
             max_iteration: int = config.max_iteration,
             network_delay_us: int = config.network_delay_us,
             host_clock_offset_us: int = config.host_clock_offset_us,
+            tracing_sources: List[str] = config.tracing_source,
             app_spans_from_api: list = []) -> Tuple[Set, list, str]:
         """多次迭代，查询可追踪到的所有 l7_flow_log 的摘要
         参数说明：
@@ -359,7 +370,6 @@ class L7FlowTracing(Base):
         if max_iteration == 0:
             max_iteration = 1
 
-        config.tracing_source = config.tracing_source or DEFAULT_TRACING_SOURCE
         # 注意扩大时间范围能力只用于搜索多 trace_id，其他关联搜索(tcp_seq, x_req_id, syscall)不要扩大查询范围
         # 当什么也不配置时，查询范围是 _id 对应的 l7_flow_log 的时间前后各推一分钟，由前端传参决定
         trace_id_time_filter = time_filter
@@ -371,7 +381,7 @@ class L7FlowTracing(Base):
         # 进行迭代查询，上限为 config.spec.max_iteration
         for i in range(max_iteration):
             # 1. 使用 trace_id 查询
-            if new_trace_ids_for_next_iteration and TRACING_SRC_TRACE_ID in config.tracing_source:
+            if new_trace_ids_for_next_iteration and TRACING_SRC_TRACE_ID in tracing_sources:
                 # 1.1. Call external APM API
                 if config.call_apm_api_to_supplement_trace:
                     new_app_spans_from_apm = []
@@ -484,7 +494,7 @@ class L7FlowTracing(Base):
 
             # 2. Query by tcp_seq / syscall_trace_id / x_request_id / dns request_id
             new_filters = []
-            if TRACING_SRC_TCP_SEQ in config.tracing_source:
+            if TRACING_SRC_TCP_SEQ in tracing_sources:
                 # 2.1. new tcp_seqs
                 new_req_tcp_seqs = set()  # set(str(req_tcp_seq))
                 new_resp_tcp_seqs = set()  # set(str(resp_tcp_seq))
@@ -507,7 +517,7 @@ class L7FlowTracing(Base):
                         f"resp_tcp_seq IN ({','.join(new_resp_tcp_seqs)})")
                 if tcp_seq_filters:
                     new_filters.append(f"({' OR '.join(tcp_seq_filters)})")
-            if TRACING_SRC_SYSCALL in config.tracing_source:
+            if TRACING_SRC_SYSCALL in tracing_sources:
                 # 2.2. new syscall_trace_ids
                 new_syscall_trace_ids = set()  # set(str(syscall_trace_id))
                 for nsti in build_syscall_trace_ids:
@@ -525,7 +535,7 @@ class L7FlowTracing(Base):
                     )
                     new_filters.append(
                         f"({' OR '.join(syscall_trace_id_filters)})")
-            if TRACING_SRC_X_REQ_ID in config.tracing_source:
+            if TRACING_SRC_X_REQ_ID in tracing_sources:
                 # 2.3. new x_request_ids
                 new_x_request_ids = set()  # set(x_request_id)
                 for nxri in build_x_request_ids:
@@ -546,7 +556,7 @@ class L7FlowTracing(Base):
                     )
                     new_filters.append(
                         f"({' OR '.join(x_request_id_filters)})")
-            if TRACING_SRC_DNS in config.tracing_source:
+            if TRACING_SRC_DNS in tracing_sources:
                 # 2.4. new dns request_ids
                 new_dns_request_ids = set()
                 for ndri in build_request_ids:
@@ -625,6 +635,7 @@ class L7FlowTracing(Base):
                            related_flow_id_map,
                            network_delay_us,
                            host_clock_offset_us,
+                           tracing_sources,
                            fast_check=True,
                            skip_first_n_trace_infos=len(dataframe_flowmetas))
             # 注意上面的 new_flow_remove_indices append 了多次，此处可能去掉的数据有:
@@ -669,6 +680,7 @@ class L7FlowTracing(Base):
         network_delay_us: int = config.network_delay_us,
         host_clock_offset_us: int = config.host_clock_offset_us,
         app_spans_from_api: list = [],
+        tracing_sources: List[str] = config.tracing_source,
         related_map_from_api: defaultdict(inner_defaultdict_int) = None
     ) -> dict:
         """L7 FlowLog 追踪入口
@@ -684,7 +696,7 @@ class L7FlowTracing(Base):
         # 多次迭代，查询到所有相关的 l7_flow_log 摘要
         l7_flow_ids, app_spans_from_external, final_time_filter = await self.query_and_trace_flowmetas(
             time_filter, base_filter, max_iteration, network_delay_us,
-            host_clock_offset_us, app_spans_from_api)
+            host_clock_offset_us, tracing_sources, app_spans_from_api)
 
         if len(l7_flow_ids) == 0 and len(app_spans_from_external) == 0:
             return {}
@@ -714,7 +726,8 @@ class L7FlowTracing(Base):
 
         # 对所有调用日志排序，包含几个动作：排序+合并+分组+设置父子关系
         l7_flows_merged, networks, flow_index_to_id0, related_flow_index_map, host_clock_correction, instance_to_agent = sort_all_flows(
-            l7_flows, network_delay_us, host_clock_offset_us, return_fields)
+            l7_flows, network_delay_us, host_clock_offset_us, tracing_sources,
+            return_fields)
         if related_map_from_api:
             related_flow_index_map.update(related_map_from_api)
         return format_final_result(l7_flows_merged, networks,
@@ -848,6 +861,7 @@ def set_all_relate(trace_infos: list,
                    related_map: defaultdict(inner_defaultdict_int),
                    network_delay_us: int,
                    host_clock_offset_us: int,
+                   tracing_sources: List[str],
                    fast_check: bool = False,
                    skip_first_n_trace_infos: int = 0,
                    network_allow_weak_related: bool = False):
@@ -893,7 +907,7 @@ def set_all_relate(trace_infos: list,
         if ti.syscall_trace_id_response:
             syscall_trace_id_to_trace_infos[ti.syscall_trace_id_response].add(
                 ti)
-        if TRACING_SRC_DNS in config.tracing_source and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
+        if TRACING_SRC_DNS in tracing_sources and ti.l7_protocol == L7_PROTOCOL_DNS and ti.request_id:
             dns_request_id_to_trace_infos[ti.request_id].add(ti)
 
     for ti in trace_infos[skip_first_n_trace_infos:]:
@@ -940,7 +954,7 @@ def set_all_relate(trace_infos: list,
                                                 related_map, fast_check)
         if fast_check and find_related: continue
         # dns request_id
-        if TRACING_SRC_DNS not in config.tracing_source: continue
+        if TRACING_SRC_DNS not in tracing_sources: continue
         related_trace_infos = dns_request_id_to_trace_infos.get(
             ti.request_id, set())
         find_related = L7DnsMeta.set_relate(ti, related_trace_infos,
@@ -2763,7 +2777,8 @@ def merge_flow(flows: list, flow: dict) -> bool:
 
 
 def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
-                   host_clock_offset_us: int, return_fields: list) -> list:
+                   host_clock_offset_us: int, tracing_sources: List[str],
+                   return_fields: list) -> list:
     """对应用流日志排序，用于绘制火焰图。（包含合并逻辑）
 
     1. 根据系统调用追踪信息追踪：
@@ -2841,6 +2856,7 @@ def sort_all_flows(dataframe_flows: DataFrame, network_delay_us: int,
                    related_flow_index_map,
                    network_delay_us,
                    host_clock_offset_us,
+                   tracing_sources,
                    network_allow_weak_related=True)  # XXX: slow function
     # 构建一个 flow._index 到 flow._id(s) 的映射，方便后续 related_flow_index_map 的使用
     flow_index_to_id0 = [0] * len(flows)
