@@ -1211,6 +1211,18 @@ class L7XrequestMeta:
                 find_related = True
                 if fast_check: return True
                 continue
+            if trace_info.x_request_id_1 and trace_info.x_request_id_1 == rti.x_request_id_1:
+                related_map[trace_info._id][
+                    rti._id] |= L7_FLOW_RELATIONSHIP_X_REQUEST_ID
+                find_related = True
+                if fast_check: return True
+                continue
+            if trace_info.x_request_id_0 and trace_info.x_request_id_0 == rti.x_request_id_0:
+                related_map[trace_info._id][
+                    rti._id] |= L7_FLOW_RELATIONSHIP_X_REQUEST_ID
+                find_related = True
+                if fast_check: return True
+                continue
 
         return find_related
 
