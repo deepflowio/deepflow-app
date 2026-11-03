@@ -44,7 +44,7 @@ def format_response(
         ] = status.description if status.description else f"查询数据区域失败：{'，'.join(fail_regions)}"
         result_dict["status"] = const.PARTIAL_RESULT
     result_dict["data"] = response
-    if total:
+    if total is not None:
         result_dict["count"] = total
     if debug:
         debug_info = status.to_querier_debug()
