@@ -24,4 +24,13 @@ class DisjointSet:
         return root_index
 
     def get(self, index: int) -> int:
-        return self._get(index, index)
+        start_index = index
+        path = []
+        while self.disjoint_set[index] not in [-1, index, start_index]:
+            path.append(index)
+            index = self.disjoint_set[index]
+        parent = self.disjoint_set[index]
+        root = parent if parent > 0 else index
+        for child in path:
+            self.disjoint_set[child] = root
+        return root
