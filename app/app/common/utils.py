@@ -41,7 +41,7 @@ def format_response(
     if status_code != 200:
         result_dict[
             "description"
-        ] = status.description if status.description else f"查询数据区域失败：{'，'.join(fail_regions)}"
+        ] = status.description if status.description else f"查询数据区域失败：{'，'.join(fail_regions or [])}"
         result_dict["status"] = const.PARTIAL_RESULT
     result_dict["data"] = response
     if total:
