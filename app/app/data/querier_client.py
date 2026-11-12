@@ -157,7 +157,8 @@ class Querier(object):
         for query in querys:
             if query.host:
                 tasks.append(query.exec())
-        await asyncio.wait(tasks)
+        if tasks:
+            await asyncio.wait(tasks)
         return querys
 
     async def exec_all_clusters(self,
