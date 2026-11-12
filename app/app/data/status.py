@@ -60,6 +60,8 @@ class Status(object):
         return self.status
 
     def to_querier_debug(self):
+        self.status["_QUERY_IDS"] = []
+        self.status["_TSDB_INFO"]["QUERIES"] = []
         if not self.end:
             self.end = time.time()
         self.status["_TSDB_INFO"]["QUERY_TIME"] = self.end - self.start
