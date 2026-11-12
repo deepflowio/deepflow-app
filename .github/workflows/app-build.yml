@@ -228,6 +228,8 @@ jobs:
 
       - name: Build and push deepflow app images to hongkong aliyun
         uses: docker/build-push-action@v3
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
         with:
           context: app
           push: true
@@ -246,6 +248,8 @@ jobs:
 
       - name: Build and push deepflow app images to beijing aliyun 
         uses: docker/build-push-action@v3
+        env:
+          BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
         with:
           context: app
           push: true 
